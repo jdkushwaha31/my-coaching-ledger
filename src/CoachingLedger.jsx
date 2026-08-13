@@ -1,3 +1,68 @@
+// Set your desired password here
+const APP_PASSWORD = "958906"; 
+
+export default function CoachingLedger() {
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return sessionStorage.getItem("ledger_auth") === "true";
+  });
+  const [passInput, setPassInput] = useState("");
+  const [error, setError] = useState(false);
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (passInput === APP_PASSWORD) {
+      sessionStorage.setItem("ledger_auth", "true");
+      setIsAuthenticated(true);
+      setError(false);
+    } else {
+      setError(true);
+    }
+  };
+
+  // If not authenticated, render the lock screen
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: "#12312B", fontFamily: "'Inter', sans-serif" }}>
+        <div className="bg-[#FAF6EC] p-8 rounded-sm shadow-xl max-w-md w-full border-2 border-[#B8862B]">
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B] mb-1 text-center">
+            Batch Ledger
+          </div>
+          <p className="text-xs text-[#9C8F6E] text-center uppercase tracking-wider mb-6" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
+            Restricted Admin Access
+          </p>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-xs uppercase tracking-wider text-[#6E6650] mb-1" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
+                Enter Security Password
+              </label>
+              <input
+                type="password"
+                value={passInput}
+                onChange={(e) => setPassInput(e.target.value)}
+                placeholder="••••••••"
+                className="w-full border rounded-sm px-3 py-2 text-sm bg-white"
+                style={{ borderColor: error ? "#A63D2F" : "#D8CFB8" }}
+                autoFocus
+              />
+              {error && (
+                <p className="text-xs text-[#A63D2F] mt-1 font-medium">Incorrect password. Please try again.</p>
+              )}
+            </div>
+            <button
+              type="submit"
+              className="w-full py-2.5 rounded-sm text-sm font-medium transition-colors"
+              style={{ background: "#12312B", color: "#F4EFDE" }}
+            >
+              Unlock Portal
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // Rest of your main CoachingLedger component code goes here...
+}
 import React, { useState, useEffect, useMemo } from "react";
 import { db } from "./firebase";
 import { 
