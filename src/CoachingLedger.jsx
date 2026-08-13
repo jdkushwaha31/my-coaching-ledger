@@ -1477,3 +1477,127 @@ function ReceiptModal({ deposit, student, totalRemainingDue, onClose }) {
     </Modal>
   );
 }
+// Example of updated student object structure
+const [students, setStudents] = useState([
+  {
+    id: "stu_1",
+    name: "John Doe",
+    status: "Active", // "Active", "Passed Out", "On Break", "Dropped Out"
+    statusHistory: [],
+    // Effective-dated batches
+    batches: [
+      { batchName: "Batch A", startDate: "2026-01-01", endDate: null, status: "Active" }
+    ]
+  }
+]);
+// ====================================================
+// 1. REVERT / UNDO PASSED OUT STATUS
+// ====================================================
+const revertStudentStatus = (studentId, newStatus) => {
+  setStudents(prev => prev.map(student => {
+    if (student.id === studentId) {
+      const historyEntry = {
+        prevStatus: student.status,
+        newStatus: newStatus,
+        date: new Date().toISOString()
+      };
+      return {
+        ...student,
+        status: newStatus,
+        statusHistory: [...(student.statusHistory || []), historyEntry]
+      };
+    }
+    return student;
+  }));
+};
+
+// ====================================================
+// 2. FETCH DUES (SHOWS GAP / ON BREAK STUDENTS TOO)
+// ====================================================
+// Filter invoices by UNPAID status, NOT by student status
+const getUnpaidDuesList = (invoices) => {
+  return invoices.filter(inv => inv.status === 'Unpaid');
+};
+
+// ====================================================
+// 3. MID-YEAR DROPOUT HANDLER
+// ====================================================
+const processDropout = (studentId, dropoutDate, cancelFutureDues) => {
+  setStudents(prev => prev.map(student => {
+    if (student.id === studentId) {
+      // Close active batch entries
+      const updatedBatches = (student.batches || []).map(b => 
+        !b.endDate ? { ...b, endDate: dropoutDate, status: 'Completed' } : b
+      );
+      return {
+        ...student,
+        status: 'Dropped Out',
+        dropoutDate: dropoutDate,
+        batches: updatedBatches
+      };
+    }
+    return student;
+  }));
+
+  // Cancel future unpaid invoices if toggle is checked
+  if (cancelFutureDues) {
+    setInvoices(prev => prev.map(inv => {
+      if (inv.studentId === studentId && inv.status === 'Unpaid' && inv.dueDate > dropoutDate) {
+        return { ...inv, status: 'Cancelled' };
+      }
+      return inv;
+    }));
+  }
+};
+
+// ====================================================
+// 4. BATCH TRANSFER / ADDITION (EFFECTIVE FROM MONTH)
+// ====================================================
+const manageBatch = (studentId, targetBatchName, effectiveDate, actionType) => {
+  // actionType: 'TRANSFER' or 'ADD'
+  setStudents(prev => prev.map(student => {
+    if (student.id === studentId) {
+      let currentBatches = [...(student.batches || [])];
+
+      if (actionType === 'TRANSFER') {
+        // End existing active batch on day prior
+        currentBatches = currentBatches.map(b => 
+          !b.endDate ? { ...b, endDate: effectiveDate, status: 'Transferred' } : b
+        );
+      }
+
+      // Add new batch starting on effective date (e.g. Sept 1)
+      currentBatches.push({
+        batchName: targetBatchName,
+        startDate: effectiveDate,
+        endDate: null,
+        status: 'Active'
+      });
+
+      return { ...student, batches: currentBatches };
+    }
+    return student;
+  }));
+};
+{/* Example Action UI inside Student Card or Row */}
+<div className="student-actions">
+  
+  {/* 1. Undo / Revert Status Controls */}
+  <button onClick={() => revertStudentStatus(student.id, 'Active')}>
+    Undo / Set Active
+  </button>
+  <button onClick={() => revertStudentStatus(student.id, 'On Break')}>
+    Set On Break
+  </button>
+
+  {/* 2. Drop Out Action */}
+  <button onClick={() => processDropout(student.id, '2026-09-01', true)}>
+    Mark Dropped Out
+  </button>
+
+  {/* 3. Batch Transfer starting Sept */}
+  <button onClick={() => manageBatch(student.id, 'Batch B (Sept)', '2026-09-01', 'TRANSFER')}>
+    Switch to Sept Batch
+  </button>
+
+</div>
