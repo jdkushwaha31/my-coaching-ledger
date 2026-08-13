@@ -1,377 +1,803 @@
-import React, { useState, useEffect } from 'react';
-import { db } from './firebase';
-import { collection, onSnapshot, doc, setDoc, deleteDoc } from 'firebase/firestore';
+import React, { useState, useEffect, useMemo } from "react";
+import { db } from "./firebase";
 import { 
-  Users, IndianRupee, TrendingUp, AlertCircle, Plus, Search, 
-  Trash2, CheckCircle2, ChevronRight, LayoutDashboard, UserPlus, 
-  BookOpen, Receipt, RefreshCw, BarChart2, Calendar
-} from 'lucide-react';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+  collection, onSnapshot, doc, setDoc, deleteDoc 
+} from "firebase/firestore";
+import { 
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid 
+} from "recharts";
+import { 
+  LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check 
+} from "lucide-react";
+
+const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');`;
+
+const CLASSES = ["8", "9", "10", "11", "12"];
+const BATCHES = ["Mathematics", "Physics", "Chemistry", "Science", "Normal"];
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function monthKey(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; }
+function monthLabel(key) { 
+  if (!key) return "—";
+  const [y, m] = key.split("-").map(Number); 
+  return `${MONTH_NAMES[m - 1]} ${y}`; 
+}
+function currentMonthKey() { return monthKey(new Date()); }
+function addMonths(key, n) {
+  const [y, m] = key.split("-").map(Number);
+  const d = new Date(y, m - 1 + n, 1);
+  return monthKey(d);
+}
+function monthsBetween(fromKey, toKey) {
+  const out = [];
+  let cur = fromKey;
+  let guard = 0;
+  while (cur <= toKey && guard < 240) { out.push(cur); cur = addMonths(cur, 1); guard++; }
+  return out;
+}
+function fmtINR(n) {
+  const v = Number(n) || 0;
+  return "₹" + v.toLocaleString("en-IN");
+}
+function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
+
+const defaultFeeStructure = () => {
+  const fs = {};
+  CLASSES.forEach((c, i) => {
+    fs[c] = { 1: 800 + i * 100, 2: 1400 + i * 150, 3: 1900 + i * 200 };
+  });
+  return fs;
+};
+
+function Stamp({ text, tone }) {
+  const colors = {
+    paid: { bg: "#EAF1EA", border: "#3F6B52", text: "#2E5240" },
+    due: { bg: "#FBEFE3", border: "#B8862B", text: "#8A6420" },
+    overdue: { bg: "#F7E7E3", border: "#A63D2F", text: "#8A3226" },
+  };
+  const c = colors[tone] || colors.due;
+  return (
+    <span
+      style={{
+        background: c.bg, border: `1.5px solid ${c.border}`, color: c.text,
+        fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", letterSpacing: "0.08em",
+        padding: "2px 8px", borderRadius: "3px", fontWeight: 600, display: "inline-block",
+        transform: "rotate(-1deg)", textTransform: "uppercase"
+      }}
+    >{text}</span>
+  );
+}
+
+function Card({ children, className = "" }) {
+  return (
+    <div className={`bg-white border rounded-sm ${className}`} style={{ borderColor: "#E4DCC5" }}>
+      {children}
+    </div>
+  );
+}
+
+function SectionHeader({ eyebrow, title, action }) {
+  return (
+    <div className="flex items-end justify-between mb-4 pb-3" style={{ borderBottom: "1.5px solid #26231D" }}>
+      <div>
+        {eyebrow && <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", letterSpacing: "0.12em", color: "#9C8F6E" }} className="uppercase mb-1">{eyebrow}</div>}
+        <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-semibold text-[#1B1810]">{title}</h2>
+      </div>
+      {action}
+    </div>
+  );
+}
 
 export default function CoachingLedger() {
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState("dashboard");
   const [students, setStudents] = useState([]);
+  const [feeStructure, setFeeStructure] = useState(defaultFeeStructure());
   const [deposits, setDeposits] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
+  const [showStudentForm, setShowStudentForm] = useState(false);
+  const [showDepositForm, setShowDepositForm] = useState(false);
+  const [editingStudent, setEditingStudent] = useState(null);
 
-  // Form states
-  const [newStudent, setNewStudent] = useState({ name: '', class: '10', batch: 'Mathematics', monthlyFee: '' });
-  const [newDeposit, setNewDeposit] = useState({ studentId: '', amount: '', month: 'August', year: '2026' });
-
-  // Real-time Firestore Sync
+  // Real-time Cloud Sync with Firestore
   useEffect(() => {
-    const unsubStudents = onSnapshot(collection(db, 'students'), (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const unsubStudents = onSnapshot(collection(db, "students"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, status: "active", ...doc.data() }));
       setStudents(data);
-      setLoading(false);
+      setLoaded(true);
     });
 
-    const unsubDeposits = onSnapshot(collection(db, 'deposits'), (snapshot) => {
+    const unsubDeposits = onSnapshot(collection(db, "deposits"), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDeposits(data);
+    });
+
+    const unsubFee = onSnapshot(doc(db, "settings", "feeStructure"), (docSnap) => {
+      if (docSnap.exists()) {
+        setFeeStructure(docSnap.data().matrix);
+      } else {
+        // Initialize if not present
+        setDoc(doc(db, "settings", "feeStructure"), { matrix: defaultFeeStructure() });
+      }
     });
 
     return () => {
       unsubStudents();
       unsubDeposits();
+      unsubFee();
     };
   }, []);
 
-  const handleAddStudent = async (e) => {
-    e.preventDefault();
-    if (!newStudent.name || !newStudent.monthlyFee) return;
-    const id = Date.now().toString();
-    await setDoc(doc(db, 'students', id), {
-      ...newStudent,
-      monthlyFee: Number(newStudent.monthlyFee),
-      joinedDate: new Date().toISOString()
-    });
-    setNewStudent({ name: '', class: '10', batch: 'Mathematics', monthlyFee: '' });
-  };
+  const curMonth = currentMonthKey();
 
-  const handleAddDeposit = async (e) => {
-    e.preventDefault();
-    if (!newDeposit.studentId || !newDeposit.amount) return;
-    const id = Date.now().toString();
-    const student = students.find(s => s.id === newDeposit.studentId);
-    await setDoc(doc(db, 'deposits', id), {
-      ...newDeposit,
-      studentName: student ? student.name : 'Unknown',
-      amount: Number(newDeposit.amount),
-      date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
-    });
-    setNewDeposit({ studentId: '', amount: '', month: 'August', year: '2026' });
-  };
+  // Derived calculations
+  const studentById = useMemo(() => Object.fromEntries(students.map(s => [s.id, s])), [students]);
 
-  const handleDeleteStudent = async (id) => {
-    if (window.confirm('Are you sure you want to delete this student?')) {
-      await deleteDoc(doc(db, 'students', id));
+  function expectedFeeFor(cls, batchCount) {
+    const bc = Math.max(1, Math.min(3, batchCount || 1));
+    return (feeStructure[cls] && feeStructure[cls][bc]) || 0;
+  }
+
+  function batchesForMonth(student, month) {
+    const dep = deposits.filter(d => d.studentId === student.id && d.month === month).slice(-1)[0];
+    if (dep && dep.batches && dep.batches.length) return dep.batches;
+    return student.batches || [];
+  }
+
+  const duesLedger = useMemo(() => {
+    const rows = [];
+    students.forEach(st => {
+      if (!st.admissionMonth) return;
+      const months = monthsBetween(st.admissionMonth, curMonth);
+      months.forEach(m => {
+        const batches = batchesForMonth(st, m);
+        const bc = batches.length || 1;
+        const expected = expectedFeeFor(st.class, bc);
+        const paid = deposits.filter(d => d.studentId === st.id && d.month === m).reduce((a, d) => a + Number(d.amount || 0), 0);
+        const outstanding = Math.max(0, expected - paid);
+        rows.push({ studentId: st.id, name: st.name, cls: st.class, month: m, batches, expected, paid, outstanding, isCurrent: m === curMonth, status: st.status || "active" });
+      });
+    });
+    return rows;
+  }, [students, deposits, feeStructure, curMonth]);
+
+  const studentDuesMap = useMemo(() => {
+    const map = {};
+    duesLedger.forEach(row => {
+      map[row.studentId] = (map[row.studentId] || 0) + row.outstanding;
+    });
+    return map;
+  }, [duesLedger]);
+
+  const activeStudents = useMemo(() => students.filter(s => (s.status || "active") === "active"), [students]);
+  const outstandingRows = useMemo(() => duesLedger.filter(r => r.outstanding > 0).sort((a, b) => a.month < b.month ? -1 : 1), [duesLedger]);
+  const totalOutstanding = useMemo(() => outstandingRows.reduce((a, r) => a + r.outstanding, 0), [outstandingRows]);
+
+  const thisMonthCollected = useMemo(() => deposits.filter(d => d.month === curMonth).reduce((a, d) => a + Number(d.amount || 0), 0), [deposits, curMonth]);
+  const thisMonthExpected = useMemo(() => duesLedger.filter(r => r.month === curMonth && r.status === "active").reduce((a, r) => a + r.expected, 0), [duesLedger, curMonth]);
+
+  const trend = useMemo(() => {
+    const start = addMonths(curMonth, -5);
+    const months = monthsBetween(start, curMonth);
+    return months.map(m => ({
+      month: monthLabel(m).split(" ")[0],
+      collected: deposits.filter(d => d.month === m).reduce((a, d) => a + Number(d.amount || 0), 0),
+    }));
+  }, [deposits, curMonth]);
+
+  const batchStrength = useMemo(() => {
+    const counts = Object.fromEntries(BATCHES.map(b => [b, 0]));
+    activeStudents.forEach(s => (s.batches || []).forEach(b => { if (counts[b] !== undefined) counts[b]++; }));
+    return counts;
+  }, [activeStudents]);
+
+  const classStrength = useMemo(() => {
+    const counts = Object.fromEntries(CLASSES.map(c => [c, 0]));
+    activeStudents.forEach(s => { if (counts[s.class] !== undefined) counts[s.class]++; });
+    return counts;
+  }, [activeStudents]);
+
+  const recentDeposits = useMemo(() => [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8), [deposits]);
+
+  // Cloud Actions
+  async function saveStudent(data) {
+    const id = data.id || uid();
+    await setDoc(doc(db, "students", id), { ...data, id });
+    setShowStudentForm(false);
+    setEditingStudent(null);
+  }
+
+  async function updateStudentStatus(id, newStatus) {
+    const st = students.find(s => s.id === id);
+    if (st) {
+      await setDoc(doc(db, "students", id), { ...st, status: newStatus });
     }
-  };
+  }
 
-  // Calculations
-  const totalCollected = deposits.reduce((sum, d) => sum + d.amount, 0);
-  const totalExpected = students.reduce((sum, s) => sum + s.monthlyFee, 0);
-  const totalDues = Math.max(0, totalExpected - totalCollected);
-  const collectionRate = totalExpected > 0 ? Math.round((totalCollected / totalExpected) * 100) : 0;
+  async function removeStudent(id) {
+    if (window.confirm("Are you sure you want to remove this student?")) {
+      await deleteDoc(doc(db, "students", id));
+    }
+  }
 
-  // Chart Data Preparation
-  const chartData = [
-    { month: 'Mar', amount: totalCollected * 0.4 },
-    { month: 'Apr', amount: totalCollected * 0.6 },
-    { month: 'May', amount: totalCollected * 0.5 },
-    { month: 'Jun', amount: totalCollected * 0.8 },
-    { month: 'Jul', amount: totalCollected * 0.9 },
-    { month: 'Aug', amount: totalCollected },
+  async function saveFeeStructure(updatedMatrix) {
+    setFeeStructure(updatedMatrix);
+    await setDoc(doc(db, "settings", "feeStructure"), { matrix: updatedMatrix });
+  }
+
+  async function saveDeposit(data) {
+    const id = uid();
+    await setDoc(doc(db, "deposits", id), { ...data, id });
+    setShowDepositForm(false);
+  }
+
+  async function removeDeposit(id) {
+    await deleteDoc(doc(db, "deposits", id));
+  }
+
+  if (!loaded) {
+    return <div className="min-h-screen flex items-center justify-center" style={{ background: "#FAF6EC", fontFamily: "'IBM Plex Mono', monospace", color: "#8A6420" }}>Connecting to Cloud Database…</div>;
+  }
+
+  const navItems = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutGrid },
+    { id: "students", label: "Students", icon: Users },
+    { id: "structure", label: "Fee Structure", icon: Wallet },
+    { id: "deposits", label: "Deposits", icon: Receipt },
+    { id: "dues", label: "Dues", icon: AlertCircle },
   ];
 
-  const filteredStudents = students.filter(s => 
-    s.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    s.class.includes(searchTerm)
-  );
-
   return (
-    <div className="flex h-screen bg-[#FBF9F1] text-[#2C3E35] font-sans">
-      {/* Sidebar Navigation */}
-      <div className="w-64 bg-[#1A3C34] text-[#E8E4D9] p-6 flex flex-col justify-between shadow-xl">
-        <div>
-          <div className="mb-8">
-            <h1 className="text-2xl font-serif font-bold tracking-wide">Batch Ledger</h1>
-            <p className="text-xs text-[#A3B18A] mt-1 uppercase tracking-wider">Coaching Register</p>
-          </div>
-          <nav className="space-y-1">
-            {[
-              { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-              { id: 'students', label: 'Students', icon: Users },
-              { id: 'fee-structure', label: 'Fee Structure', icon: BookOpen },
-              { id: 'deposits', label: 'Deposits', icon: Receipt },
-              { id: 'dues', label: 'Dues', icon: AlertCircle },
-            ].map((item) => {
-              const Icon = item.icon;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => setActiveTab(item.id)}
-                  className={`flex items-center gap-3 w-full px-4 py-3 rounded-xl text-sm transition-all ${
-                    activeTab === item.id 
-                      ? 'bg-[#2D5A27] text-white font-medium shadow-md' 
-                      : 'hover:bg-[#2C4A3E] text-[#C2C9AD]'
-                  }`}
-                >
-                  <Icon className="w-5 h-5" />
-                  {item.label}
-                </button>
-              );
-            })}
-          </nav>
+    <div className="min-h-screen flex" style={{ background: "#FAF6EC", fontFamily: "'Inter', sans-serif", color: "#26231D" }}>
+      <style>{`${FONT_IMPORT}
+        .ledger-row:nth-child(even) { background: #F5F0E1; }
+        input, select { font-family: 'Inter', sans-serif; }
+        ::selection { background: #B8862B33; }
+      `}</style>
+
+      {/* Sidebar */}
+      <aside className="w-56 shrink-0 flex flex-col" style={{ background: "#12312B" }}>
+        <div className="px-5 pt-6 pb-5" style={{ borderBottom: "1px solid #24473F" }}>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#F4EFDE] leading-tight">Batch<br/>Ledger</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", color: "#8FAE9F" }} className="mt-1 uppercase tracking-wider">Coaching Register</div>
         </div>
-        <div className="text-xs text-[#A3B18A] flex items-center gap-2">
-          <RefreshCw className="w-3 h-3 animate-spin text-green-400" /> Live Cloud Active
+        <nav className="flex-1 px-3 py-4 space-y-1">
+          {navItems.map(item => {
+            const Icon = item.icon;
+            const active = tab === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setTab(item.id)}
+                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-sm text-sm transition-colors"
+                style={{
+                  background: active ? "#F4EFDE" : "transparent",
+                  color: active ? "#12312B" : "#C9D9CF",
+                  fontWeight: active ? 600 : 500,
+                }}
+              >
+                <Icon size={16} />
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+        <div className="px-4 py-4 text-[11px] leading-relaxed" style={{ color: "#6E9384", borderTop: "1px solid #24473F", fontFamily: "'IBM Plex Mono', monospace" }}>
+          {monthLabel(curMonth)}<br/>
+          <span style={{ color: "#8FAE9F" }}>● live cloud sync</span>
         </div>
+      </aside>
+
+      {/* Main */}
+      <main className="flex-1 px-8 py-7 max-w-6xl">
+        {tab === "dashboard" && (
+          <DashboardTab
+            students={activeStudents} thisMonthCollected={thisMonthCollected} thisMonthExpected={thisMonthExpected}
+            totalOutstanding={totalOutstanding} trend={trend} batchStrength={batchStrength} classStrength={classStrength}
+            recentDeposits={recentDeposits} studentById={studentById} curMonth={curMonth}
+          />
+        )}
+        {tab === "students" && (
+          <StudentsTab
+            students={students}
+            studentDues={studentDuesMap}
+            onAdd={() => { setEditingStudent(null); setShowStudentForm(true); }}
+            onEdit={(s) => { setEditingStudent(s); setShowStudentForm(true); }}
+            onStatusChange={updateStudentStatus}
+            onRemove={removeStudent}
+          />
+        )}
+        {tab === "structure" && (
+          <StructureTab feeStructure={feeStructure} setFeeStructure={saveFeeStructure} />
+        )}
+        {tab === "deposits" && (
+          <DepositsTab deposits={deposits} students={students} onAdd={() => setShowDepositForm(true)} onRemove={removeDeposit}
+            expectedFeeFor={expectedFeeFor} batchesForMonth={batchesForMonth} />
+        )}
+        {tab === "dues" && (
+          <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} />
+        )}
+      </main>
+
+      {showStudentForm && (
+        <StudentFormModal
+          initial={editingStudent}
+          onClose={() => { setShowStudentForm(false); setEditingStudent(null); }}
+          onSave={saveStudent}
+        />
+      )}
+      {showDepositForm && (
+        <DepositFormModal
+          students={students}
+          curMonth={curMonth}
+          expectedFeeFor={expectedFeeFor}
+          onClose={() => setShowDepositForm(false)}
+          onSave={saveDeposit}
+        />
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, sub, tone }) {
+  const toneColor = { good: "#3F6B52", warn: "#B8862B", bad: "#A63D2F", neutral: "#1B1810" }[tone || "neutral"];
+  return (
+    <Card className="p-4">
+      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-2">{label}</div>
+      <div style={{ fontFamily: "'Zilla Slab', serif", color: toneColor }} className="text-3xl font-bold">{value}</div>
+      {sub && <div className="text-xs text-[#9C8F6E] mt-1">{sub}</div>}
+    </Card>
+  );
+}
+
+function DashboardTab({ students, thisMonthCollected, thisMonthExpected, totalOutstanding, trend, batchStrength, classStrength, recentDeposits, studentById, curMonth }) {
+  const collectionRate = thisMonthExpected > 0 ? Math.round((thisMonthCollected / thisMonthExpected) * 100) : 0;
+  return (
+    <div>
+      <SectionHeader eyebrow={monthLabel(curMonth)} title="Summary" />
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        <StatCard label="Active Students" value={students.length} sub={`${CLASSES.filter(c => students.some(s => s.class === c)).length} classes active`} />
+        <StatCard label="Collected this month" value={fmtINR(thisMonthCollected)} sub={`of ${fmtINR(thisMonthExpected)} expected`} tone="good" />
+        <StatCard label="Collection rate" value={`${collectionRate}%`} tone={collectionRate >= 80 ? "good" : collectionRate >= 50 ? "warn" : "bad"} />
+        <StatCard label="Outstanding dues" value={fmtINR(totalOutstanding)} sub="all months, all students" tone={totalOutstanding > 0 ? "bad" : "good"} />
       </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 overflow-y-auto p-8">
-        {loading ? (
-          <div className="flex h-full items-center justify-center">
-            <p className="text-lg text-gray-500">Connecting to Cloud Database...</p>
+      <div className="grid grid-cols-3 gap-5 mb-6">
+        <Card className="col-span-2 p-5">
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Collections — last 6 months</div>
+          <div style={{ height: 220 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={trend} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E4DCC5" vertical={false} />
+                <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#8A7F5F" }} axisLine={{ stroke: "#D8CFB8" }} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: "#8A7F5F" }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${v/1000}k`} />
+                <Tooltip formatter={(v) => fmtINR(v)} contentStyle={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, border: "1px solid #D8CFB8" }} />
+                <Bar dataKey="collected" fill="#3F6B52" radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
-        ) : activeTab === 'dashboard' ? (
-          <div className="space-y-8">
-            <div>
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest">AUG 2026</p>
-              <h2 className="text-3xl font-serif font-bold text-[#1A3C34] mt-1">Summary</h2>
-            </div>
-            
-            {/* Stat Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <div className="bg-white p-5 rounded-xl border border-[#E2DFD2] shadow-sm">
-                <p className="text-xs font-semibold text-gray-400 uppercase">Active Students</p>
-                <p className="text-3xl font-bold text-[#1A3C34] mt-2">{students.length}</p>
-                <p className="text-xs text-gray-400 mt-1">{students.length} classes active</p>
-              </div>
-              <div className="bg-white p-5 rounded-xl border border-[#E2DFD2] shadow-sm">
-                <p className="text-xs font-semibold text-gray-400 uppercase">Collected This Month</p>
-                <p className="text-3xl font-bold text-[#2D5A27] mt-2">₹{totalCollected.toLocaleString()}</p>
-                <p className="text-xs text-gray-400 mt-1">of ₹{totalExpected.toLocaleString()} expected</p>
-              </div>
-              <div className="bg-white p-5 rounded-xl border border-[#E2DFD2] shadow-sm">
-                <p className="text-xs font-semibold text-gray-400 uppercase">Collection Rate</p>
-                <p className="text-3xl font-bold text-[#1A3C34] mt-2">{collectionRate}%</p>
-              </div>
-              <div className="bg-white p-5 rounded-xl border border-[#E2DFD2] shadow-sm">
-                <p className="text-xs font-semibold text-gray-400 uppercase">Outstanding Dues</p>
-                <p className="text-3xl font-bold text-[#A34828] mt-2">₹{totalDues.toLocaleString()}</p>
-                <p className="text-xs text-gray-400 mt-1">all months, all students</p>
-              </div>
-            </div>
-
-            {/* Charts & Class Strength */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-              <div className="lg:col-span-2 bg-white p-6 rounded-xl border border-[#E2DFD2] shadow-sm">
-                <h3 className="text-lg font-bold mb-4 text-[#1A3C34]">Collections — last 6 months</h3>
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={chartData}>
-                      <XAxis dataKey="month" stroke="#A3B18A" />
-                      <YAxis stroke="#A3B18A" />
-                      <Tooltip />
-                      <Area type="monotone" dataKey="amount" stroke="#2D5A27" fill="#E8F0E6" />
-                    </AreaChart>
-                  </ResponsiveContainer>
+        </Card>
+        <Card className="p-5">
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Class strength</div>
+          <div className="space-y-2">
+            {CLASSES.map(c => (
+              <div key={c} className="flex items-center gap-2">
+                <span className="text-xs w-16 text-[#6E6650]">Class {c}</span>
+                <div className="flex-1 bg-[#F0EAD6] rounded-sm h-3 overflow-hidden">
+                  <div style={{ width: `${students.length ? (classStrength[c] / Math.max(...Object.values(classStrength), 1)) * 100 : 0}%`, background: "#12312B" }} className="h-full" />
                 </div>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="text-xs w-6 text-right">{classStrength[c]}</span>
               </div>
+            ))}
+          </div>
+        </Card>
+      </div>
 
-              <div className="bg-white p-6 rounded-xl border border-[#E2DFD2] shadow-sm">
-                <h3 className="text-lg font-bold mb-4 text-[#1A3C34]">Class Strength</h3>
-                <div className="space-y-4">
-                  {['Class 8', 'Class 9', 'Class 10', 'Class 11', 'Class 12'].map((cls) => {
-                    const count = students.filter(s => `Class ${s.class}` === cls || s.class === cls.replace('Class ', '')).length;
-                    return (
-                      <div key={cls} className="flex justify-between items-center">
-                        <span className="text-sm text-gray-600">{cls}</span>
-                        <div className="flex items-center gap-3">
-                          <div className="w-32 bg-[#F4F1E8] h-2 rounded-full overflow-hidden">
-                            <div className="bg-[#1A3C34] h-full" style={{ width: `${Math.min(count * 20, 100)}%` }}></div>
-                          </div>
-                          <span className="text-sm font-bold text-[#1A3C34]">{count}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+      <div className="grid grid-cols-3 gap-5">
+        <Card className="p-5">
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Batch enrollment</div>
+          <div className="space-y-2">
+            {BATCHES.map(b => (
+              <div key={b} className="flex items-center justify-between text-sm">
+                <span className="text-[#4A4636]">{b}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="text-[#1B1810] font-medium">{batchStrength[b]}</span>
               </div>
-            </div>
-
-            {/* Add Student & Record Payment Forms */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              <div className="bg-white p-6 rounded-xl border border-[#E2DFD2] shadow-sm">
-                <h3 className="text-lg font-bold mb-4 text-[#1A3C34] flex items-center gap-2"><UserPlus className="w-5 h-5" /> Add New Student</h3>
-                <form onSubmit={handleAddStudent} className="space-y-4">
-                  <input
-                    type="text"
-                    placeholder="Student Name"
-                    value={newStudent.name}
-                    onChange={(e) => setNewStudent({...newStudent, name: e.target.value})}
-                    className="w-full p-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1A3C34]"
-                  />
-                  <div className="grid grid-cols-2 gap-4">
-                    <input
-                      type="text"
-                      placeholder="Class (e.g. 10)"
-                      value={newStudent.class}
-                      onChange={(e) => setNewStudent({...newStudent, class: e.target.value})}
-                      className="p-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1A3C34]"
-                    />
-                    <input
-                      type="number"
-                      placeholder="Monthly Fee (₹)"
-                      value={newStudent.monthlyFee}
-                      onChange={(e) => setNewStudent({...newStudent, monthlyFee: e.target.value})}
-                      className="p-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1A3C34]"
-                    />
+            ))}
+          </div>
+        </Card>
+        <Card className="col-span-2 p-5">
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Recent deposits</div>
+          {recentDeposits.length === 0 ? (
+            <div className="text-sm text-[#9C8F6E]">No deposits recorded yet.</div>
+          ) : (
+            <div className="space-y-0">
+              {recentDeposits.map(d => {
+                const st = studentById[d.studentId];
+                return (
+                  <div key={d.id} className="flex items-center justify-between py-2 text-sm ledger-row px-2 -mx-2" style={{ borderBottom: "1px solid #EEE7D2" }}>
+                    <div>
+                      <span className="font-medium">{st ? st.name : "Unknown"}</span>
+                      <span className="text-[#9C8F6E] ml-2 text-xs">Class {st ? st.class : "—"} · {monthLabel(d.month)}</span>
+                    </div>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="font-semibold text-[#3F6B52]">{fmtINR(d.amount)}</span>
                   </div>
-                  <button type="submit" className="w-full bg-[#1A3C34] text-white py-3 rounded-lg font-medium hover:bg-[#2C4A3E] transition">Save Student</button>
-                </form>
-              </div>
-
-              <div className="bg-white p-6 rounded-xl border border-[#E2DFD2] shadow-sm">
-                <h3 className="text-lg font-bold mb-4 text-[#1A3C34] flex items-center gap-2"><Receipt className="w-5 h-5" /> Record Fee Payment</h3>
-                <form onSubmit={handleAddDeposit} className="space-y-4">
-                  <select
-                    value={newDeposit.studentId}
-                    onChange={(e) => setNewDeposit({...newDeposit, studentId: e.target.value})}
-                    className="w-full p-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1A3C34]"
-                  >
-                    <option value="">Select Student</option>
-                    {students.map((s) => (
-                      <option key={s.id} value={s.id}>{s.name} (Class {s.class})</option>
-                    ))}
-                  </select>
-                  <input
-                    type="number"
-                    placeholder="Amount Paid (₹)"
-                    value={newDeposit.amount}
-                    onChange={(e) => setNewDeposit({...newDeposit, amount: e.target.value})}
-                    className="w-full p-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#1A3C34]"
-                  />
-                  <button type="submit" className="w-full bg-[#2D5A27] text-white py-3 rounded-lg font-medium hover:bg-[#3d7a36] transition">Record Payment</button>
-                </form>
-              </div>
+                );
+              })}
             </div>
-          </div>
-        ) : activeTab === 'students' ? (
-          <div className="space-y-6">
-            <div className="flex justify-between items-center">
-              <h2 className="text-3xl font-serif font-bold text-[#1A3C34]">Students Directory</h2>
-              <div className="relative w-64">
-                <Search className="w-4 h-4 absolute left-3 top-3.5 text-gray-400" />
-                <input
-                  type="text"
-                  placeholder="Search student..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-9 pr-4 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1A3C34]"
-                />
-              </div>
-            </div>
-
-            <div className="bg-white rounded-xl border border-[#E2DFD2] overflow-hidden shadow-sm">
-              <table className="w-full text-left border-collapse">
-                <thead className="bg-[#F4F1E8]">
-                  <tr>
-                    <th className="p-4 font-semibold text-sm text-[#1A3C34]">Name</th>
-                    <th className="p-4 font-semibold text-sm text-[#1A3C34]">Class</th>
-                    <th className="p-4 font-semibold text-sm text-[#1A3C34]">Subject / Batch</th>
-                    <th className="p-4 font-semibold text-sm text-[#1A3C34]">Monthly Fee</th>
-                    <th className="p-4 font-semibold text-sm text-[#1A3C34]">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredStudents.map((s) => (
-                    <tr key={s.id} className="border-t border-gray-100 hover:bg-[#FAF8F5]">
-                      <td className="p-4 font-medium">{s.name}</td>
-                      <td className="p-4 text-gray-600">Class {s.class}</td>
-                      <td className="p-4 text-gray-600">{s.batch}</td>
-                      <td className="p-4 font-semibold text-[#2D5A27]">₹{s.monthlyFee}</td>
-                      <td className="p-4">
-                        <button onClick={() => handleDeleteStudent(s.id)} className="text-red-500 hover:text-red-700 p-1">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {filteredStudents.length === 0 && (
-                    <tr>
-                      <td colSpan="5" className="text-center p-8 text-gray-400">No students found.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        ) : activeTab === 'fee-structure' ? (
-          <div className="space-y-6">
-            <h2 className="text-3xl font-serif font-bold text-[#1A3C34]">Fee Structure Overview</h2>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {['Class 8-10 (Science/Maths)', 'Class 11-12 (Physics/Chemistry)', 'Competitive Batches'].map((title, i) => (
-                <div key={i} className="bg-white p-6 rounded-xl border border-[#E2DFD2] shadow-sm">
-                  <h3 className="font-bold text-lg text-[#1A3C34] mb-2">{title}</h3>
-                  <p className="text-2xl font-bold text-[#2D5A27] mb-4">₹{(i + 1) * 500} <span className="text-xs font-normal text-gray-400">/ month</span></p>
-                  <ul className="text-xs text-gray-600 space-y-2">
-                    <li>• Daily 1.5 hours interactive session</li>
-                    <li>• Weekly test assessment & ledger updates</li>
-                    <li>• Centralized cloud tracking</li>
-                  </ul>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : activeTab === 'deposits' ? (
-          <div className="space-y-6">
-            <h2 className="text-3xl font-serif font-bold text-[#1A3C34]">Deposit & Payment Ledger</h2>
-            <div className="bg-white rounded-xl border border-[#E2DFD2] overflow-hidden shadow-sm">
-              <table className="w-full text-left border-collapse">
-                <thead className="bg-[#F4F1E8]">
-                  <tr>
-                    <th className="p-4 font-semibold text-sm text-[#1A3C34]">Student Name</th>
-                    <th className="p-4 font-semibold text-sm text-[#1A3C34]">Amount Paid</th>
-                    <th className="p-4 font-semibold text-sm text-[#1A3C34]">Date</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {deposits.map((d) => (
-                    <tr key={d.id} className="border-t border-gray-100 hover:bg-[#FAF8F5]">
-                      <td className="p-4 font-medium">{d.studentName}</td>
-                      <td className="p-4 font-semibold text-[#2D5A27]">₹{d.amount}</td>
-                      <td className="p-4 text-sm text-gray-500">{d.date}</td>
-                    </tr>
-                  ))}
-                  {deposits.length === 0 && (
-                    <tr>
-                      <td colSpan="3" className="text-center p-8 text-gray-400">No deposits recorded yet.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-6">
-            <h2 className="text-3xl font-serif font-bold text-[#1A3C34]">Outstanding Dues</h2>
-            <div className="bg-white rounded-xl border border-[#E2DFD2] p-6 shadow-sm">
-              <div className="flex justify-between items-center mb-6">
-                <div>
-                  <p className="text-sm text-gray-500">Total Pending Dues</p>
-                  <p className="text-3xl font-bold text-[#A34828]">₹{totalDues.toLocaleString()}</p>
-                </div>
-              </div>
-              <p className="text-xs text-gray-500">Dues are calculated based on registered monthly fees minus total recorded deposits.</p>
-            </div>
-          </div>
-        )}
+          )}
+        </Card>
       </div>
     </div>
+  );
+}
+
+function StudentsTab({ students, studentDues, onAdd, onEdit, onStatusChange, onRemove }) {
+  return (
+    <div>
+      <SectionHeader eyebrow="Register" title="Students" action={
+        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Add student
+        </button>
+      } />
+      <Card>
+        {students.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No students yet. Add your first student to begin the register.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Name", "Class", "Batches", "Phone", "Admitted", "Due Fees", "Status", ""].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {students.map(s => {
+                const dueAmount = studentDues[s.id] || 0;
+                const status = s.status || "active";
+                return (
+                  <tr key={s.id} className="ledger-row">
+                    <td className="px-4 py-2.5 font-medium">{s.name}</td>
+                    <td className="px-4 py-2.5">{s.class}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{(s.batches || []).join(", ") || "—"}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{s.phone || "—"}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{s.admissionMonth ? monthLabel(s.admissionMonth) : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: dueAmount > 0 ? "#A63D2F" : "#3F6B52" }}>
+                      {fmtINR(dueAmount)}
+                    </td>
+                    <td className="px-4 py-2.5 text-xs">
+                      <select 
+                        value={status} 
+                        onChange={(e) => onStatusChange(s.id, e.target.value)}
+                        className="text-xs border rounded px-1 py-0.5"
+                        style={{
+                          borderColor: status === "active" ? "#3F6B52" : status === "passed_out" ? "#B8862B" : "#A63D2F",
+                          color: status === "active" ? "#2E5240" : status === "passed_out" ? "#8A6420" : "#8A3226",
+                          background: status === "active" ? "#EAF1EA" : status === "passed_out" ? "#FBEFE3" : "#F7E7E3"
+                        }}
+                      >
+                        <option value="active">Active</option>
+                        <option value="passed_out">Passed Out</option>
+                        <option value="dropped_out">Dropped Out</option>
+                      </select>
+                    </td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
+                      <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function StructureTab({ feeStructure, setFeeStructure }) {
+  function update(cls, count, val) {
+    const updated = { ...feeStructure, [cls]: { ...feeStructure[cls], [count]: Number(val) || 0 } };
+    setFeeStructure(updated);
+  }
+  return (
+    <div>
+      <SectionHeader eyebrow="Package pricing" title="Fee Structure" />
+      <div className="text-sm text-[#6E6650] mb-4">Monthly fee by class and number of batches chosen. Changes update in cloud real-time.</div>
+      <Card>
+        <table className="w-full text-sm">
+          <thead>
+            <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+              <th style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">Class</th>
+              <th style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">1 batch / month</th>
+              <th style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">2 batches / month</th>
+              <th style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">3 batches / month</th>
+            </tr>
+          </thead>
+          <tbody>
+            {CLASSES.map(c => (
+              <tr key={c} className="ledger-row">
+                <td className="px-4 py-2.5 font-medium">Class {c}</td>
+                {[1, 2, 3].map(count => (
+                  <td key={count} className="px-4 py-2">
+                    <div className="flex items-center gap-1">
+                      <span className="text-[#9C8F6E]">₹</span>
+                      <input
+                        type="number"
+                        value={feeStructure[c] ? feeStructure[c][count] : 0}
+                        onChange={(e) => update(c, count, e.target.value)}
+                        style={{ fontFamily: "'IBM Plex Mono', monospace" }}
+                        className="w-24 border rounded-sm px-2 py-1 text-sm"
+                      />
+                    </div>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
+function DepositsTab({ deposits, students, onAdd, onRemove }) {
+  const sorted = useMemo(() => [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || "")), [deposits]);
+  const byId = Object.fromEntries(students.map(s => [s.id, s]));
+  return (
+    <div>
+      <SectionHeader eyebrow="Fee deposits" title="Deposits" action={
+        <button onClick={onAdd} disabled={students.length === 0} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Record deposit
+        </button>
+      } />
+      {students.length === 0 && <div className="text-sm text-[#9C8F6E] mb-3">Add a student first before recording deposits.</div>}
+      <Card>
+        {sorted.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No deposits recorded yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Date", "Student", "Class", "Month", "Batches", "Mode", "Amount", ""].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map(d => {
+                const st = byId[d.studentId];
+                return (
+                  <tr key={d.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{d.date}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5">{st ? st.class : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs">{monthLabel(d.month)}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{(d.batches || []).join(", ")}</td>
+                    <td className="px-4 py-2.5 text-xs">{d.mode}</td>
+                    <td className="px-4 py-2.5 font-semibold text-[#3F6B52]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(d.amount)}</td>
+                    <td className="px-4 py-2.5 text-right"><button onClick={() => onRemove(d.id)} className="text-xs text-[#A63D2F] underline">Delete</button></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function DuesTab({ rows, totalOutstanding }) {
+  return (
+    <div>
+      <SectionHeader eyebrow="Outstanding" title="Dues" />
+      <Card className="p-5 mb-5 flex items-center justify-between" style={{ borderLeft: "4px solid #A63D2F" }}>
+        <div>
+          <div className="text-sm text-[#6E6650]">Total outstanding across all students</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-3xl font-bold text-[#A63D2F]">{fmtINR(totalOutstanding)}</div>
+        </div>
+        <Stamp text={rows.length ? `${rows.length} months pending` : "all clear"} tone={rows.length ? "overdue" : "paid"} />
+      </Card>
+      <Card>
+        {rows.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No pending dues. Every account is settled.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Student", "Class", "Month", "Batches", "Expected", "Paid", "Outstanding", "Status"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} className="ledger-row">
+                  <td className="px-4 py-2.5 font-medium">{r.name}</td>
+                  <td className="px-4 py-2.5">{r.cls}</td>
+                  <td className="px-4 py-2.5 text-xs">{monthLabel(r.month)}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#6E6650]">{r.batches.join(", ") || "—"}</td>
+                  <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.expected)}</td>
+                  <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.paid)}</td>
+                  <td className="px-4 py-2.5 font-semibold text-[#A63D2F]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.outstanding)}</td>
+                  <td className="px-4 py-2.5"><Stamp text={r.isCurrent ? "due" : "overdue"} tone={r.isCurrent ? "due" : "overdue"} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function Modal({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "#12312Bcc" }}>
+      <div className="w-full max-w-lg bg-[#FAF6EC] rounded-sm" style={{ border: "2px dashed #B8862B" }}>
+        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: "1.5px solid #26231D" }}>
+          <h3 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold">{title}</h3>
+          <button onClick={onClose} className="text-[#6E6650]"><X size={18} /></button>
+        </div>
+        <div className="px-6 py-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <div className="mb-3">
+      <label style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", letterSpacing: "0.08em" }} className="block uppercase text-[#9C8F6E] mb-1.5">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+const inputCls = "w-full border rounded-sm px-3 py-2 text-sm bg-white";
+const inputStyle = { borderColor: "#D8CFB8" };
+
+function StudentFormModal({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [cls, setCls] = useState(initial?.class || CLASSES[0]);
+  const [batches, setBatches] = useState(initial?.batches || []);
+  const [phone, setPhone] = useState(initial?.phone || "");
+  const [admissionMonth, setAdmissionMonth] = useState(initial?.admissionMonth || currentMonthKey());
+  const [status, setStatus] = useState(initial?.status || "active");
+
+  function toggleBatch(b) {
+    setBatches(prev => {
+      if (prev.includes(b)) return prev.filter(x => x !== b);
+      if (prev.length >= 3) return prev;
+      return [...prev, b];
+    });
+  }
+
+  function submit() {
+    if (!name.trim()) return;
+    onSave({ id: initial?.id, name: name.trim(), class: cls, batches, phone: phone.trim(), admissionMonth, status });
+  }
+
+  return (
+    <Modal title={initial ? "Edit student" : "Add student"} onClose={onClose}>
+      <Field label="Full name">
+        <input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Ananya Sharma" />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Class">
+          <select className={inputCls} style={inputStyle} value={cls} onChange={e => setCls(e.target.value)}>
+            {CLASSES.map(c => <option key={c} value={c}>Class {c}</option>)}
+          </select>
+        </Field>
+        <Field label="Admitted (month)">
+          <input type="month" className={inputCls} style={inputStyle} value={admissionMonth} onChange={e => setAdmissionMonth(e.target.value)} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Phone">
+          <input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit number" />
+        </Field>
+        <Field label="Status">
+          <select className={inputCls} style={inputStyle} value={status} onChange={e => setStatus(e.target.value)}>
+            <option value="active">Active</option>
+            <option value="passed_out">Passed Out</option>
+            <option value="dropped_out">Dropped Out</option>
+          </select>
+        </Field>
+      </div>
+      <Field label={`Batches (default — pick up to 3, chosen: ${batches.length})`}>
+        <div className="flex flex-wrap gap-2">
+          {BATCHES.map(b => {
+            const active = batches.includes(b);
+            return (
+              <button key={b} type="button" onClick={() => toggleBatch(b)}
+                className="px-3 py-1.5 text-xs rounded-sm border flex items-center gap-1"
+                style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>
+                {active && <Check size={12} />}{b}
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+      <button onClick={submit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        {initial ? "Save changes" : "Add student"}
+      </button>
+    </Modal>
+  );
+}
+
+function DepositFormModal({ students, curMonth, expectedFeeFor, onClose, onSave }) {
+  const [studentId, setStudentId] = useState(students[0]?.id || "");
+  const student = students.find(s => s.id === studentId);
+  const [month, setMonth] = useState(curMonth);
+  const [batches, setBatches] = useState(student?.batches || []);
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [mode, setMode] = useState("Cash");
+
+  useEffect(() => {
+    const s = students.find(x => x.id === studentId);
+    setBatches(s?.batches || []);
+  }, [studentId]);
+
+  function toggleBatch(b) {
+    setBatches(prev => {
+      if (prev.includes(b)) return prev.filter(x => x !== b);
+      if (prev.length >= 3) return prev;
+      return [...prev, b];
+    });
+  }
+
+  const suggested = student ? expectedFeeFor(student.class, batches.length || 1) : 0;
+
+  function submit() {
+    if (!studentId || !amount) return;
+    onSave({ studentId, month, batches, amount: Number(amount), date, mode });
+  }
+
+  return (
+    <Modal title="Record fee deposit" onClose={onClose}>
+      <Field label="Student">
+        <select className={inputCls} style={inputStyle} value={studentId} onChange={e => setStudentId(e.target.value)}>
+          {students.map(s => <option key={s.id} value={s.id}>{s.name} — Class {s.class} ({s.status || "active"})</option>)}
+        </select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="For month">
+          <input type="month" className={inputCls} style={inputStyle} value={month} onChange={e => setMonth(e.target.value)} />
+        </Field>
+        <Field label="Deposit date">
+          <input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} />
+        </Field>
+      </div>
+      <Field label={`Batches this month (${batches.length}/3)`}>
+        <div className="flex flex-wrap gap-2">
+          {BATCHES.map(b => {
+            const active = batches.includes(b);
+            return (
+              <button key={b} type="button" onClick={() => toggleBatch(b)}
+                className="px-3 py-1.5 text-xs rounded-sm border flex items-center gap-1"
+                style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>
+                {active && <Check size={12} />}{b}
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label={`Amount (suggested ${fmtINR(suggested)})`}>
+          <input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder={String(suggested)} />
+        </Field>
+        <Field label="Mode">
+          <select className={inputCls} style={inputStyle} value={mode} onChange={e => setMode(e.target.value)}>
+            <option>Cash</option><option>UPI</option><option>Bank Transfer</option><option>Cheque</option>
+          </select>
+        </Field>
+      </div>
+      <button onClick={submit} disabled={!studentId || !amount} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Record deposit
+      </button>
+    </Modal>
   );
 }
