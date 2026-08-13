@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 
 // Admin Access Password
-const APP_PASSWORD = "admin"; 
+const APP_PASSWORD = "958906"; 
 
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');`;
 
