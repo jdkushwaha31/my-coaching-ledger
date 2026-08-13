@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { db } from "./firebase";
 import { 
   collection, onSnapshot, doc, setDoc, deleteDoc 
@@ -7,7 +7,7 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid 
 } from "recharts";
 import { 
-  LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut, BookOpen, Send, Calendar
+  LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut, BookOpen, Send, Printer
 } from "lucide-react";
 
 // Admin Access Password
@@ -51,6 +51,20 @@ const defaultFeeStructure = (classes) => {
   });
   return fs;
 };
+
+function sendWhatsAppReceipt(deposit, student) {
+  if (!student || !student.phone) {
+    alert("No phone number registered for this student.");
+    return;
+  }
+  const cleanPhone = student.phone.replace(/[^0-9]/g, "");
+  const formattedPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
+  
+  const receiptNo = deposit.id ? deposit.id.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
+  const msg = `*FEE PAYMENT RECEIPT*\n----------------------------------------\n*Receipt No:* #${receiptNo}\n*Date:* ${deposit.date}\n*Student Name:* ${student.name}\n*Class:* ${student.class}\n*For Month:* ${monthLabel(deposit.month)}\n*Batches:* ${(deposit.batches || []).join(", ") || "General"}\n*Payment Mode:* ${deposit.mode || "Cash"}\n----------------------------------------\n*Amount Paid:* ₹${deposit.amount}\n*Status:* PAID ✅\n----------------------------------------\nThank you for the payment!`;
+  
+  window.open(`https://wa.me/${formattedPhone}?text=${encodeURIComponent(msg)}`, "_blank");
+}
 
 function Stamp({ text, tone }) {
   const colors = {
@@ -107,6 +121,7 @@ export default function CoachingLedger() {
   const [showDepositForm, setShowDepositForm] = useState(false);
   const [showClassModal, setShowClassModal] = useState(false);
   const [editingStudent, setEditingStudent] = useState(null);
+  const [receiptData, setReceiptData] = useState(null);
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -215,12 +230,10 @@ export default function CoachingLedger() {
     return student.batches || [];
   }
 
-  // Calculate monthly dues precisely considering Pass-out / Drop-out dates
   const duesLedger = [];
   students.forEach(st => {
     if (!st.admissionMonth) return;
     
-    // Determine last active month
     let lastActiveMonth = curMonth;
     if (st.status !== "active" && st.exitDate) {
       lastActiveMonth = monthKey(new Date(st.exitDate));
@@ -271,7 +284,7 @@ export default function CoachingLedger() {
 
   const recentDeposits = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
 
-  // Firestore actions
+  // Actions
   async function saveStudent(data) {
     const id = data.id || uid();
     await setDoc(doc(db, "students", id), { ...data, id });
@@ -309,8 +322,13 @@ export default function CoachingLedger() {
 
   async function saveDeposit(data) {
     const id = uid();
-    await setDoc(doc(db, "deposits", id), { ...data, id });
+    const newDep = { ...data, id };
+    await setDoc(doc(db, "deposits", id), newDep);
     setShowDepositForm(false);
+    
+    // Auto trigger receipt view for instant print or WhatsApp
+    const st = studentById[data.studentId];
+    setReceiptData({ deposit: newDep, student: st });
   }
 
   async function removeDeposit(id) {
@@ -322,7 +340,7 @@ export default function CoachingLedger() {
     { id: "class_hub", label: "Class & Dues Hub", icon: BookOpen },
     { id: "students", label: "Students Register", icon: Users },
     { id: "structure", label: "Fee Matrix", icon: Wallet },
-    { id: "deposits", label: "Deposits", icon: Receipt },
+    { id: "deposits", label: "Deposits Log", icon: Receipt },
     { id: "dues", label: "Pending Dues", icon: AlertCircle },
   ];
 
@@ -385,6 +403,7 @@ export default function CoachingLedger() {
             students={activeStudents} thisMonthCollected={thisMonthCollected} thisMonthExpected={thisMonthExpected}
             totalOutstanding={totalOutstanding} trend={trend} batchStrength={batchStrength} classStrength={classStrength}
             recentDeposits={recentDeposits} studentById={studentById} curMonth={curMonth} classes={classes}
+            onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
           />
         )}
         {tab === "class_hub" && (
@@ -413,7 +432,13 @@ export default function CoachingLedger() {
           <StructureTab feeStructure={feeStructure} setFeeStructure={saveFeeStructure} classes={classes} />
         )}
         {tab === "deposits" && (
-          <DepositsTab deposits={deposits} students={students} onAdd={() => setShowDepositForm(true)} onRemove={removeDeposit} />
+          <DepositsTab 
+            deposits={deposits} 
+            students={students} 
+            onAdd={() => setShowDepositForm(true)} 
+            onRemove={removeDeposit} 
+            onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
+          />
         )}
         {tab === "dues" && (
           <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} />
@@ -444,6 +469,13 @@ export default function CoachingLedger() {
           onSave={saveClasses} 
         />
       )}
+      {receiptData && (
+        <ReceiptModal 
+          deposit={receiptData.deposit} 
+          student={receiptData.student} 
+          onClose={() => setReceiptData(null)} 
+        />
+      )}
     </div>
   );
 }
@@ -459,7 +491,7 @@ function StatCard({ label, value, sub, tone }) {
   );
 }
 
-function DashboardTab({ students, thisMonthCollected, thisMonthExpected, totalOutstanding, trend, batchStrength, classStrength, recentDeposits, studentById, curMonth, classes }) {
+function DashboardTab({ students, thisMonthCollected, thisMonthExpected, totalOutstanding, trend, batchStrength, classStrength, recentDeposits, studentById, curMonth, classes, onOpenReceipt }) {
   const collectionRate = thisMonthExpected > 0 ? Math.round((thisMonthCollected / thisMonthExpected) * 100) : 0;
   return (
     <div>
@@ -528,7 +560,12 @@ function DashboardTab({ students, thisMonthCollected, thisMonthExpected, totalOu
                       <span className="font-medium">{st ? st.name : "Unknown"}</span>
                       <span className="text-[#9C8F6E] ml-2 text-xs">Class {st ? st.class : "—"} · {monthLabel(d.month)}</span>
                     </div>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="font-semibold text-[#3F6B52]">{fmtINR(d.amount)}</span>
+                    <div className="flex items-center gap-2">
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="font-semibold text-[#3F6B52]">{fmtINR(d.amount)}</span>
+                      <button onClick={() => onOpenReceipt(d)} className="p-1 text-[#12312B] hover:bg-[#E4DCC5] rounded" title="View / Print Receipt">
+                        <Printer size={14} />
+                      </button>
+                    </div>
                   </div>
                 );
               })}
@@ -542,7 +579,7 @@ function DashboardTab({ students, thisMonthCollected, thisMonthExpected, totalOu
 
 function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, onManageClasses, onEditStudent, onStatusChange }) {
   const [selectedClass, setSelectedClass] = useState("ALL");
-  const [viewMode, setViewMode] = useState("class"); // "class" or "dues"
+  const [viewMode, setViewMode] = useState("class");
 
   const filteredStudents = useMemo(() => {
     if (selectedClass === "ALL") return students;
@@ -573,7 +610,6 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, o
       />
 
       <div className="flex items-center justify-between mb-5 gap-4">
-        {/* Toggle Mode */}
         <div className="flex border rounded-sm overflow-hidden" style={{ borderColor: "#12312B" }}>
           <button 
             onClick={() => setViewMode("class")}
@@ -591,7 +627,6 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, o
           </button>
         </div>
 
-        {/* Class Filter */}
         {viewMode === "class" && (
           <div className="flex items-center gap-2">
             <span className="text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Filter Class:</span>
@@ -818,7 +853,7 @@ function StructureTab({ feeStructure, setFeeStructure, classes }) {
   );
 }
 
-function DepositsTab({ deposits, students, onAdd, onRemove }) {
+function DepositsTab({ deposits, students, onAdd, onRemove, onOpenReceipt }) {
   const sorted = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   const byId = Object.fromEntries(students.map(s => [s.id, s]));
   return (
@@ -835,7 +870,7 @@ function DepositsTab({ deposits, students, onAdd, onRemove }) {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date", "Student", "Class", "For Month", "Batches", "Mode", "Amount", ""].map(h => (
+                {["Date", "Student", "Class", "For Month", "Batches", "Mode", "Amount", "Receipt / Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
@@ -852,7 +887,15 @@ function DepositsTab({ deposits, students, onAdd, onRemove }) {
                     <td className="px-4 py-2.5 text-xs text-[#6E6650]">{(d.batches || []).join(", ")}</td>
                     <td className="px-4 py-2.5 text-xs">{d.mode}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#3F6B52]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(d.amount)}</td>
-                    <td className="px-4 py-2.5 text-right"><button onClick={() => onRemove(d.id)} className="text-xs text-[#A63D2F] underline">Delete</button></td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onOpenReceipt(d)} className="flex items-center gap-1 text-xs text-[#12312B] underline mr-3 inline-flex">
+                        <Printer size={12} /> Receipt
+                      </button>
+                      <button onClick={() => sendWhatsAppReceipt(d, st)} className="text-xs text-[#25D366] font-semibold underline mr-3 inline-flex items-center gap-1">
+                        <Send size={11} /> WhatsApp
+                      </button>
+                      <button onClick={() => onRemove(d.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
+                    </td>
                   </tr>
                 );
               })}
@@ -1092,7 +1135,7 @@ function DepositFormModal({ students, curMonth, expectedFeeFor, onClose, onSave 
         </Field>
       </div>
       <button onClick={submit} disabled={!studentId || !amount} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        Record Deposit
+        Record Deposit & Generate Receipt
       </button>
     </Modal>
   );
@@ -1156,6 +1199,101 @@ function ClassManagerModal({ classes, onClose, onSave }) {
       <button onClick={handleSave} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
         Save Class Hierarchy
       </button>
+    </Modal>
+  );
+}
+
+function ReceiptModal({ deposit, student, onClose }) {
+  const receiptRef = useRef();
+
+  const handlePrint = () => {
+    const printContent = receiptRef.current.innerHTML;
+    const win = window.open("", "", "width=600,height=700");
+    win.document.write(`
+      <html>
+        <head>
+          <title>Fee Receipt - Coaching Ledger</title>
+          <style>
+            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
+            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
+            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
+            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+            .bold { font-weight: bold; }
+            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+          </style>
+        </head>
+        <body>
+          <div class="receipt-box">${printContent}</div>
+        </body>
+      </html>
+    `);
+    win.document.close();
+    win.focus();
+    win.print();
+    win.close();
+  };
+
+  const receiptNo = deposit.id ? deposit.id.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
+
+  return (
+    <Modal title="Official Fee Receipt" onClose={onClose}>
+      <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
+        <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
+          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Payment Receipt</p>
+        </div>
+
+        <div className="space-y-2 text-xs">
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Receipt No: <strong className="text-[#12312B]">#{receiptNo}</strong></span>
+            <span>Date: <strong className="text-[#12312B]">{deposit.date}</strong></span>
+          </div>
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Student Name:</span>
+            <strong className="text-[#12312B]">{student ? student.name : "N/A"}</strong>
+          </div>
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Class:</span>
+            <strong className="text-[#12312B]">Class {student ? student.class : "N/A"}</strong>
+          </div>
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Fee Month:</span>
+            <strong className="text-[#12312B]">{monthLabel(deposit.month)}</strong>
+          </div>
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Batches:</span>
+            <strong className="text-[#12312B]">{(deposit.batches || []).join(", ") || "General"}</strong>
+          </div>
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Payment Mode:</span>
+            <strong className="text-[#12312B]">{deposit.mode || "Cash"}</strong>
+          </div>
+
+          <div className="pt-3 mt-3 border-t-2 border-[#12312B] flex justify-between items-center text-sm">
+            <span className="font-bold">Total Paid:</span>
+            <span className="font-bold text-[#3F6B52] text-lg" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(deposit.amount)}</span>
+          </div>
+        </div>
+
+        <div className="text-center pt-3 mt-3 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
+          Status: PAID ✅ · Computer Generated Receipt
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <button 
+          onClick={handlePrint} 
+          className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"
+        >
+          <Printer size={15} /> Print Receipt
+        </button>
+        <button 
+          onClick={() => sendWhatsAppReceipt(deposit, student)} 
+          className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#25D366] hover:bg-[#1DA851]"
+        >
+          <Send size={15} /> Send to WhatsApp
+        </button>
+      </div>
     </Modal>
   );
 }
