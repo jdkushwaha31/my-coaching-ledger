@@ -326,32 +326,54 @@ export default function CoachingLedger() {
     }
   }
 
-  async function completeAcademicYear(student, resultStatus) {
-    const totalCurrentOutstanding = duesLedger.filter(r => r.studentId === student.id).reduce((a, r) => a + r.outstanding, 0);
-    const accumulatedPreviousDues = (Number(student.previousDues) || 0) + totalCurrentOutstanding;
+ async function completeAcademicYear(student, resultStatus) {
+  const totalCurrentOutstanding = duesLedger
+    .filter(r => r.studentId === student.id)
+    .reduce((a, r) => a + r.outstanding, 0);
 
-    const historyItem = {
-      class: student.class,
-      batches: student.batches || [],
-      admissionMonth: student.admissionMonth,
-      completionDate: new Date().toISOString().slice(0, 10),
-      resultStatus: resultStatus, // Passed, Repeat, Dropped
-      unpaidBalanceAtEnd: totalCurrentOutstanding
-    };
+  const previousDues = Number(student.previousDues) || 0;
+  const accumulatedPreviousDues = previousDues + totalCurrentOutstanding;
 
-    const updatedHistory = [...(student.academicHistory || []), historyItem];
+  // Save the student's state BEFORE completing the year.
+  // This allows us to safely undo an accidental completion later.
+  const historyItem = {
+    class: student.class,
+    batches: student.batches || [],
+    admissionMonth: student.admissionMonth,
+    monthlyDiscount: Number(student.monthlyDiscount) || 0,
 
-    const updatedStudent = {
-      ...student,
-      status: "on_break", // Fee counter stops completely
-      previousDues: accumulatedPreviousDues,
-      academicHistory: updatedHistory,
-      exitDate: new Date().toISOString().slice(0, 10)
-    };
+    completionDate: new Date().toISOString().slice(0, 10),
+    resultStatus: resultStatus,
 
-    await setDoc(doc(db, "students", student.id), updatedStudent);
-    alert(`${student.name} marked as ${resultStatus}! Academic record archived. Remaining balance carried forward: ${fmtINR(accumulatedPreviousDues)}`);
-  }
+    unpaidBalanceAtEnd: totalCurrentOutstanding,
+
+    // Snapshot for Undo
+    previousStatus: student.status || "active",
+    previousExitDate: student.exitDate || null,
+    previousDues: previousDues
+  };
+
+  const updatedHistory = [
+    ...(student.academicHistory || []),
+    historyItem
+  ];
+
+  const updatedStudent = {
+    ...student,
+    status: "on_break",
+    previousDues: accumulatedPreviousDues,
+    academicHistory: updatedHistory,
+    exitDate: new Date().toISOString().slice(0, 10)
+  };
+
+  await setDoc(doc(db, "students", student.id), updatedStudent);
+
+  alert(
+    `${student.name} marked as ${resultStatus}! ` +
+    `Academic record archived. Remaining balance carried forward: ` +
+    `${fmtINR(accumulatedPreviousDues)}`
+  );
+}
 
   async function promoteStudent(student, newClass, newBatches, newStartMonth, monthlyDiscount) {
     const updatedStudent = {
