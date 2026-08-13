@@ -1,68 +1,3 @@
-// Set your desired password here
-const APP_PASSWORD = "958906"; 
-
-export default function CoachingLedger() {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    return sessionStorage.getItem("ledger_auth") === "true";
-  });
-  const [passInput, setPassInput] = useState("");
-  const [error, setError] = useState(false);
-
-  const handleLogin = (e) => {
-    e.preventDefault();
-    if (passInput === APP_PASSWORD) {
-      sessionStorage.setItem("ledger_auth", "true");
-      setIsAuthenticated(true);
-      setError(false);
-    } else {
-      setError(true);
-    }
-  };
-
-  // If not authenticated, render the lock screen
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: "#12312B", fontFamily: "'Inter', sans-serif" }}>
-        <div className="bg-[#FAF6EC] p-8 rounded-sm shadow-xl max-w-md w-full border-2 border-[#B8862B]">
-          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B] mb-1 text-center">
-            Batch Ledger
-          </div>
-          <p className="text-xs text-[#9C8F6E] text-center uppercase tracking-wider mb-6" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-            Restricted Admin Access
-          </p>
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-xs uppercase tracking-wider text-[#6E6650] mb-1" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-                Enter Security Password
-              </label>
-              <input
-                type="password"
-                value={passInput}
-                onChange={(e) => setPassInput(e.target.value)}
-                placeholder="••••••••"
-                className="w-full border rounded-sm px-3 py-2 text-sm bg-white"
-                style={{ borderColor: error ? "#A63D2F" : "#D8CFB8" }}
-                autoFocus
-              />
-              {error && (
-                <p className="text-xs text-[#A63D2F] mt-1 font-medium">Incorrect password. Please try again.</p>
-              )}
-            </div>
-            <button
-              type="submit"
-              className="w-full py-2.5 rounded-sm text-sm font-medium transition-colors"
-              style={{ background: "#12312B", color: "#F4EFDE" }}
-            >
-              Unlock Portal
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
-  // Rest of your main CoachingLedger component code goes here...
-}
 import React, { useState, useEffect, useMemo } from "react";
 import { db } from "./firebase";
 import { 
@@ -72,8 +7,11 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid 
 } from "recharts";
 import { 
-  LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check 
+  LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut 
 } from "lucide-react";
+
+// Set your admin password here
+const APP_PASSWORD = "958906"; 
 
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');`;
 
@@ -154,6 +92,12 @@ function SectionHeader({ eyebrow, title, action }) {
 }
 
 export default function CoachingLedger() {
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return sessionStorage.getItem("ledger_auth") === "true";
+  });
+  const [passInput, setPassInput] = useState("");
+  const [passError, setPassError] = useState(false);
+
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("dashboard");
   const [students, setStudents] = useState([]);
@@ -163,8 +107,28 @@ export default function CoachingLedger() {
   const [showDepositForm, setShowDepositForm] = useState(false);
   const [editingStudent, setEditingStudent] = useState(null);
 
+  // Authentication handle
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (passInput === APP_PASSWORD) {
+      sessionStorage.setItem("ledger_auth", "true");
+      setIsAuthenticated(true);
+      setPassError(false);
+    } else {
+      setPassError(true);
+    }
+  };
+
+  const handleLogout = () => {
+    sessionStorage.removeItem("ledger_auth");
+    setIsAuthenticated(false);
+    setPassInput("");
+  };
+
   // Real-time Cloud Sync with Firestore
   useEffect(() => {
+    if (!isAuthenticated) return;
+
     const unsubStudents = onSnapshot(collection(db, "students"), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, status: "active", ...doc.data() }));
       setStudents(data);
@@ -180,7 +144,6 @@ export default function CoachingLedger() {
       if (docSnap.exists()) {
         setFeeStructure(docSnap.data().matrix);
       } else {
-        // Initialize if not present
         setDoc(doc(db, "settings", "feeStructure"), { matrix: defaultFeeStructure() });
       }
     });
@@ -190,12 +153,62 @@ export default function CoachingLedger() {
       unsubDeposits();
       unsubFee();
     };
-  }, []);
+  }, [isAuthenticated]);
+
+  // Render Lock Screen if not logged in
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: "#12312B", fontFamily: "'Inter', sans-serif" }}>
+        <style>{FONT_IMPORT}</style>
+        <div className="bg-[#FAF6EC] p-8 rounded-sm shadow-2xl max-w-md w-full border-2" style={{ borderColor: "#B8862B" }}>
+          <div className="flex justify-center mb-3 text-[#12312B]">
+            <Lock size={32} />
+          </div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B] text-center">
+            Batch Ledger
+          </div>
+          <p className="text-xs text-[#9C8F6E] text-center uppercase tracking-wider mb-6" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
+            Restricted Access
+          </p>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-xs uppercase tracking-wider text-[#6E6650] mb-1" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
+                Enter Passcode
+              </label>
+              <input
+                type="password"
+                value={passInput}
+                onChange={(e) => setPassInput(e.target.value)}
+                placeholder="••••••••"
+                className="w-full border rounded-sm px-3 py-2 text-sm bg-white focus:outline-none"
+                style={{ borderColor: passError ? "#A63D2F" : "#D8CFB8" }}
+                autoFocus
+              />
+              {passError && (
+                <p className="text-xs text-[#A63D2F] mt-1 font-medium">Incorrect passcode. Try again.</p>
+              )}
+            </div>
+            <button
+              type="submit"
+              className="w-full py-2.5 rounded-sm text-sm font-medium transition-colors"
+              style={{ background: "#12312B", color: "#F4EFDE" }}
+            >
+              Unlock Ledger
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  if (!loaded) {
+    return <div className="min-h-screen flex items-center justify-center" style={{ background: "#FAF6EC", fontFamily: "'IBM Plex Mono', monospace", color: "#8A6420" }}>Connecting to Cloud Database…</div>;
+  }
 
   const curMonth = currentMonthKey();
 
   // Derived calculations
-  const studentById = useMemo(() => Object.fromEntries(students.map(s => [s.id, s])), [students]);
+  const studentById = Object.fromEntries(students.map(s => [s.id, s]));
 
   function expectedFeeFor(cls, batchCount) {
     const bc = Math.max(1, Math.min(3, batchCount || 1));
@@ -208,60 +221,46 @@ export default function CoachingLedger() {
     return student.batches || [];
   }
 
-  const duesLedger = useMemo(() => {
-    const rows = [];
-    students.forEach(st => {
-      if (!st.admissionMonth) return;
-      const months = monthsBetween(st.admissionMonth, curMonth);
-      months.forEach(m => {
-        const batches = batchesForMonth(st, m);
-        const bc = batches.length || 1;
-        const expected = expectedFeeFor(st.class, bc);
-        const paid = deposits.filter(d => d.studentId === st.id && d.month === m).reduce((a, d) => a + Number(d.amount || 0), 0);
-        const outstanding = Math.max(0, expected - paid);
-        rows.push({ studentId: st.id, name: st.name, cls: st.class, month: m, batches, expected, paid, outstanding, isCurrent: m === curMonth, status: st.status || "active" });
-      });
+  const duesLedger = [];
+  students.forEach(st => {
+    if (!st.admissionMonth) return;
+    const months = monthsBetween(st.admissionMonth, curMonth);
+    months.forEach(m => {
+      const batches = batchesForMonth(st, m);
+      const bc = batches.length || 1;
+      const expected = expectedFeeFor(st.class, bc);
+      const paid = deposits.filter(d => d.studentId === st.id && d.month === m).reduce((a, d) => a + Number(d.amount || 0), 0);
+      const outstanding = Math.max(0, expected - paid);
+      duesLedger.push({ studentId: st.id, name: st.name, cls: st.class, month: m, batches, expected, paid, outstanding, isCurrent: m === curMonth, status: st.status || "active" });
     });
-    return rows;
-  }, [students, deposits, feeStructure, curMonth]);
+  });
 
-  const studentDuesMap = useMemo(() => {
-    const map = {};
-    duesLedger.forEach(row => {
-      map[row.studentId] = (map[row.studentId] || 0) + row.outstanding;
-    });
-    return map;
-  }, [duesLedger]);
+  const studentDuesMap = {};
+  duesLedger.forEach(row => {
+    studentDuesMap[row.studentId] = (studentDuesMap[row.studentId] || 0) + row.outstanding;
+  });
 
-  const activeStudents = useMemo(() => students.filter(s => (s.status || "active") === "active"), [students]);
-  const outstandingRows = useMemo(() => duesLedger.filter(r => r.outstanding > 0).sort((a, b) => a.month < b.month ? -1 : 1), [duesLedger]);
-  const totalOutstanding = useMemo(() => outstandingRows.reduce((a, r) => a + r.outstanding, 0), [outstandingRows]);
+  const activeStudents = students.filter(s => (s.status || "active") === "active");
+  const outstandingRows = duesLedger.filter(r => r.outstanding > 0).sort((a, b) => a.month < b.month ? -1 : 1);
+  const totalOutstanding = outstandingRows.reduce((a, r) => a + r.outstanding, 0);
 
-  const thisMonthCollected = useMemo(() => deposits.filter(d => d.month === curMonth).reduce((a, d) => a + Number(d.amount || 0), 0), [deposits, curMonth]);
-  const thisMonthExpected = useMemo(() => duesLedger.filter(r => r.month === curMonth && r.status === "active").reduce((a, r) => a + r.expected, 0), [duesLedger, curMonth]);
+  const thisMonthCollected = deposits.filter(d => d.month === curMonth).reduce((a, d) => a + Number(d.amount || 0), 0);
+  const thisMonthExpected = duesLedger.filter(r => r.month === curMonth && r.status === "active").reduce((a, r) => a + r.expected, 0);
 
-  const trend = useMemo(() => {
-    const start = addMonths(curMonth, -5);
-    const months = monthsBetween(start, curMonth);
-    return months.map(m => ({
-      month: monthLabel(m).split(" ")[0],
-      collected: deposits.filter(d => d.month === m).reduce((a, d) => a + Number(d.amount || 0), 0),
-    }));
-  }, [deposits, curMonth]);
+  const start = addMonths(curMonth, -5);
+  const trendMonths = monthsBetween(start, curMonth);
+  const trend = trendMonths.map(m => ({
+    month: monthLabel(m).split(" ")[0],
+    collected: deposits.filter(d => d.month === m).reduce((a, d) => a + Number(d.amount || 0), 0),
+  }));
 
-  const batchStrength = useMemo(() => {
-    const counts = Object.fromEntries(BATCHES.map(b => [b, 0]));
-    activeStudents.forEach(s => (s.batches || []).forEach(b => { if (counts[b] !== undefined) counts[b]++; }));
-    return counts;
-  }, [activeStudents]);
+  const batchStrength = Object.fromEntries(BATCHES.map(b => [b, 0]));
+  activeStudents.forEach(s => (s.batches || []).forEach(b => { if (batchStrength[b] !== undefined) batchStrength[b]++; }));
 
-  const classStrength = useMemo(() => {
-    const counts = Object.fromEntries(CLASSES.map(c => [c, 0]));
-    activeStudents.forEach(s => { if (counts[s.class] !== undefined) counts[s.class]++; });
-    return counts;
-  }, [activeStudents]);
+  const classStrength = Object.fromEntries(CLASSES.map(c => [c, 0]));
+  activeStudents.forEach(s => { if (classStrength[s.class] !== undefined) classStrength[s.class]++; });
 
-  const recentDeposits = useMemo(() => [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8), [deposits]);
+  const recentDeposits = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
 
   // Cloud Actions
   async function saveStudent(data) {
@@ -299,10 +298,6 @@ export default function CoachingLedger() {
     await deleteDoc(doc(db, "deposits", id));
   }
 
-  if (!loaded) {
-    return <div className="min-h-screen flex items-center justify-center" style={{ background: "#FAF6EC", fontFamily: "'IBM Plex Mono', monospace", color: "#8A6420" }}>Connecting to Cloud Database…</div>;
-  }
-
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutGrid },
     { id: "students", label: "Students", icon: Users },
@@ -320,39 +315,50 @@ export default function CoachingLedger() {
       `}</style>
 
       {/* Sidebar */}
-      <aside className="w-56 shrink-0 flex flex-col" style={{ background: "#12312B" }}>
-        <div className="px-5 pt-6 pb-5" style={{ borderBottom: "1px solid #24473F" }}>
-          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#F4EFDE] leading-tight">Batch<br/>Ledger</div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", color: "#8FAE9F" }} className="mt-1 uppercase tracking-wider">Coaching Register</div>
+      <aside className="w-56 shrink-0 flex flex-col justify-between" style={{ background: "#12312B" }}>
+        <div>
+          <div className="px-5 pt-6 pb-5" style={{ borderBottom: "1px solid #24473F" }}>
+            <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#F4EFDE] leading-tight">Batch<br/>Ledger</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", color: "#8FAE9F" }} className="mt-1 uppercase tracking-wider">Coaching Register</div>
+          </div>
+          <nav className="px-3 py-4 space-y-1">
+            {navItems.map(item => {
+              const Icon = item.icon;
+              const active = tab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => setTab(item.id)}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-sm text-sm transition-colors"
+                  style={{
+                    background: active ? "#F4EFDE" : "transparent",
+                    color: active ? "#12312B" : "#C9D9CF",
+                    fontWeight: active ? 600 : 500,
+                  }}
+                >
+                  <Icon size={16} />
+                  {item.label}
+                </button>
+              );
+            })}
+          </nav>
         </div>
-        <nav className="flex-1 px-3 py-4 space-y-1">
-          {navItems.map(item => {
-            const Icon = item.icon;
-            const active = tab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setTab(item.id)}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-sm text-sm transition-colors"
-                style={{
-                  background: active ? "#F4EFDE" : "transparent",
-                  color: active ? "#12312B" : "#C9D9CF",
-                  fontWeight: active ? 600 : 500,
-                }}
-              >
-                <Icon size={16} />
-                {item.label}
-              </button>
-            );
-          })}
-        </nav>
-        <div className="px-4 py-4 text-[11px] leading-relaxed" style={{ color: "#6E9384", borderTop: "1px solid #24473F", fontFamily: "'IBM Plex Mono', monospace" }}>
-          {monthLabel(curMonth)}<br/>
-          <span style={{ color: "#8FAE9F" }}>● live cloud sync</span>
+
+        <div style={{ borderTop: "1px solid #24473F" }}>
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center gap-2 px-5 py-3 text-xs font-medium text-[#8FAE9F] hover:text-[#F4EFDE] transition-colors"
+            style={{ fontFamily: "'IBM Plex Mono', monospace" }}
+          >
+            <LogOut size={14} /> Lock Portal
+          </button>
+          <div className="px-5 pb-4 text-[10px]" style={{ color: "#6E9384", fontFamily: "'IBM Plex Mono', monospace" }}>
+            {monthLabel(curMonth)} · <span style={{ color: "#8FAE9F" }}>live cloud sync</span>
+          </div>
         </div>
       </aside>
 
-      {/* Main */}
+      {/* Main Content */}
       <main className="flex-1 px-8 py-7 max-w-6xl">
         {tab === "dashboard" && (
           <DashboardTab
@@ -375,8 +381,7 @@ export default function CoachingLedger() {
           <StructureTab feeStructure={feeStructure} setFeeStructure={saveFeeStructure} />
         )}
         {tab === "deposits" && (
-          <DepositsTab deposits={deposits} students={students} onAdd={() => setShowDepositForm(true)} onRemove={removeDeposit}
-            expectedFeeFor={expectedFeeFor} batchesForMonth={batchesForMonth} />
+          <DepositsTab deposits={deposits} students={students} onAdd={() => setShowDepositForm(true)} onRemove={removeDeposit} />
         )}
         {tab === "dues" && (
           <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} />
@@ -607,7 +612,7 @@ function StructureTab({ feeStructure, setFeeStructure }) {
 }
 
 function DepositsTab({ deposits, students, onAdd, onRemove }) {
-  const sorted = useMemo(() => [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || "")), [deposits]);
+  const sorted = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   const byId = Object.fromEntries(students.map(s => [s.id, s]));
   return (
     <div>
