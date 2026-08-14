@@ -1,1789 +1,691 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
-import { db } from "./firebase";
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  collection, onSnapshot, doc, setDoc, deleteDoc 
-} from "firebase/firestore";
+  Users, Plus, Search, Filter, RefreshCw, Trash2, Edit3, 
+  CheckCircle, AlertCircle, FileText, Download, Send, 
+  TrendingUp, Calendar, DollarSign, RotateCcw, Shield,
+  CreditCard, MessageSquare, History, Archive, Eye
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
 import { 
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid 
-} from "recharts";
-import { 
-  LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut, BookOpen, Send, Printer, Award, ArrowUpRight, History, Tag, Undo2
-} from "lucide-react";
+  getFirestore, collection, onSnapshot, doc, setDoc, 
+  updateDoc, addDoc, serverTimestamp, query, where 
+} from 'firebase/firestore';
 
-// Admin Access Password
-const APP_PASSWORD = "958906"; 
-
-const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');`;
-
-const DEFAULT_CLASSES = ["Nursery", "LKG", "UKG", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
-const DEFAULT_SUBJECTS = ["Mathematics", "Physics", "Chemistry", "Science", "Hindi", "English", "Social Studies", "Computer"];
-const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-
-// Exit reasons — used whenever a student leaves an active billing cycle.
-// "status" controls whether they can be silently reactivated (on_break) or
-// are flagged as a hard dropout (dropped). Both stop new monthly dues.
-const EXIT_REASONS = [
-  { value: "Passed", label: "Passed — completed this class", status: "on_break" },
-  { value: "Repeat", label: "Repeating this class next session", status: "on_break" },
-  { value: "Gap", label: "On Break / Gap (temporary pause)", status: "on_break" },
-  { value: "Dropped", label: "Dropped Out (leaving permanently)", status: "dropped" },
-];
-
-function monthKey(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; }
-function monthLabel(key) { 
-  if (!key) return "—";
-  if (key === "carried-over") return "Carried Forward";
-  const [y, m] = key.split("-").map(Number); 
-  return `${MONTH_NAMES[m - 1]} ${y}`; 
-}
-function currentMonthKey() { return monthKey(new Date()); }
-function addMonths(key, n) {
-  const [y, m] = key.split("-").map(Number);
-  const d = new Date(y, m - 1 + n, 1);
-  return monthKey(d);
-}
-function monthsBetween(fromKey, toKey) {
-  const out = [];
-  let cur = fromKey;
-  let guard = 0;
-  while (cur <= toKey && guard < 240) { out.push(cur); cur = addMonths(cur, 1); guard++; }
-  return out;
-}
-function fmtINR(n) {
-  const v = Number(n) || 0;
-  return "₹" + v.toLocaleString("en-IN");
-}
-function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
-
-const defaultFeeStructure = (classes) => {
-  const fs = {};
-  classes.forEach((c, i) => {
-    fs[c] = { 
-      1: 500 + i * 50, 
-      2: 900 + i * 100, 
-      3: 1300 + i * 150,
-      4: 1600 + i * 180,
-      5: 1900 + i * 200,
-      6: 2200 + i * 220
-    };
-  });
-  return fs;
+// --- FIREBASE INITIALIZATION ---
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT_ID.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
 };
 
-function sendWhatsAppReceipt(deposit, student, totalRemainingDue) {
-  if (!student || !student.phone) {
-    alert("No phone number registered for this student.");
-    return;
-  }
-  const cleanPhone = student.phone.replace(/[^0-9]/g, "");
-  const formattedPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
-  
-  const receiptNo = deposit.id ? deposit.id.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
-  const msg = `*FEE PAYMENT RECEIPT*\n----------------------------------------\n*Receipt No:* #${receiptNo}\n*Date:* ${deposit.date}\n*Student Name:* ${student.name}\n*Class:* ${student.class}\n*For:* ${monthLabel(deposit.month)}\n*Payment Mode:* ${deposit.mode || "Cash"}\n----------------------------------------\n*Amount Paid Today:* ₹${deposit.amount}\n*Remaining Balance:* ₹${totalRemainingDue}\n*Status:* ACKNOWLEDGED ✅\n----------------------------------------\nThank you for your payment!`;
-  
-  window.open(`https://wa.me/${formattedPhone}?text=${encodeURIComponent(msg)}`, "_blank");
-}
-
-function Stamp({ text, tone }) {
-  const colors = {
-    paid: { bg: "#EAF1EA", border: "#3F6B52", text: "#2E5240" },
-    due: { bg: "#FBEFE3", border: "#B8862B", text: "#8A6420" },
-    overdue: { bg: "#F7E7E3", border: "#A63D2F", text: "#8A3226" },
-    break: { bg: "#EBF3F5", border: "#4A7B9D", text: "#2B526C" },
-    carried: { bg: "#EFEAE0", border: "#6E6650", text: "#4A4636" },
-  };
-  const c = colors[tone] || colors.due;
-  return (
-    <span
-      style={{
-        background: c.bg, border: `1.5px solid ${c.border}`, color: c.text,
-        fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", letterSpacing: "0.08em",
-        padding: "2px 8px", borderRadius: "3px", fontWeight: 600, display: "inline-block",
-        transform: "rotate(-1deg)", textTransform: "uppercase"
-      }}
-    >{text}</span>
-  );
-}
-
-function Card({ children, className = "" }) {
-  return (
-    <div className={`bg-white border rounded-sm ${className}`} style={{ borderColor: "#E4DCC5" }}>
-      {children}
-    </div>
-  );
-}
-
-function SectionHeader({ eyebrow, title, action }) {
-  return (
-    <div className="flex items-end justify-between mb-4 pb-3" style={{ borderBottom: "1.5px solid #26231D" }}>
-      <div>
-        {eyebrow && <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", letterSpacing: "0.12em", color: "#9C8F6E" }} className="uppercase mb-1">{eyebrow}</div>}
-        <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-semibold text-[#1B1810]">{title}</h2>
-      </div>
-      {action}
-    </div>
-  );
-}
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
 
 export default function CoachingLedger() {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => sessionStorage.getItem("ledger_auth") === "true");
-  const [passInput, setPassInput] = useState("");
-  const [passError, setPassError] = useState(false);
-
-  const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useState("dashboard");
+  // State Management
   const [students, setStudents] = useState([]);
-  const [classes, setClasses] = useState(DEFAULT_CLASSES);
-  const [subjectsList, setSubjectsList] = useState(DEFAULT_SUBJECTS);
-  const [feeStructure, setFeeStructure] = useState({});
-  const [deposits, setDeposits] = useState([]);
-  
-  const [showStudentForm, setShowStudentForm] = useState(false);
-  const [showDepositForm, setShowDepositForm] = useState(false);
-  const [showClassModal, setShowClassModal] = useState(false);
-  const [showPromoteModal, setShowPromoteModal] = useState(null); // student object
-  const [showHistoryModal, setShowHistoryModal] = useState(null); // student object
-  const [showExitModal, setShowExitModal] = useState(null); // student object
-  const [showBatchChangeModal, setShowBatchChangeModal] = useState(null); // student object
-  const [editingStudent, setEditingStudent] = useState(null);
-  const [receiptData, setReceiptData] = useState(null);
+  const [receipts, setReceipts] = useState([]);
+  const [extraCharges, setExtraCharges] = useState([]);
+  const [selectedTab, setSelectedTab] = useState('students'); // 'students', 'projection', 'trash'
+  const [searchQuery, setSearchQuery] = useState('');
+  const [classFilter, setClassFilter] = useState('ALL');
+  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
 
-  const handleLogin = (e) => {
-    e.preventDefault();
-    if (passInput === APP_PASSWORD) {
-      sessionStorage.setItem("ledger_auth", "true");
-      setIsAuthenticated(true);
-      setPassError(false);
-    } else {
-      setPassError(true);
-    }
-  };
+  // Modals
+  const [showAddChargeModal, setShowAddChargeModal] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [showLedgerModal, setShowLedgerModal] = useState(false);
+  const [activeStudent, setActiveStudent] = useState(null);
 
-  const handleLogout = () => {
-    sessionStorage.removeItem("ledger_auth");
-    setIsAuthenticated(false);
-    setPassInput("");
-  };
+  // Form States
+  const [chargeForm, setChargeForm] = useState({ amount: '', month: selectedMonth, remarks: '' });
+  const [paymentForm, setPaymentForm] = useState({ 
+    amountPaid: '', 
+    writeOffAmount: '0', 
+    paymentMode: 'Cash', 
+    utrNumber: '', 
+    chequeNumber: '', 
+    remarks: '' 
+  });
 
-  // Real-time Cloud Sync
+  // --- REAL-TIME FIRESTORE LISTENERS ---
   useEffect(() => {
-    if (!isAuthenticated) return;
-
     const unsubStudents = onSnapshot(collection(db, "students"), (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, status: "active", ...doc.data() }));
-      setStudents(data);
-      setLoaded(true);
+      setStudents(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
 
-    const unsubDeposits = onSnapshot(collection(db, "deposits"), (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setDeposits(data);
+    const unsubReceipts = onSnapshot(collection(db, "receipts"), (snapshot) => {
+      setReceipts(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
 
-    const unsubFee = onSnapshot(doc(db, "settings", "feeStructure"), (docSnap) => {
-      if (docSnap.exists()) {
-        setFeeStructure(docSnap.data().matrix || {});
-      } else {
-        const init = defaultFeeStructure(DEFAULT_CLASSES);
-        setDoc(doc(db, "settings", "feeStructure"), { matrix: init });
-        setFeeStructure(init);
-      }
-    });
-
-    const unsubClasses = onSnapshot(doc(db, "settings", "classList"), (docSnap) => {
-      if (docSnap.exists()) {
-        setClasses(docSnap.data().list || DEFAULT_CLASSES);
-      } else {
-        setDoc(doc(db, "settings", "classList"), { list: DEFAULT_CLASSES });
-      }
-    });
-
-    const unsubSubjects = onSnapshot(doc(db, "settings", "subjectList"), (docSnap) => {
-      if (docSnap.exists()) {
-        setSubjectsList(docSnap.data().list || DEFAULT_SUBJECTS);
-      } else {
-        setDoc(doc(db, "settings", "subjectList"), { list: DEFAULT_SUBJECTS });
-      }
+    const unsubCharges = onSnapshot(collection(db, "extraCharges"), (snapshot) => {
+      setExtraCharges(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
 
     return () => {
       unsubStudents();
-      unsubDeposits();
-      unsubFee();
-      unsubClasses();
-      unsubSubjects();
+      unsubReceipts();
+      unsubCharges();
     };
-  }, [isAuthenticated]);
+  }, []);
 
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: "#12312B", fontFamily: "'Inter', sans-serif" }}>
-        <style>{FONT_IMPORT}</style>
-        <div className="bg-[#FAF6EC] p-8 rounded-sm shadow-2xl max-w-md w-full border-2" style={{ borderColor: "#B8862B" }}>
-          <div className="flex justify-center mb-3 text-[#12312B]"><Lock size={32} /></div>
-          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B] text-center">Batch Ledger Pro</div>
-          <p className="text-xs text-[#9C8F6E] text-center uppercase tracking-wider mb-6" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Admin Authentication</p>
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-xs uppercase tracking-wider text-[#6E6650] mb-1" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Enter Passcode</label>
-              <input
-                type="password"
-                value={passInput}
-                onChange={(e) => setPassInput(e.target.value)}
-                placeholder="••••••••"
-                className="w-full border rounded-sm px-3 py-2 text-sm bg-white focus:outline-none"
-                style={{ borderColor: passError ? "#A63D2F" : "#D8CFB8" }}
-                autoFocus
-              />
-              {passError && <p className="text-xs text-[#A63D2F] mt-1 font-medium">Incorrect passcode. Try again.</p>}
-            </div>
-            <button type="submit" className="w-full py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
-              Unlock Ledger
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
+  // --- 1. ADD EXTRA CHARGES LOGIC ---
+  const handleAddExtraCharge = async (e) => {
+    e.preventDefault();
+    if (!activeStudent || !chargeForm.amount) return;
 
-  if (!loaded) {
-    return <div className="min-h-screen flex items-center justify-center" style={{ background: "#FAF6EC", fontFamily: "'IBM Plex Mono', monospace", color: "#8A6420" }}>Connecting to Cloud Database…</div>;
-  }
-
-  const curMonth = currentMonthKey();
-  const studentById = Object.fromEntries(students.map(s => [s.id, s]));
-
-  function expectedFeeFor(cls, batchCount, monthlyDiscount = 0) {
-    const bc = Math.max(1, Math.min(6, batchCount || 1));
-    const baseFee = (feeStructure[cls] && feeStructure[cls][bc]) || 0;
-    return Math.max(0, baseFee - (Number(monthlyDiscount) || 0));
-  }
-
-  // Effective-dated batch assignment. A student's subjects can change from any
-  // given month onward (e.g. "add Physics starting September") without
-  // touching earlier months' calculations. This is the single source of
-  // truth for "which batches was this student in, in month X" — deposits no
-  // longer carry their own batch snapshot.
-  function batchesForMonth(student, month) {
-    const history = (student.batchHistory && student.batchHistory.length)
-      ? student.batchHistory
-      : [{ fromMonth: student.admissionMonth, batches: student.batches || [] }];
-    const applicable = history.filter(h => h.fromMonth <= month).sort((a, b) => (a.fromMonth < b.fromMonth ? -1 : 1));
-    if (applicable.length) return applicable[applicable.length - 1].batches || [];
-    return student.batches || [];
-  }
-
-  // How much of a student's carried-forward (previousDues) balance has
-  // already been paid off via a "Carried-Forward Dues" type deposit.
-  function carriedOverPaid(studentId) {
-    return deposits.filter(d => d.studentId === studentId && d.isCarriedOverPayment).reduce((a, d) => a + Number(d.amount || 0), 0);
-  }
-
-  // Dues Engine — only ACTIVE students accrue new monthly dues. The moment a
-  // student goes on break or is marked dropped, their outstanding balance up
-  // to that point is folded into previousDues (see exitStudent) so nothing
-  // is lost — it just moves from "monthly ledger" to "carried forward".
-  const duesLedger = [];
-  students.forEach(st => {
-    if (!st.admissionMonth) return;
-    if ((st.status || "active") !== "active") return;
-    if (st.admissionMonth > curMonth) return;
-
-    const months = monthsBetween(st.admissionMonth, curMonth);
-    months.forEach(m => {
-      const batches = batchesForMonth(st, m);
-      const bc = batches.length || 1;
-      const expected = expectedFeeFor(st.class, bc, st.monthlyDiscount || 0);
-      const paid = deposits.filter(d => d.studentId === st.id && d.month === m && !d.isCarriedOverPayment).reduce((a, d) => a + Number(d.amount || 0), 0);
-      const outstanding = Math.max(0, expected - paid);
-      duesLedger.push({ 
-        studentId: st.id, name: st.name, cls: st.class, phone: st.phone, 
-        month: m, batches, expected, paid, outstanding, 
-        isCurrent: m === curMonth, status: st.status || "active" 
-      });
-    });
-  });
-
-  // Carried-forward balance still owed by ANY student — active, on break, or
-  // dropped. This is what used to silently disappear once a student left
-  // "active" status; now it always shows up in Dues.
-  const carriedOverMap = {};
-  students.forEach(st => {
-    carriedOverMap[st.id] = Math.max(0, (Number(st.previousDues) || 0) - carriedOverPaid(st.id));
-  });
-
-  const carriedOverRows = students
-    .map(st => {
-      const rem = carriedOverMap[st.id] || 0;
-      if (rem <= 0) return null;
-      return {
-        studentId: st.id, name: st.name, cls: st.class, phone: st.phone,
-        month: "carried-over", batches: [], expected: rem, paid: 0, outstanding: rem,
-        isCurrent: false, status: st.status || "active", carriedOver: true,
-      };
-    })
-    .filter(Boolean);
-
-  const studentDuesMap = {};
-  students.forEach(st => {
-    const currentAcademicOutstanding = duesLedger.filter(r => r.studentId === st.id).reduce((a, r) => a + r.outstanding, 0);
-    studentDuesMap[st.id] = currentAcademicOutstanding + (carriedOverMap[st.id] || 0);
-  });
-
-  const activeStudents = students.filter(s => (s.status || "active") === "active");
-  const outstandingRows = [...duesLedger.filter(r => r.outstanding > 0), ...carriedOverRows].sort((a, b) => (a.month < b.month ? -1 : 1));
-  const totalOutstanding = Object.values(studentDuesMap).reduce((a, v) => a + v, 0);
-
-  const thisMonthCollected = deposits.filter(d => d.month === curMonth && !d.isCarriedOverPayment).reduce((a, d) => a + Number(d.amount || 0), 0);
-  const thisMonthExpected = duesLedger.filter(r => r.month === curMonth).reduce((a, r) => a + r.expected, 0);
-
-  const start = addMonths(curMonth, -5);
-  const trendMonths = monthsBetween(start, curMonth);
-  const trend = trendMonths.map(m => ({
-    month: monthLabel(m).split(" ")[0],
-    collected: deposits.filter(d => d.month === m && !d.isCarriedOverPayment).reduce((a, d) => a + Number(d.amount || 0), 0),
-  }));
-
-  const classStrength = Object.fromEntries(classes.map(c => [c, 0]));
-  activeStudents.forEach(s => { if (classStrength[s.class] !== undefined) classStrength[s.class]++; });
-
-  const recentDeposits = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
-
-  // Actions
-  async function saveStudent(data) {
-    const id = data.id || uid();
-    await setDoc(doc(db, "students", id), { ...data, id });
-    setShowStudentForm(false);
-    setEditingStudent(null);
-  }
-
-  // Ends (or pauses) a student's active billing. Whatever they still owe up
-  // to this point is rolled into previousDues so it keeps showing in Dues.
-  // A full snapshot of the pre-change state is stashed on the student so the
-  // action can be undone in one click if it was a mistake.
-  async function exitStudent(student, resultStatus, exitDateInput) {
-    const reason = EXIT_REASONS.find(r => r.value === resultStatus) || EXIT_REASONS[2];
-    const totalCurrentOutstanding = duesLedger.filter(r => r.studentId === student.id).reduce((a, r) => a + r.outstanding, 0);
-    const accumulatedPreviousDues = (Number(student.previousDues) || 0) + totalCurrentOutstanding;
-
-    const historyItem = {
-      class: student.class,
-      batches: student.batches || [],
-      admissionMonth: student.admissionMonth,
-      completionDate: exitDateInput || new Date().toISOString().slice(0, 10),
-      resultStatus,
-      unpaidBalanceAtEnd: totalCurrentOutstanding,
-    };
-
-    const snapshot = {
-      class: student.class,
-      batches: student.batches || [],
-      batchHistory: student.batchHistory || [{ fromMonth: student.admissionMonth, batches: student.batches || [] }],
-      admissionMonth: student.admissionMonth,
-      previousDues: Number(student.previousDues) || 0,
-      academicHistory: student.academicHistory || [],
-      status: student.status || "active",
-      resultStatus: student.resultStatus || null,
-      exitDate: student.exitDate || null,
-    };
-
-    const updatedStudent = {
-      ...student,
-      status: reason.status,
-      resultStatus,
-      previousDues: accumulatedPreviousDues,
-      academicHistory: [...(student.academicHistory || []), historyItem],
-      exitDate: exitDateInput || new Date().toISOString().slice(0, 10),
-      lastSnapshot: snapshot,
-    };
-
-    await setDoc(doc(db, "students", student.id), updatedStudent);
-    setShowExitModal(null);
-  }
-
-  // One-click undo for a mistaken "Complete Year / Drop Out / Break" action.
-  // Restores class, batch timeline, admission month, dues and history exactly
-  // as they were right before the exit. Available until the next lifecycle
-  // action (promote or another exit) overwrites the snapshot.
-  async function undoExit(student) {
-    if (!student.lastSnapshot) {
-      alert("Nothing to undo for this student.");
-      return;
-    }
-    if (!window.confirm(`Undo the last status change for ${student.name}? This restores Class ${student.lastSnapshot.class} as Active and removes the most recent history entry.`)) return;
-    const snap = student.lastSnapshot;
-    const restoredHistory = (student.academicHistory || []).slice(0, -1); // drop the entry the exit just added
-    const restored = {
-      ...student,
-      class: snap.class,
-      batches: snap.batches,
-      batchHistory: snap.batchHistory,
-      admissionMonth: snap.admissionMonth,
-      previousDues: snap.previousDues,
-      academicHistory: restoredHistory.length ? restoredHistory : snap.academicHistory,
-      status: "active",
-      resultStatus: null,
-      exitDate: null,
-      lastSnapshot: null,
-    };
-    await setDoc(doc(db, "students", student.id), restored);
-  }
-
-  async function promoteStudent(student, newClass, newBatches, newStartMonth, monthlyDiscount) {
-    const history = [...(student.batchHistory || [{ fromMonth: student.admissionMonth, batches: student.batches || [] }])];
-    const idx = history.findIndex(h => h.fromMonth === newStartMonth);
-    const entry = { fromMonth: newStartMonth, batches: newBatches };
-    if (idx >= 0) history[idx] = entry; else history.push(entry);
-    history.sort((a, b) => (a.fromMonth < b.fromMonth ? -1 : 1));
-
-    const updatedStudent = {
-      ...student,
-      class: newClass,
-      batches: newBatches,
-      batchHistory: history,
-      admissionMonth: newStartMonth,
-      monthlyDiscount: Number(monthlyDiscount) || 0,
-      status: "active", // Resumes monthly billing
-      resultStatus: null,
-      exitDate: null,
-      lastSnapshot: null,
-    };
-
-    await setDoc(doc(db, "students", student.id), updatedStudent);
-    setShowPromoteModal(null);
-  }
-
-  // Change a student's batches effective from a specific month — past months
-  // keep using whatever was in effect back then, so mid-year additions/drops
-  // (e.g. "add Physics from September") don't disturb earlier dues.
-  async function changeStudentBatches(student, fromMonth, newBatches) {
-    const history = [...(student.batchHistory || [{ fromMonth: student.admissionMonth, batches: student.batches || [] }])];
-    const idx = history.findIndex(h => h.fromMonth === fromMonth);
-    const entry = { fromMonth, batches: newBatches };
-    if (idx >= 0) history[idx] = entry; else history.push(entry);
-    history.sort((a, b) => (a.fromMonth < b.fromMonth ? -1 : 1));
-    const latest = history[history.length - 1];
-    const updatedStudent = { ...student, batchHistory: history, batches: latest.batches };
-    await setDoc(doc(db, "students", student.id), updatedStudent);
-    setShowBatchChangeModal(null);
-  }
-
-  async function removeStudent(id) {
-    if (window.confirm("Are you sure you want to remove this student permanently? This also deletes their deposit history.")) {
-      await deleteDoc(doc(db, "students", id));
-    }
-  }
-
-  async function saveFeeStructure(updatedMatrix) {
-    setFeeStructure(updatedMatrix);
-    await setDoc(doc(db, "settings", "feeStructure"), { matrix: updatedMatrix });
-  }
-
-  async function saveClasses(updatedList) {
-    setClasses(updatedList);
-    await setDoc(doc(db, "settings", "classList"), { list: updatedList });
-  }
-
-  async function saveSubjects(updatedList) {
-    setSubjectsList(updatedList);
-    await setDoc(doc(db, "settings", "subjectList"), { list: updatedList });
-  }
-
-  async function saveDeposit(data) {
-    const id = uid();
-    const newDep = { ...data, id };
-    await setDoc(doc(db, "deposits", id), newDep);
-    setShowDepositForm(false);
+    const chargeAmount = parseFloat(chargeForm.amount);
     
-    const st = studentById[data.studentId];
-    setReceiptData({ deposit: newDep, student: st });
-  }
+    // 1. Add record to extraCharges collection
+    await addDoc(collection(db, "extraCharges"), {
+      studentId: activeStudent.id,
+      studentName: activeStudent.name,
+      amount: chargeAmount,
+      month: chargeForm.month,
+      remarks: chargeForm.remarks,
+      createdAt: new Date().toISOString(),
+      isDeleted: false
+    });
 
-  async function removeDeposit(id) {
-    await deleteDoc(doc(db, "deposits", id));
-  }
+    // 2. Update Student Total Balance
+    const newBalance = (activeStudent.totalDue || 0) + chargeAmount;
+    await updateDoc(doc(db, "students", activeStudent.id), {
+      totalDue: newBalance
+    });
 
-  const navItems = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutGrid },
-    { id: "class_hub", label: "Class & Dues Hub", icon: BookOpen },
-    { id: "students", label: "Students Register", icon: Users },
-    { id: "structure", label: "Fee Matrix", icon: Wallet },
-    { id: "deposits", label: "Deposits Log", icon: Receipt },
-    { id: "dues", label: "Pending Dues", icon: AlertCircle },
-  ];
-
-  return (
-    <div className="min-h-screen flex" style={{ background: "#FAF6EC", fontFamily: "'Inter', sans-serif", color: "#26231D" }}>
-      <style>{`${FONT_IMPORT}
-        .ledger-row:nth-child(even) { background: #F5F0E1; }
-        input, select { font-family: 'Inter', sans-serif; }
-        ::selection { background: #B8862B33; }
-      `}</style>
-
-      {/* Sidebar */}
-      <aside className="w-56 shrink-0 flex flex-col justify-between" style={{ background: "#12312B" }}>
-        <div>
-          <div className="px-5 pt-6 pb-5" style={{ borderBottom: "1px solid #24473F" }}>
-            <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#F4EFDE] leading-tight">Batch<br/>Ledger Pro</div>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", color: "#8FAE9F" }} className="mt-1 uppercase tracking-wider">Coaching Register</div>
-          </div>
-          <nav className="px-3 py-4 space-y-1">
-            {navItems.map(item => {
-              const Icon = item.icon;
-              const active = tab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => setTab(item.id)}
-                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-sm text-sm transition-colors"
-                  style={{
-                    background: active ? "#F4EFDE" : "transparent",
-                    color: active ? "#12312B" : "#C9D9CF",
-                    fontWeight: active ? 600 : 500,
-                  }}
-                >
-                  <Icon size={16} />
-                  {item.label}
-                </button>
-              );
-            })}
-          </nav>
-        </div>
-
-        <div style={{ borderTop: "1px solid #24473F" }}>
-          <button
-            onClick={handleLogout}
-            className="w-full flex items-center gap-2 px-5 py-3 text-xs font-medium text-[#8FAE9F] hover:text-[#F4EFDE] transition-colors"
-            style={{ fontFamily: "'IBM Plex Mono', monospace" }}
-          >
-            <LogOut size={14} /> Lock Portal
-          </button>
-          <div className="px-5 pb-4 text-[10px]" style={{ color: "#6E9384", fontFamily: "'IBM Plex Mono', monospace" }}>
-            {monthLabel(curMonth)} · <span style={{ color: "#8FAE9F" }}>live cloud sync</span>
-          </div>
-        </div>
-      </aside>
-
-      {/* Main Content */}
-      <main className="flex-1 px-8 py-7 max-w-6xl">
-        {tab === "dashboard" && (
-          <DashboardTab
-            students={activeStudents} thisMonthCollected={thisMonthCollected} thisMonthExpected={thisMonthExpected}
-            totalOutstanding={totalOutstanding} trend={trend} classStrength={classStrength}
-            recentDeposits={recentDeposits} studentById={studentById} curMonth={curMonth} classes={classes}
-            studentDues={studentDuesMap}
-            onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
-          />
-        )}
-        {tab === "class_hub" && (
-          <ClassAndDuesHubTab 
-            students={students} 
-            classes={classes} 
-            studentDues={studentDuesMap} 
-            outstandingRows={outstandingRows}
-            batchesForMonth={batchesForMonth}
-            curMonth={curMonth}
-            onManageClasses={() => setShowClassModal(true)}
-            onEditStudent={(s) => { setEditingStudent(s); setShowStudentForm(true); }}
-            onExit={(s) => setShowExitModal(s)}
-            onPromote={(s) => setShowPromoteModal(s)}
-            onViewHistory={(s) => setShowHistoryModal(s)}
-            onBatchChange={(s) => setShowBatchChangeModal(s)}
-            onUndo={undoExit}
-          />
-        )}
-        {tab === "students" && (
-          <StudentsTab
-            students={students}
-            studentDues={studentDuesMap}
-            classes={classes}
-            batchesForMonth={batchesForMonth}
-            curMonth={curMonth}
-            onAdd={() => { setEditingStudent(null); setShowStudentForm(true); }}
-            onEdit={(s) => { setEditingStudent(s); setShowStudentForm(true); }}
-            onExit={(s) => setShowExitModal(s)}
-            onPromote={(s) => setShowPromoteModal(s)}
-            onViewHistory={(s) => setShowHistoryModal(s)}
-            onBatchChange={(s) => setShowBatchChangeModal(s)}
-            onUndo={undoExit}
-            onRemove={removeStudent}
-          />
-        )}
-        {tab === "structure" && (
-          <StructureTab feeStructure={feeStructure} setFeeStructure={saveFeeStructure} classes={classes} />
-        )}
-        {tab === "deposits" && (
-          <DepositsTab 
-            deposits={deposits} 
-            students={students} 
-            studentDues={studentDuesMap}
-            batchesForMonth={batchesForMonth}
-            onAdd={() => setShowDepositForm(true)} 
-            onRemove={removeDeposit} 
-            onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
-          />
-        )}
-        {tab === "dues" && (
-          <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} students={students} studentDues={studentDuesMap} />
-        )}
-      </main>
-
-      {showStudentForm && (
-        <StudentFormModal
-          classes={classes}
-          subjectsList={subjectsList}
-          initial={editingStudent}
-          onClose={() => { setShowStudentForm(false); setEditingStudent(null); }}
-          onSave={saveStudent}
-        />
-      )}
-      {showDepositForm && (
-        <DepositFormModal
-          students={students}
-          curMonth={curMonth}
-          expectedFeeFor={expectedFeeFor}
-          batchesForMonth={batchesForMonth}
-          carriedOverMap={carriedOverMap}
-          onClose={() => setShowDepositForm(false)}
-          onSave={saveDeposit}
-        />
-      )}
-      {showClassModal && (
-        <ClassManagerModal 
-          classes={classes} 
-          subjectsList={subjectsList}
-          onClose={() => setShowClassModal(false)} 
-          onSaveClasses={saveClasses}
-          onSaveSubjects={saveSubjects}
-        />
-      )}
-      {showPromoteModal && (
-        <PromoteModal
-          student={showPromoteModal}
-          classes={classes}
-          subjectsList={subjectsList}
-          curMonth={curMonth}
-          onClose={() => setShowPromoteModal(null)}
-          onPromote={promoteStudent}
-        />
-      )}
-      {showExitModal && (
-        <ExitStudentModal
-          student={showExitModal}
-          currentDue={studentDuesMap[showExitModal.id] || 0}
-          onClose={() => setShowExitModal(null)}
-          onConfirm={(reason, exitDate) => exitStudent(showExitModal, reason, exitDate)}
-        />
-      )}
-      {showBatchChangeModal && (
-        <BatchChangeModal
-          student={showBatchChangeModal}
-          subjectsList={subjectsList}
-          curMonth={curMonth}
-          onClose={() => setShowBatchChangeModal(null)}
-          onSave={changeStudentBatches}
-        />
-      )}
-      {showHistoryModal && (
-        <AcademicHistoryModal
-          student={showHistoryModal}
-          onClose={() => setShowHistoryModal(null)}
-        />
-      )}
-      {receiptData && (
-        <ReceiptModal 
-          deposit={receiptData.deposit} 
-          student={receiptData.student} 
-          totalRemainingDue={studentDuesMap[receiptData.student?.id] || 0}
-          onClose={() => setReceiptData(null)} 
-        />
-      )}
-    </div>
-  );
-}
-
-function StatCard({ label, value, sub, tone }) {
-  const toneColor = { good: "#3F6B52", warn: "#B8862B", bad: "#A63D2F", neutral: "#1B1810" }[tone || "neutral"];
-  return (
-    <Card className="p-4">
-      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-2">{label}</div>
-      <div style={{ fontFamily: "'Zilla Slab', serif", color: toneColor }} className="text-3xl font-bold">{value}</div>
-      {sub && <div className="text-xs text-[#9C8F6E] mt-1">{sub}</div>}
-    </Card>
-  );
-}
-
-function DashboardTab({ students, thisMonthCollected, thisMonthExpected, totalOutstanding, trend, classStrength, recentDeposits, studentById, curMonth, classes, studentDues, onOpenReceipt }) {
-  const collectionRate = thisMonthExpected > 0 ? Math.round((thisMonthCollected / thisMonthExpected) * 100) : 0;
-  return (
-    <div>
-      <SectionHeader eyebrow={monthLabel(curMonth)} title="Summary" />
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        <StatCard label="Active Students" value={students.length} sub={`${classes.filter(c => students.some(s => s.class === c)).length} active classes`} />
-        <StatCard label="Collected this month" value={fmtINR(thisMonthCollected)} sub={`of ${fmtINR(thisMonthExpected)} expected`} tone="good" />
-        <StatCard label="Collection rate" value={`${collectionRate}%`} tone={collectionRate >= 80 ? "good" : collectionRate >= 50 ? "warn" : "bad"} />
-        <StatCard label="Total Dues Balance" value={fmtINR(totalOutstanding)} sub="includes carried-over dues" tone={totalOutstanding > 0 ? "bad" : "good"} />
-      </div>
-
-      <div className="grid grid-cols-3 gap-5 mb-6">
-        <Card className="col-span-2 p-5">
-          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Collections — last 6 months</div>
-          <div style={{ height: 220 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={trend} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E4DCC5" vertical={false} />
-                <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#8A7F5F" }} axisLine={{ stroke: "#D8CFB8" }} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: "#8A7F5F" }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${v/1000}k`} />
-                <Tooltip formatter={(v) => fmtINR(v)} contentStyle={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, border: "1px solid #D8CFB8" }} />
-                <Bar dataKey="collected" fill="#3F6B52" radius={[3, 3, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-        <Card className="p-5 overflow-y-auto max-h-72">
-          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Class Strength</div>
-          <div className="space-y-2">
-            {classes.map(c => (
-              <div key={c} className="flex items-center gap-2">
-                <span className="text-xs w-20 text-[#6E6650] truncate">{c}</span>
-                <div className="flex-1 bg-[#F0EAD6] rounded-sm h-3 overflow-hidden">
-                  <div style={{ width: `${students.length ? ((classStrength[c] || 0) / Math.max(...Object.values(classStrength), 1)) * 100 : 0}%`, background: "#12312B" }} className="h-full" />
-                </div>
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="text-xs w-6 text-right">{classStrength[c] || 0}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      </div>
-
-      <Card className="p-5">
-        <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Recent Deposits Logged</div>
-        {recentDeposits.length === 0 ? (
-          <div className="text-sm text-[#9C8F6E]">No deposits recorded yet.</div>
-        ) : (
-          <div className="space-y-0">
-            {recentDeposits.map(d => {
-              const st = studentById[d.studentId];
-              return (
-                <div key={d.id} className="flex items-center justify-between py-2 text-sm ledger-row px-2 -mx-2" style={{ borderBottom: "1px solid #EEE7D2" }}>
-                  <div>
-                    <span className="font-medium">{st ? st.name : "Unknown"}</span>
-                    <span className="text-[#9C8F6E] ml-2 text-xs">Class {st ? st.class : "—"} · {monthLabel(d.month)}</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="font-semibold text-[#3F6B52]">{fmtINR(d.amount)}</span>
-                    <button onClick={() => onOpenReceipt(d)} className="p-1 text-[#12312B] hover:bg-[#E4DCC5] rounded" title="View / Print Receipt">
-                      <Printer size={14} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
-    </div>
-  );
-}
-
-function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, onUndo, compact }) {
-  const status = s.status || "active";
-  return (
-    <>
-      {status === "active" ? (
-        <button
-          onClick={() => onExit(s)}
-          className={compact ? "text-xs text-[#26231D] font-semibold underline" : "px-2 py-1 bg-[#26231D] text-[#FAF6EC] rounded text-[11px] font-medium hover:bg-black inline-flex items-center gap-1"}
-        >
-          {compact ? "End / Pause" : (<><Award size={11} /> End / Pause</>)}
-        </button>
-      ) : (
-        <button
-          onClick={() => onPromote(s)}
-          className={compact ? "text-xs text-[#3F6B52] font-semibold underline" : "px-2 py-1 bg-[#3F6B52] text-white rounded text-[11px] font-medium hover:bg-[#2E5240] inline-flex items-center gap-1"}
-        >
-          {compact ? (status === "dropped" ? "Reactivate" : "Promote") : (<><ArrowUpRight size={11} /> {status === "dropped" ? "Reactivate" : "Promote / Resume"}</>)}
-        </button>
-      )}
-      {s.lastSnapshot && (
-        <button onClick={() => onUndo(s)} className="text-xs text-[#B8862B] font-semibold underline inline-flex items-center gap-0.5" title="Undo the last status change">
-          <Undo2 size={11} /> Undo
-        </button>
-      )}
-      <button onClick={() => onBatchChange(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs">
-        <Tag size={11} /> Batches
-      </button>
-      <button onClick={() => onViewHistory(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs">
-        <History size={11} /> Log
-      </button>
-    </>
-  );
-}
-
-function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, batchesForMonth, curMonth, onManageClasses, onEditStudent, onExit, onPromote, onViewHistory, onBatchChange, onUndo }) {
-  const [selectedClass, setSelectedClass] = useState("ALL");
-  const [viewMode, setViewMode] = useState("class");
-
-  const filteredStudents = useMemo(() => {
-    if (selectedClass === "ALL") return students;
-    return students.filter(s => s.class === selectedClass);
-  }, [students, selectedClass]);
-
-  const sendWhatsAppReminder = (phone, name, month, amount) => {
-    if (!phone) {
-      alert("No phone number recorded for this student.");
-      return;
-    }
-    const cleanPhone = phone.replace(/[^0-9]/g, "");
-    const formattedPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
-    const msg = `Dear Parent, this is a gentle reminder regarding ${name}'s tuition fee for ${monthLabel(month)}. Pending Balance: ₹${amount}. Please clear it at your earliest convenience. Thank you!`;
-    window.open(`https://wa.me/${formattedPhone}?text=${encodeURIComponent(msg)}`, "_blank");
+    setShowAddChargeModal(false);
+    setChargeForm({ amount: '', month: selectedMonth, remarks: '' });
   };
 
-  return (
-    <div>
-      <SectionHeader 
-        eyebrow="Dedicated Analytics" 
-        title="Class & Dues Hub" 
-        action={
-          <button onClick={onManageClasses} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border rounded-sm" style={{ background: "white", borderColor: "#26231D" }}>
-            <Plus size={14} /> Manage Classes & Subjects
-          </button>
-        }
-      />
+  // --- 2 & 5. UNIFIED PAYMENT & WRITE-OFF / DISCOUNT LOGIC ---
+  const handleProcessPayment = async (e) => {
+    e.preventDefault();
+    if (!activeStudent) return;
 
-      <div className="flex items-center justify-between mb-5 gap-4">
-        <div className="flex border rounded-sm overflow-hidden" style={{ borderColor: "#12312B" }}>
-          <button 
-            onClick={() => setViewMode("class")}
-            className="px-4 py-2 text-xs font-semibold"
-            style={{ background: viewMode === "class" ? "#12312B" : "white", color: viewMode === "class" ? "#F4EFDE" : "#12312B" }}
-          >
-            Class Directory & Promotions
-          </button>
-          <button 
-            onClick={() => setViewMode("dues")}
-            className="px-4 py-2 text-xs font-semibold"
-            style={{ background: viewMode === "dues" ? "#12312B" : "white", color: viewMode === "dues" ? "#F4EFDE" : "#12312B" }}
-          >
-            Dues Breakdown ({outstandingRows.length})
-          </button>
+    const paid = parseFloat(paymentForm.amountPaid || 0);
+    const writeOff = parseFloat(paymentForm.writeOffAmount || 0);
+    const totalCredit = paid + writeOff;
+
+    if (totalCredit <= 0) return;
+
+    // 1. Create Receipt Log
+    const receiptData = {
+      receiptNo: `REC-${Date.now().toString().slice(-6)}`,
+      studentId: activeStudent.id,
+      studentName: activeStudent.name,
+      amountPaid: paid,
+      writeOffAmount: writeOff,
+      paymentMode: paymentForm.paymentMode,
+      utrNumber: paymentForm.paymentMode === 'UPI' || paymentForm.paymentMode === 'Bank Transfer' ? paymentForm.utrNumber : '',
+      chequeNumber: paymentForm.paymentMode === 'Cheque' ? paymentForm.chequeNumber : '',
+      remarks: paymentForm.remarks,
+      date: new Date().toISOString(),
+      isDeleted: false
+    };
+
+    await addDoc(collection(db, "receipts"), receiptData);
+
+    // 2. Update Student Balance
+    const updatedBalance = Math.max(0, (activeStudent.totalDue || 0) - totalCredit);
+    await updateDoc(doc(db, "students", activeStudent.id), {
+      totalDue: updatedBalance
+    });
+
+    setShowPaymentModal(false);
+    setPaymentForm({ amountPaid: '', writeOffAmount: '0', paymentMode: 'Cash', utrNumber: '', chequeNumber: '', remarks: '' });
+  };
+
+  // --- 6. SOFT DELETE & RESTORE SYSTEM ---
+  const handleSoftDeleteStudent = async (studentId) => {
+    if (window.confirm("Move student to Recycle Bin? You can restore them anytime.")) {
+      await updateDoc(doc(db, "students", studentId), { isDeleted: true });
+    }
+  };
+
+  const handleRestoreStudent = async (studentId) => {
+    await updateDoc(doc(db, "students", studentId), { isDeleted: false });
+  };
+
+  const handleSoftDeleteReceipt = async (receiptId) => {
+    if (window.confirm("Move receipt to Recycle Bin?")) {
+      await updateDoc(doc(db, "receipts", receiptId), { isDeleted: true });
+    }
+  };
+
+  const handleRestoreReceipt = async (receiptId) => {
+    await updateDoc(doc(db, "receipts", receiptId), { isDeleted: false });
+  };
+
+  // --- 3. BANK STATEMENT / ACCOUNT LEDGER CALCULATION ---
+  const getStudentStatement = (studentId) => {
+    if (!studentId) return [];
+
+    const studentReceipts = receipts
+      .filter(r => r.studentId === studentId && !r.isDeleted)
+      .map(r => ({
+        type: 'CREDIT',
+        category: 'Payment Received',
+        amount: r.amountPaid,
+        writeOff: r.writeOffAmount,
+        ref: r.utrNumber || r.chequeNumber || r.receiptNo,
+        mode: r.paymentMode,
+        remarks: r.remarks,
+        date: r.date
+      }));
+
+    const studentCharges = extraCharges
+      .filter(c => c.studentId === studentId && !c.isDeleted)
+      .map(c => ({
+        type: 'DEBIT',
+        category: `Extra Charge (${c.month})`,
+        amount: c.amount,
+        writeOff: 0,
+        ref: 'CHARGED',
+        mode: 'N/A',
+        remarks: c.remarks,
+        date: c.createdAt
+      }));
+
+    const combined = [...studentReceipts, ...studentCharges].sort(
+      (a, b) => new Date(a.date) - new Date(b.date)
+    );
+
+    // Compute Running Balance
+    let runningBalance = 0;
+    return combined.map(item => {
+      if (item.type === 'DEBIT') {
+        runningBalance += item.amount;
+      } else if (item.type === 'CREDIT') {
+        runningBalance -= (item.amount + item.writeOff);
+      }
+      return { ...item, runningBalance };
+    });
+  };
+
+  // Active (non-deleted) items
+  const activeStudents = useMemo(() => students.filter(s => !s.isDeleted), [students]);
+  const activeReceiptList = useMemo(() => receipts.filter(r => !r.isDeleted), [receipts]);
+  const deletedStudents = useMemo(() => students.filter(s => s.isDeleted), [students]);
+  const deletedReceipts = useMemo(() => receipts.filter(r => r.isDeleted), [receipts]);
+
+  // --- 4. MONTHLY PROJECTION CALCULATION ---
+  const projectionMetrics = useMemo(() => {
+    const totalBaseMonthly = activeStudents.reduce((sum, s) => sum + (parseFloat(s.monthlyFee) || 0), 0);
+    const monthExtraCharges = extraCharges
+      .filter(c => c.month === selectedMonth && !c.isDeleted)
+      .reduce((sum, c) => sum + c.amount, 0);
+    
+    return {
+      totalBaseMonthly,
+      monthExtraCharges,
+      totalProjected: totalBaseMonthly + monthExtraCharges
+    };
+  }, [activeStudents, extraCharges, selectedMonth]);
+
+  return (
+    <div className="min-h-screen bg-slate-900 text-slate-100 p-6 font-sans">
+      {/* Header */}
+      <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-800">
+        <div>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+            <Users className="text-indigo-400" /> Coaching Ledger Pro
+          </h1>
+          <p className="text-sm text-slate-400">Student accounts, fees, receipts & audit logs</p>
         </div>
 
-        {viewMode === "class" && (
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Filter Class:</span>
-            <select 
-              value={selectedClass} 
-              onChange={e => setSelectedClass(e.target.value)}
-              className="border rounded-sm px-3 py-1.5 text-xs bg-white"
-              style={{ borderColor: "#D8CFB8" }}
-            >
-              <option value="ALL">All Classes ({students.length})</option>
-              {classes.map(c => (
-                <option key={c} value={c}>Class {c}</option>
-              ))}
-            </select>
-          </div>
-        )}
-      </div>
+        {/* Navigation Tabs */}
+        <div className="flex items-center gap-2 bg-slate-800 p-1 rounded-lg border border-slate-700">
+          <button
+            onClick={() => setSelectedTab('students')}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition ${
+              selectedTab === 'students' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Students Ledger
+          </button>
+          <button
+            onClick={() => setSelectedTab('projection')}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition ${
+              selectedTab === 'projection' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            Fee Projection
+          </button>
+          <button
+            onClick={() => setSelectedTab('trash')}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition flex items-center gap-1.5 ${
+              selectedTab === 'trash' ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Archive className="w-4 h-4" /> Recycle Bin ({deletedStudents.length + deletedReceipts.length})
+          </button>
+        </div>
+      </header>
 
-      {viewMode === "class" ? (
-        <Card>
-          {filteredStudents.length === 0 ? (
-            <div className="p-8 text-center text-sm text-[#9C8F6E]">No students found for class "{selectedClass}".</div>
-          ) : (
-            <table className="w-full text-sm">
+      {/* TAB 1: STUDENTS LEDGER */}
+      {selectedTab === 'students' && (
+        <main className="mt-6 space-y-6">
+          {/* Controls Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3 flex-1 min-w-[280px]">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 absolute left-3 top-3 text-slate-500" />
+                <input
+                  type="text"
+                  placeholder="Search student name..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg pl-9 pr-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Student List */}
+          <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+            <table className="w-full text-left border-collapse">
               <thead>
-                <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                  {["Name", "Class", "Subjects (this month)", "Total Due", "Status", "Academic Cycle Actions"].map(h => (
-                    <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
-                  ))}
+                <tr className="bg-slate-800/80 border-b border-slate-700 text-slate-400 text-xs uppercase font-semibold">
+                  <th className="p-4">Student</th>
+                  <th className="p-4">Class</th>
+                  <th className="p-4">Monthly Fee</th>
+                  <th className="p-4">Total Outstanding</th>
+                  <th className="p-4 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody>
-                {filteredStudents.map(s => {
-                  const due = studentDues[s.id] || 0;
-                  const status = s.status || "active";
-                  const badgeText = status === "active" ? "Active" : status === "dropped" ? "Dropped Out" : (s.resultStatus || "On Break / Gap");
-                  const badgeTone = status === "active" ? "paid" : status === "dropped" ? "overdue" : "break";
-                  return (
-                    <tr key={s.id} className="ledger-row">
-                      <td className="px-4 py-2.5 font-medium">
-                        <div className="flex items-center gap-1.5">
-                          {s.name}
-                          {s.monthlyDiscount > 0 && <span className="text-[10px] bg-[#EAF1EA] text-[#3F6B52] px-1.5 py-0.5 rounded font-mono">-{s.monthlyDiscount}/mo</span>}
-                        </div>
-                        {s.phone && <div className="text-[10px] text-[#9C8F6E]">{s.phone}</div>}
+              <tbody className="divide-y divide-slate-700/50 text-sm">
+                {activeStudents
+                  .filter(s => s.name?.toLowerCase().includes(searchQuery.toLowerCase()))
+                  .map(s => (
+                    <tr key={s.id} className="hover:bg-slate-700/30 transition">
+                      <td className="p-4 font-medium text-white">{s.name}</td>
+                      <td className="p-4 text-slate-300">{s.class || 'N/A'}</td>
+                      <td className="p-4 text-slate-300">₹{s.monthlyFee || 0}</td>
+                      <td className="p-4">
+                        <span className={`font-semibold ${s.totalDue > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                          ₹{s.totalDue || 0}
+                        </span>
                       </td>
-                      <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
-                      <td className="px-4 py-2.5 text-xs text-[#6E6650]">{batchesForMonth(s, curMonth).join(", ") || "—"}</td>
-                      <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: due > 0 ? "#A63D2F" : "#3F6B52" }}>
-                        {fmtINR(due)}
-                        {s.previousDues > 0 && <div className="text-[9px] text-[#A63D2F]">({fmtINR(s.previousDues)} old)</div>}
-                      </td>
-                      <td className="px-4 py-2.5 text-xs">
-                        <Stamp text={badgeText} tone={badgeTone} />
-                      </td>
-                      <td className="px-4 py-2.5 text-xs space-x-2 whitespace-nowrap">
-                        <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} />
+                      <td className="p-4 text-right space-x-2">
+                        {/* Action Buttons */}
+                        <button
+                          onClick={() => { setActiveStudent(s); setShowAddChargeModal(true); }}
+                          className="px-2.5 py-1.5 bg-amber-600/20 text-amber-300 hover:bg-amber-600/30 border border-amber-500/30 rounded text-xs transition"
+                          title="Add Extra Charge"
+                        >
+                          + Charge
+                        </button>
+
+                        <button
+                          onClick={() => { setActiveStudent(s); setShowPaymentModal(true); }}
+                          className="px-2.5 py-1.5 bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600/30 border border-emerald-500/30 rounded text-xs transition"
+                          title="Record Payment & Discount"
+                        >
+                          + Payment
+                        </button>
+
+                        <button
+                          onClick={() => { setActiveStudent(s); setShowLedgerModal(true); }}
+                          className="px-2.5 py-1.5 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 border border-indigo-500/30 rounded text-xs transition"
+                          title="View Account Statement"
+                        >
+                          Statement
+                        </button>
+
+                        <button
+                          onClick={() => handleSoftDeleteStudent(s.id)}
+                          className="px-2 py-1.5 text-slate-400 hover:text-red-400 transition"
+                          title="Move to Recycle Bin"
+                        >
+                          <Trash2 className="w-4 h-4 inline" />
+                        </button>
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </Card>
-      ) : (
-        <Card>
-          {outstandingRows.length === 0 ? (
-            <div className="p-8 text-center text-sm text-[#3F6B52] font-medium">🎉 Great job! There are no pending fee dues.</div>
-          ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                  {["Student", "Class", "Month", "Expected", "Paid", "Pending Balance", "WhatsApp Reminder"].map(h => (
-                    <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {outstandingRows.map((r, i) => (
-                  <tr key={i} className="ledger-row">
-                    <td className="px-4 py-2.5 font-medium">{r.name}</td>
-                    <td className="px-4 py-2.5 font-semibold text-[#12312B]">{r.cls}</td>
-                    <td className="px-4 py-2.5 text-xs font-medium" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-                      {monthLabel(r.month)}
-                      {r.carriedOver && <div><Stamp text={r.status === "dropped" ? "Dropped Out" : "On Break"} tone={r.status === "dropped" ? "overdue" : "break"} /></div>}
-                    </td>
-                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.expected)}</td>
-                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.paid)}</td>
-                    <td className="px-4 py-2.5 font-bold text-[#A63D2F]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.outstanding)}</td>
-                    <td className="px-4 py-2.5">
-                      <button 
-                        onClick={() => sendWhatsAppReminder(r.phone, r.name, r.month, r.outstanding)}
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold text-white bg-[#25D366] hover:bg-[#1DA851] transition-colors"
-                      >
-                        <Send size={11} /> Send Notice
-                      </button>
-                    </td>
-                  </tr>
                 ))}
               </tbody>
             </table>
-          )}
-        </Card>
+          </div>
+        </main>
       )}
-    </div>
-  );
-}
 
-function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth, onAdd, onEdit, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onRemove }) {
-  return (
-    <div>
-      <SectionHeader eyebrow="Register" title="Students Directory" action={
-        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
-          <Plus size={15} /> Add student
-        </button>
-      } />
-      <Card>
-        {students.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No students registered yet.</div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Name", "Class", "Subjects (this month)", "Total Due", "Status", "Actions"].map(h => (
-                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {students.map(s => {
-                const dueAmount = studentDues[s.id] || 0;
-                const status = s.status || "active";
-                const badgeText = status === "active" ? "Active" : status === "dropped" ? "Dropped Out" : (s.resultStatus || "On Break");
-                const badgeTone = status === "active" ? "paid" : status === "dropped" ? "overdue" : "break";
-                return (
-                  <tr key={s.id} className="ledger-row">
-                    <td className="px-4 py-2.5 font-medium">
-                      <div>{s.name}</div>
-                      {s.phone && <div className="text-[10px] text-[#9C8F6E]">{s.phone}</div>}
-                    </td>
-                    <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
-                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{batchesForMonth(s, curMonth).join(", ") || "—"}</td>
-                    <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: dueAmount > 0 ? "#A63D2F" : "#3F6B52" }}>
-                      {fmtINR(dueAmount)}
-                    </td>
-                    <td className="px-4 py-2.5 text-xs">
-                      <Stamp text={badgeText} tone={badgeTone} />
-                    </td>
-                    <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-2">
-                      <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} compact />
-                      <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline">Edit</button>
-                      <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
-                    </td>
+      {/* TAB 2: MONTHLY PROJECTION VIEW (FEATURE 4) */}
+      {selectedTab === 'projection' && (
+        <main className="mt-6 space-y-6">
+          <div className="flex items-center justify-between bg-slate-800 p-4 rounded-xl border border-slate-700">
+            <div>
+              <h2 className="text-lg font-semibold text-white">Monthly Fee Forecast & Billing</h2>
+              <p className="text-xs text-slate-400">View charges & projected total revenue for any selected billing cycle</p>
+            </div>
+            <input
+              type="month"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="bg-slate-900 border border-slate-700 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-slate-800 p-5 rounded-xl border border-slate-700">
+              <span className="text-xs text-slate-400 uppercase font-semibold">Standard Monthly Base</span>
+              <p className="text-2xl font-bold text-white mt-1">₹{projectionMetrics.totalBaseMonthly}</p>
+            </div>
+
+            <div className="bg-slate-800 p-5 rounded-xl border border-slate-700">
+              <span className="text-xs text-slate-400 uppercase font-semibold">Extra Charges ({selectedMonth})</span>
+              <p className="text-2xl font-bold text-amber-400 mt-1">₹{projectionMetrics.monthExtraCharges}</p>
+            </div>
+
+            <div className="bg-slate-800 p-5 rounded-xl border border-indigo-500/40 bg-indigo-950/20">
+              <span className="text-xs text-indigo-300 uppercase font-semibold">Total Projected Revenue</span>
+              <p className="text-2xl font-bold text-indigo-400 mt-1">₹{projectionMetrics.totalProjected}</p>
+            </div>
+          </div>
+        </main>
+      )}
+
+      {/* TAB 3: RECYCLE BIN / RESTORE SYSTEM (FEATURE 6) */}
+      {selectedTab === 'trash' && (
+        <main className="mt-6 space-y-6">
+          <h2 className="text-lg font-semibold text-white">Recycle Bin</h2>
+          
+          <div className="space-y-4">
+            <h3 className="text-sm font-medium text-slate-400">Deleted Students ({deletedStudents.length})</h3>
+            <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-900 text-slate-400 text-xs">
+                  <tr>
+                    <th className="p-3">Student Name</th>
+                    <th className="p-3">Class</th>
+                    <th className="p-3 text-right">Action</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </Card>
-    </div>
-  );
-}
+                </thead>
+                <tbody className="divide-y divide-slate-700">
+                  {deletedStudents.map(s => (
+                    <tr key={s.id}>
+                      <td className="p-3 text-white">{s.name}</td>
+                      <td className="p-3 text-slate-400">{s.class}</td>
+                      <td className="p-3 text-right">
+                        <button
+                          onClick={() => handleRestoreStudent(s.id)}
+                          className="px-3 py-1 bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 rounded text-xs hover:bg-emerald-600/30 transition flex items-center gap-1 ml-auto"
+                        >
+                          <RotateCcw className="w-3 h-3" /> Restore
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {deletedStudents.length === 0 && (
+                    <tr><td colSpan="3" className="p-4 text-center text-slate-500">No deleted students in bin.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
 
-function StructureTab({ feeStructure, setFeeStructure, classes }) {
-  function update(cls, count, val) {
-    const updated = { ...feeStructure, [cls]: { ...feeStructure[cls], [count]: Number(val) || 0 } };
-    setFeeStructure(updated);
-  }
-  return (
-    <div>
-      <SectionHeader eyebrow="Package Pricing" title="Expanded Fee Matrix (1 to 6 Subjects)" />
-      <div className="text-sm text-[#6E6650] mb-4">Configure monthly fees based on class and total subjects taken (up to 6 subjects).</div>
-      <Card className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-              <th style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">Class Name</th>
-              {[1, 2, 3, 4, 5, 6].map(num => (
-                <th key={num} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-3 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{num} Subj Fee</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {classes.map(c => (
-              <tr key={c} className="ledger-row">
-                <td className="px-4 py-2.5 font-semibold text-[#12312B]">Class {c}</td>
-                {[1, 2, 3, 4, 5, 6].map(count => (
-                  <td key={count} className="px-2 py-2">
-                    <div className="flex items-center gap-0.5">
-                      <span className="text-[#9C8F6E] text-xs">₹</span>
-                      <input
-                        type="number"
-                        value={feeStructure[c] ? feeStructure[c][count] || 0 : 0}
-                        onChange={(e) => update(c, count, e.target.value)}
-                        style={{ fontFamily: "'IBM Plex Mono', monospace" }}
-                        className="w-20 border rounded-sm px-1.5 py-1 text-xs bg-white"
-                      />
-                    </div>
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Card>
-    </div>
-  );
-}
-
-function DepositsTab({ deposits, students, studentDues, batchesForMonth, onAdd, onRemove, onOpenReceipt }) {
-  const sorted = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-  const byId = Object.fromEntries(students.map(s => [s.id, s]));
-  return (
-    <div>
-      <SectionHeader eyebrow="Fee Deposits" title="Deposits Log" action={
-        <button onClick={onAdd} disabled={students.length === 0} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
-          <Plus size={15} /> Record deposit
-        </button>
-      } />
-      <Card>
-        {sorted.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No fee deposits recorded yet.</div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date", "Student", "Class", "Applied To", "Subjects", "Mode", "Amount Paid", "Actions"].map(h => (
-                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map(d => {
-                const st = byId[d.studentId];
-                return (
-                  <tr key={d.id} className="ledger-row">
-                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{d.date}</td>
-                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
-                    <td className="px-4 py-2.5 font-semibold text-[#12312B]">{st ? st.class : "—"}</td>
-                    <td className="px-4 py-2.5 text-xs">{monthLabel(d.month)}</td>
-                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{d.isCarriedOverPayment || !st ? "—" : (batchesForMonth(st, d.month) || []).join(", ") || "—"}</td>
-                    <td className="px-4 py-2.5 text-xs">{d.mode}</td>
-                    <td className="px-4 py-2.5 font-semibold text-[#3F6B52]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(d.amount)}</td>
-                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                      <button onClick={() => onOpenReceipt(d)} className="flex items-center gap-1 text-xs text-[#12312B] underline mr-3 inline-flex">
-                        <Printer size={12} /> Receipt
-                      </button>
-                      <button onClick={() => sendWhatsAppReceipt(d, st, studentDues[st?.id] || 0)} className="text-xs text-[#25D366] font-semibold underline mr-3 inline-flex items-center gap-1">
-                        <Send size={11} /> WhatsApp
-                      </button>
-                      <button onClick={() => onRemove(d.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
-                    </td>
+            <h3 className="text-sm font-medium text-slate-400 mt-6">Deleted Receipts ({deletedReceipts.length})</h3>
+            <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-900 text-slate-400 text-xs">
+                  <tr>
+                    <th className="p-3">Receipt No</th>
+                    <th className="p-3">Student Name</th>
+                    <th className="p-3">Amount</th>
+                    <th className="p-3 text-right">Action</th>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </Card>
-    </div>
-  );
-}
+                </thead>
+                <tbody className="divide-y divide-slate-700">
+                  {deletedReceipts.map(r => (
+                    <tr key={r.id}>
+                      <td className="p-3 text-white">{r.receiptNo}</td>
+                      <td className="p-3 text-slate-300">{r.studentName}</td>
+                      <td className="p-3 text-emerald-400">₹{r.amountPaid}</td>
+                      <td className="p-3 text-right">
+                        <button
+                          onClick={() => handleRestoreReceipt(r.id)}
+                          className="px-3 py-1 bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 rounded text-xs hover:bg-emerald-600/30 transition flex items-center gap-1 ml-auto"
+                        >
+                          <RotateCcw className="w-3 h-3" /> Restore
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {deletedReceipts.length === 0 && (
+                    <tr><td colSpan="4" className="p-4 text-center text-slate-500">No deleted receipts in bin.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </main>
+      )}
 
-function DuesTab({ rows, totalOutstanding, students, studentDues }) {
-  return (
-    <div>
-      <SectionHeader eyebrow="Outstanding Dues" title="Pending Dues Ledger" />
-      <Card className="p-5 mb-5 flex items-center justify-between" style={{ borderLeft: "4px solid #A63D2F" }}>
-        <div>
-          <div className="text-sm text-[#6E6650]">Total pending balance across every student — active, on break, or dropped</div>
-          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-3xl font-bold text-[#A63D2F]">{fmtINR(totalOutstanding)}</div>
-        </div>
-        <Stamp text={totalOutstanding > 0 ? "Outstanding Dues Present" : "all clear"} tone={totalOutstanding > 0 ? "overdue" : "paid"} />
-      </Card>
+      {/* --- MODAL 1: ADD EXTRA CHARGES (FEATURE 1) --- */}
+      {showAddChargeModal && activeStudent && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-md p-6">
+            <h3 className="text-lg font-bold text-white">Add Particular Charge</h3>
+            <p className="text-xs text-slate-400 mb-4">Student: <span className="text-indigo-400 font-semibold">{activeStudent.name}</span></p>
 
-      <Card className="mb-6 p-4">
-        <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-base font-semibold mb-2">Student Balance Summary</div>
-        <div className="grid grid-cols-3 gap-3">
-          {students.map(s => {
-            const due = studentDues[s.id] || 0;
-            if (due === 0) return null;
-            return (
-              <div key={s.id} className="p-2 border rounded bg-[#FAF6EC] flex justify-between items-center text-xs" style={{ borderColor: "#D8CFB8" }}>
-                <div>
-                  <div className="font-semibold">{s.name} (Class {s.class})</div>
-                  {(s.status || "active") !== "active" && <div className="text-[10px] text-[#4A7B9D]">{s.status === "dropped" ? "Dropped Out" : "On Break / Gap"}</div>}
-                  {s.previousDues > 0 && <div className="text-[10px] text-[#A63D2F]">Carried Dues: ₹{s.previousDues}</div>}
-                </div>
-                <div className="font-bold text-[#A63D2F]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(due)}</div>
+            <form onSubmit={handleAddExtraCharge} className="space-y-4">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Target Billing Month</label>
+                <input
+                  type="month"
+                  value={chargeForm.month}
+                  onChange={(e) => setChargeForm({...chargeForm, month: e.target.value})}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+                  required
+                />
               </div>
-            );
-          })}
-        </div>
-      </Card>
 
-      <Card>
-        {rows.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No dues pending — active or carried forward.</div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Student", "Class", "Month", "Expected", "Paid", "Outstanding", "Status"].map(h => (
-                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={i} className="ledger-row">
-                  <td className="px-4 py-2.5 font-medium">{r.name}</td>
-                  <td className="px-4 py-2.5 font-semibold text-[#12312B]">{r.cls}</td>
-                  <td className="px-4 py-2.5 text-xs">{monthLabel(r.month)}</td>
-                  <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.expected)}</td>
-                  <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.paid)}</td>
-                  <td className="px-4 py-2.5 font-semibold text-[#A63D2F]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.outstanding)}</td>
-                  <td className="px-4 py-2.5">
-                    <Stamp 
-                      text={r.carriedOver ? "Carried Forward" : (r.isCurrent ? "due" : "overdue")} 
-                      tone={r.carriedOver ? "carried" : (r.isCurrent ? "due" : "overdue")} 
-                    />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Card>
-    </div>
-  );
-}
-
-function Modal({ title, onClose, children }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "#12312Bcc" }}>
-      <div className="w-full max-w-lg bg-[#FAF6EC] rounded-sm" style={{ border: "2px dashed #B8862B" }}>
-        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: "1.5px solid #26231D" }}>
-          <h3 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold">{title}</h3>
-          <button onClick={onClose} className="text-[#6E6650]"><X size={18} /></button>
-        </div>
-        <div className="px-6 py-5 max-h-[80vh] overflow-y-auto">{children}</div>
-      </div>
-    </div>
-  );
-}
-
-function Field({ label, children }) {
-  return (
-    <div className="mb-3">
-      <label style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", letterSpacing: "0.08em" }} className="block uppercase text-[#9C8F6E] mb-1.5">{label}</label>
-      {children}
-    </div>
-  );
-}
-
-const inputCls = "w-full border rounded-sm px-3 py-2 text-sm bg-white";
-const inputStyle = { borderColor: "#D8CFB8" };
-
-function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
-  const [name, setName] = useState(initial?.name || "");
-  const [cls, setCls] = useState(initial?.class || classes[0] || "10");
-  const [batches, setBatches] = useState(initial?.batches || []);
-  const [phone, setPhone] = useState(initial?.phone || "");
-  const [admissionMonth, setAdmissionMonth] = useState(initial?.admissionMonth || currentMonthKey());
-  const [monthlyDiscount, setMonthlyDiscount] = useState(initial?.monthlyDiscount || 0);
-  const [previousDues, setPreviousDues] = useState(initial?.previousDues || 0);
-  const [status] = useState(initial?.status || "active");
-
-  function toggleSubject(sub) {
-    setBatches(prev => {
-      if (prev.includes(sub)) return prev.filter(x => x !== sub);
-      if (prev.length >= 6) return prev;
-      return [...prev, sub];
-    });
-  }
-
-  function submit() {
-    if (!name.trim()) return;
-    // The main form only sets the ORIGINAL enrollment batches (from admission
-    // month). For a change effective in a specific month later on, use
-    // "Change Batches" on the student's row instead — that's what keeps past
-    // months' dues untouched.
-    const baseHistory = initial?.batchHistory && initial.batchHistory.length
-      ? [...initial.batchHistory]
-      : [{ fromMonth: admissionMonth, batches }];
-    if (initial?.batchHistory && initial.batchHistory.length) {
-      baseHistory[0] = { ...baseHistory[0], batches };
-    }
-    onSave({ 
-      ...initial,
-      id: initial?.id, 
-      name: name.trim(), 
-      class: cls, 
-      batches, 
-      batchHistory: baseHistory,
-      phone: phone.trim(), 
-      admissionMonth, 
-      monthlyDiscount: Number(monthlyDiscount) || 0,
-      previousDues: Number(previousDues) || 0,
-      status
-    });
-  }
-
-  return (
-    <Modal title={initial ? "Edit Student Details" : "Add New Student"} onClose={onClose}>
-      <Field label="Full Name">
-        <input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Rahul Sharma" />
-      </Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Class">
-          <select className={inputCls} style={inputStyle} value={cls} onChange={e => setCls(e.target.value)}>
-            {classes.map(c => <option key={c} value={c}>Class {c}</option>)}
-          </select>
-        </Field>
-        <Field label="Fee Start Month">
-          <input type="month" className={inputCls} style={inputStyle} value={admissionMonth} onChange={e => setAdmissionMonth(e.target.value)} />
-        </Field>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Phone / WhatsApp Number">
-          <input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit phone number" />
-        </Field>
-        <Field label="Monthly Concession / Discount (₹)">
-          <input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} placeholder="0" />
-        </Field>
-      </div>
-
-      <Field label="Carried-Over Previous Dues (₹)">
-        <input type="number" className={inputCls} style={inputStyle} value={previousDues} onChange={e => setPreviousDues(e.target.value)} placeholder="0" />
-      </Field>
-
-      <Field label={`Select Subjects / Batches at admission (${batches.length}/6 max)`}>
-        <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 border bg-white rounded-sm">
-          {subjectsList.map(sub => {
-            const active = batches.includes(sub);
-            return (
-              <button key={sub} type="button" onClick={() => toggleSubject(sub)}
-                className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
-                style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>
-                {active && <Check size={12} />}{sub}
-              </button>
-            );
-          })}
-        </div>
-        {initial && <div className="text-[10px] text-[#9C8F6E] mt-1">To change subjects from a later month (e.g. add one in September), close this and use "Batches" on the student's row instead.</div>}
-      </Field>
-
-      <button onClick={submit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        {initial ? "Save Changes" : "Register Student"}
-      </button>
-    </Modal>
-  );
-}
-
-function ExitStudentModal({ student, currentDue, onClose, onConfirm }) {
-  const [reason, setReason] = useState("Passed");
-  const [exitDate, setExitDate] = useState(new Date().toISOString().slice(0, 10));
-
-  return (
-    <Modal title={`End / Pause Enrollment — ${student.name}`} onClose={onClose}>
-      <div className="p-3 bg-[#F7E7E3] border border-[#A63D2F] rounded text-xs mb-4">
-        This stops monthly fee generation for this student. Their current outstanding balance
-        (<strong>{fmtINR(currentDue)}</strong>) is carried forward and stays visible on the Dues tab.
-        Made a mistake? You can undo this in one click from the student's row right after confirming.
-      </div>
-      <Field label="Reason">
-        <div className="space-y-1.5">
-          {EXIT_REASONS.map(r => (
-            <label key={r.value} className="flex items-center gap-2 text-sm p-2 border rounded-sm cursor-pointer" style={{ borderColor: reason === r.value ? "#12312B" : "#D8CFB8", background: reason === r.value ? "#F5F0E1" : "white" }}>
-              <input type="radio" name="exitReason" checked={reason === r.value} onChange={() => setReason(r.value)} />
-              {r.label}
-            </label>
-          ))}
-        </div>
-      </Field>
-      <Field label="Effective Date">
-        <input type="date" className={inputCls} style={inputStyle} value={exitDate} onChange={e => setExitDate(e.target.value)} />
-      </Field>
-      <button onClick={() => onConfirm(reason, exitDate)} className="w-full mt-3 py-2.5 rounded-sm text-sm font-semibold text-white" style={{ background: "#A63D2F" }}>
-        Confirm
-      </button>
-    </Modal>
-  );
-}
-
-function BatchChangeModal({ student, subjectsList, curMonth, onClose, onSave }) {
-  const [fromMonth, setFromMonth] = useState(curMonth);
-  const [batches, setBatches] = useState(student.batches || []);
-  const minMonth = student.admissionMonth || curMonth;
-  const sortedHistory = [...(student.batchHistory || [])].sort((a, b) => (a.fromMonth < b.fromMonth ? -1 : 1));
-
-  function toggleSubject(sub) {
-    setBatches(prev => {
-      if (prev.includes(sub)) return prev.filter(x => x !== sub);
-      if (prev.length >= 6) return prev;
-      return [...prev, sub];
-    });
-  }
-
-  function submit() {
-    if (fromMonth < minMonth) {
-      alert(`Effective month can't be before this student's start month (${monthLabel(minMonth)}).`);
-      return;
-    }
-    onSave(student, fromMonth, batches);
-  }
-
-  return (
-    <Modal title={`Change Batches — ${student.name}`} onClose={onClose}>
-      <div className="text-xs text-[#6E6650] mb-3">Pick the month this change should start from. Months before it keep using whatever subjects applied back then — nothing already billed gets recalculated.</div>
-      <Field label="Effective From Month">
-        <input type="month" min={minMonth} className={inputCls} style={inputStyle} value={fromMonth} onChange={e => setFromMonth(e.target.value)} />
-      </Field>
-      <Field label={`Subjects from ${monthLabel(fromMonth)} onward (${batches.length}/6)`}>
-        <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 border bg-white rounded-sm">
-          {subjectsList.map(sub => {
-            const active = batches.includes(sub);
-            return (
-              <button key={sub} type="button" onClick={() => toggleSubject(sub)}
-                className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
-                style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>
-                {active && <Check size={12} />}{sub}
-              </button>
-            );
-          })}
-        </div>
-      </Field>
-      {sortedHistory.length > 0 && (
-        <div className="mt-3 p-3 border rounded bg-white" style={{ borderColor: "#D8CFB8" }}>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="uppercase tracking-wide text-[#9C8F6E] mb-1.5">Existing timeline</div>
-          <div className="space-y-1">
-            {sortedHistory.map((h, i) => (
-              <div key={i} className="text-xs flex justify-between gap-3">
-                <span className="font-mono text-[#6E6650] shrink-0">{monthLabel(h.fromMonth)} →</span>
-                <span className="text-[#4A4636] text-right">{(h.batches || []).join(", ") || "—"}</span>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Charge Amount (₹)</label>
+                <input
+                  type="number"
+                  placeholder="e.g. 500"
+                  value={chargeForm.amount}
+                  onChange={(e) => setChargeForm({...chargeForm, amount: e.target.value})}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+                  required
+                />
               </div>
-            ))}
+
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Remarks / Charge Reason</label>
+                <textarea
+                  placeholder="e.g. Test series fee, study material charge..."
+                  value={chargeForm.remarks}
+                  onChange={(e) => setChargeForm({...chargeForm, remarks: e.target.value})}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white h-20"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddChargeModal(false)}
+                  className="px-4 py-2 text-sm text-slate-400 hover:text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-sm font-medium transition"
+                >
+                  Save Charge
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
-      <button onClick={submit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        Save Batch Change
-      </button>
-    </Modal>
-  );
-}
 
-function PromoteModal({ student, classes, subjectsList, curMonth, onClose, onPromote }) {
-  const [newClass, setNewClass] = useState(student.class);
-  const [newBatches, setNewBatches] = useState(student.batches || []);
-  const [newStartMonth, setNewStartMonth] = useState(curMonth);
-  const [monthlyDiscount, setMonthlyDiscount] = useState(student.monthlyDiscount || 0);
+      {/* --- MODAL 2: UNIFIED PAYMENT & DISCOUNT (FEATURE 2 & 5) --- */}
+      {showPaymentModal && activeStudent && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-md p-6">
+            <h3 className="text-lg font-bold text-white">Record Payment / Fee Deposit</h3>
+            <p className="text-xs text-slate-400 mb-4">Student: <span className="text-indigo-400 font-semibold">{activeStudent.name}</span> | Current Outstanding: <span className="text-red-400">₹{activeStudent.totalDue || 0}</span></p>
 
-  function toggleSubject(sub) {
-    setNewBatches(prev => {
-      if (prev.includes(sub)) return prev.filter(x => x !== sub);
-      if (prev.length >= 6) return prev;
-      return [...prev, sub];
-    });
-  }
+            <form onSubmit={handleProcessPayment} className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Amount Paid (₹)</label>
+                  <input
+                    type="number"
+                    placeholder="0"
+                    value={paymentForm.amountPaid}
+                    onChange={(e) => setPaymentForm({...paymentForm, amountPaid: e.target.value})}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+                  />
+                </div>
 
-  function submit() {
-    onPromote(student, newClass, newBatches, newStartMonth, monthlyDiscount);
-  }
-
-  return (
-    <Modal title={`${(student.status || "active") === "dropped" ? "Reactivate" : "Promote / Re-Enroll"}: ${student.name}`} onClose={onClose}>
-      <div className="p-3 bg-[#EAF1EA] border border-[#3F6B52] rounded text-xs mb-3">
-        Carried Dues from previous sessions: <strong>{fmtINR(student.previousDues || 0)}</strong>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="New Class">
-          <select className={inputCls} style={inputStyle} value={newClass} onChange={e => setNewClass(e.target.value)}>
-            {classes.map(c => <option key={c} value={c}>Class {c}</option>)}
-          </select>
-        </Field>
-        <Field label="Fee Resume Start Month">
-          <input type="month" className={inputCls} style={inputStyle} value={newStartMonth} onChange={e => setNewStartMonth(e.target.value)} />
-        </Field>
-      </div>
-
-      <Field label="Monthly Concession (₹)">
-        <input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} />
-      </Field>
-
-      <Field label={`Select Subjects (${newBatches.length}/6)`}>
-        <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 border bg-white rounded-sm">
-          {subjectsList.map(sub => {
-            const active = newBatches.includes(sub);
-            return (
-              <button key={sub} type="button" onClick={() => toggleSubject(sub)}
-                className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
-                style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>
-                {active && <Check size={12} />}{sub}
-              </button>
-            );
-          })}
-        </div>
-      </Field>
-
-      <button onClick={submit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-semibold bg-[#3F6B52] text-white">
-        {(student.status || "active") === "dropped" ? "Reactivate Student & Resume Fee Counter" : "Promote Student & Resume Fee Counter"}
-      </button>
-    </Modal>
-  );
-}
-
-function AcademicHistoryModal({ student, onClose }) {
-  const history = student.academicHistory || [];
-  const batchTimeline = [...(student.batchHistory || [])].sort((a, b) => (a.fromMonth < b.fromMonth ? -1 : 1));
-  return (
-    <Modal title={`Academic Audit Log — ${student.name}`} onClose={onClose}>
-      <div className="space-y-3">
-        {history.length === 0 ? (
-          <div className="text-sm text-[#9C8F6E] p-4 text-center">No past academic cycles recorded yet.</div>
-        ) : (
-          history.map((h, i) => (
-            <div key={i} className="p-3 border rounded bg-white" style={{ borderColor: "#D8CFB8" }}>
-              <div className="flex justify-between items-center text-sm font-semibold text-[#12312B]">
-                <span>Class {h.class}</span>
-                <Stamp text={h.resultStatus || "Completed"} tone={h.resultStatus === "Dropped" ? "overdue" : "paid"} />
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Discount / Write-Off (₹)</label>
+                  <input
+                    type="number"
+                    placeholder="0"
+                    value={paymentForm.writeOffAmount}
+                    onChange={(e) => setPaymentForm({...paymentForm, writeOffAmount: e.target.value})}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-amber-400"
+                  />
+                </div>
               </div>
-              <div className="text-xs text-[#6E6650] mt-1">
-                Subjects: {(h.batches || []).join(", ") || "General"}
+
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Payment Method</label>
+                <select
+                  value={paymentForm.paymentMode}
+                  onChange={(e) => setPaymentForm({...paymentForm, paymentMode: e.target.value})}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+                >
+                  <option value="Cash">Cash</option>
+                  <option value="UPI">UPI</option>
+                  <option value="Bank Transfer">Bank Transfer</option>
+                  <option value="Cheque">Cheque</option>
+                </select>
               </div>
-              <div className="text-[11px] text-[#9C8F6E] mt-1 flex justify-between" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-                <span>Joined: {monthLabel(h.admissionMonth)}</span>
-                <span>Ended: {h.completionDate}</span>
-              </div>
-              {h.unpaidBalanceAtEnd > 0 && (
-                <div className="text-[11px] text-[#A63D2F] mt-1" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-                  Balance carried forward: {fmtINR(h.unpaidBalanceAtEnd)}
+
+              {(paymentForm.paymentMode === 'UPI' || paymentForm.paymentMode === 'Bank Transfer') && (
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">UTR / Transaction Ref Number</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. 320192847192"
+                    value={paymentForm.utrNumber}
+                    onChange={(e) => setPaymentForm({...paymentForm, utrNumber: e.target.value})}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+                  />
                 </div>
               )}
-            </div>
-          ))
-        )}
-      </div>
 
-      {batchTimeline.length > 0 && (
-        <div className="mt-4 pt-4" style={{ borderTop: "1.5px solid #26231D" }}>
-          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-sm font-semibold mb-2">Batch change timeline</div>
-          <div className="space-y-1">
-            {batchTimeline.map((h, i) => (
-              <div key={i} className="text-xs flex justify-between gap-3 p-2 rounded bg-[#FAF6EC]">
-                <span className="font-mono text-[#6E6650] shrink-0">{monthLabel(h.fromMonth)} →</span>
-                <span className="text-[#4A4636] text-right">{(h.batches || []).join(", ") || "—"}</span>
+              {paymentForm.paymentMode === 'Cheque' && (
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Cheque Number</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. CHQ-004921"
+                    value={paymentForm.chequeNumber}
+                    onChange={(e) => setPaymentForm({...paymentForm, chequeNumber: e.target.value})}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Remarks / Note</label>
+                <input
+                  type="text"
+                  placeholder="Optional payment notes..."
+                  value={paymentForm.remarks}
+                  onChange={(e) => setPaymentForm({...paymentForm, remarks: e.target.value})}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+                />
               </div>
-            ))}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPaymentModal(false)}
+                  className="px-4 py-2 text-sm text-slate-400 hover:text-white"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition"
+                >
+                  Generate Receipt & Save
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
-    </Modal>
-  );
-}
 
-function DepositFormModal({ students, curMonth, expectedFeeFor, batchesForMonth, carriedOverMap, onClose, onSave }) {
-  const [studentId, setStudentId] = useState(students[0]?.id || "");
-  const student = students.find(s => s.id === studentId);
-  const [paymentType, setPaymentType] = useState(student && (student.status || "active") !== "active" ? "carried" : "monthly");
-  const [month, setMonth] = useState(curMonth);
-  const [amount, setAmount] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [mode, setMode] = useState("Cash");
+      {/* --- MODAL 3: BANK STATEMENT / ACCOUNT STATEMENT LEDGER (FEATURE 3) --- */}
+      {showLedgerModal && activeStudent && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-3xl p-6 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-700">
+              <div>
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <History className="w-5 h-5 text-indigo-400" /> Account Statement (Ledger)
+                </h3>
+                <p className="text-xs text-slate-400">Student: <span className="text-white font-medium">{activeStudent.name}</span></p>
+              </div>
+              <button onClick={() => setShowLedgerModal(false)} className="text-slate-400 hover:text-white">✕</button>
+            </div>
 
-  useEffect(() => {
-    const s = students.find(x => x.id === studentId);
-    setPaymentType(s && (s.status || "active") !== "active" ? "carried" : "monthly");
-  }, [studentId]);
-
-  const monthBatches = student ? batchesForMonth(student, month) : [];
-  const suggested = paymentType === "monthly" && student ? expectedFeeFor(student.class, monthBatches.length || 1, student.monthlyDiscount || 0) : 0;
-  const carriedRemaining = student ? (carriedOverMap[student.id] || 0) : 0;
-
-  function submit() {
-    if (!studentId || !amount) return;
-    if (paymentType === "carried") {
-      onSave({ studentId, month: "carried-over", amount: Number(amount), date, mode, isCarriedOverPayment: true });
-    } else {
-      onSave({ studentId, month, amount: Number(amount), date, mode, isCarriedOverPayment: false });
-    }
-  }
-
-  return (
-    <Modal title="Record Fee Deposit" onClose={onClose}>
-      <Field label="Select Student">
-        <select className={inputCls} style={inputStyle} value={studentId} onChange={e => setStudentId(e.target.value)}>
-          {students.map(s => <option key={s.id} value={s.id}>{s.name} — Class {s.class} ({s.status || "active"})</option>)}
-        </select>
-      </Field>
-
-      <Field label="Payment Type">
-        <div className="flex gap-2">
-          <button type="button" onClick={() => setPaymentType("monthly")}
-            className="flex-1 px-3 py-2 text-xs rounded-sm border font-semibold"
-            style={{ background: paymentType === "monthly" ? "#12312B" : "white", color: paymentType === "monthly" ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
-            Monthly Fee
-          </button>
-          <button type="button" onClick={() => setPaymentType("carried")}
-            className="flex-1 px-3 py-2 text-xs rounded-sm border font-semibold"
-            style={{ background: paymentType === "carried" ? "#12312B" : "white", color: paymentType === "carried" ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
-            Carried-Forward Dues
-          </button>
+            <div className="overflow-y-auto flex-1 mt-4">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="bg-slate-900 text-slate-400 uppercase font-semibold sticky top-0">
+                  <tr>
+                    <th className="p-3">Date</th>
+                    <th className="p-3">Particulars / Mode</th>
+                    <th className="p-3">Reference / UTR</th>
+                    <th className="p-3 text-red-400">Debit (+)</th>
+                    <th className="p-3 text-emerald-400">Credit (-)</th>
+                    <th className="p-3 text-amber-400">Discount</th>
+                    <th className="p-3 text-right">Balance</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-700/50 text-slate-300">
+                  {getStudentStatement(activeStudent.id).map((tx, idx) => (
+                    <tr key={idx} className="hover:bg-slate-700/20">
+                      <td className="p-3 text-slate-400">{new Date(tx.date).toLocaleDateString()}</td>
+                      <td className="p-3">
+                        <span className="font-medium text-white">{tx.category}</span>
+                        {tx.remarks && <p className="text-[10px] text-slate-400">{tx.remarks}</p>}
+                      </td>
+                      <td className="p-3 text-slate-400">{tx.ref || '-'}</td>
+                      <td className="p-3 text-red-400 font-medium">
+                        {tx.type === 'DEBIT' ? `₹${tx.amount}` : '-'}
+                      </td>
+                      <td className="p-3 text-emerald-400 font-medium">
+                        {tx.type === 'CREDIT' ? `₹${tx.amount}` : '-'}
+                      </td>
+                      <td className="p-3 text-amber-400">
+                        {tx.writeOff > 0 ? `₹${tx.writeOff}` : '-'}
+                      </td>
+                      <td className="p-3 text-right font-semibold text-white">
+                        ₹{tx.runningBalance}
+                      </td>
+                    </tr>
+                  ))}
+                  {getStudentStatement(activeStudent.id).length === 0 && (
+                    <tr>
+                      <td colSpan="7" className="p-6 text-center text-slate-500">No account history found for this student.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
-      </Field>
-
-      {paymentType === "monthly" ? (
-        <>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="For Month">
-              <input type="month" className={inputCls} style={inputStyle} value={month} onChange={e => setMonth(e.target.value)} />
-            </Field>
-            <Field label="Deposit Date">
-              <input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} />
-            </Field>
-          </div>
-          <div className="text-xs text-[#6E6650] mb-3">
-            Subjects billed for {monthLabel(month)}: <strong>{monthBatches.join(", ") || "—"}</strong>
-            <div className="text-[10px] text-[#9C8F6E] mt-0.5">Wrong subjects for this month? Use "Batches" on the student's row.</div>
-          </div>
-        </>
-      ) : (
-        <>
-          <Field label="Deposit Date">
-            <input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} />
-          </Field>
-          <div className="p-3 bg-[#FBEFE3] border border-[#B8862B] rounded text-xs mb-3">
-            This reduces {student ? student.name : "the student"}'s carried-forward balance of <strong>{fmtINR(carriedRemaining)}</strong> instead of billing a specific month.
-          </div>
-        </>
       )}
-
-      <div className="grid grid-cols-2 gap-3">
-        <Field label={paymentType === "monthly" ? `Amount (Suggested ₹${suggested})` : "Amount"}>
-          <input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder={paymentType === "monthly" ? String(suggested) : "0"} />
-        </Field>
-        <Field label="Payment Mode">
-          <select className={inputCls} style={inputStyle} value={mode} onChange={e => setMode(e.target.value)}>
-            <option>Cash</option><option>UPI</option><option>Bank Transfer</option><option>Cheque</option>
-          </select>
-        </Field>
-      </div>
-      <button onClick={submit} disabled={!studentId || !amount} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        Record Deposit & Generate Receipt
-      </button>
-    </Modal>
-  );
-}
-
-function ClassManagerModal({ classes, subjectsList, onClose, onSaveClasses, onSaveSubjects }) {
-  const [classList, setClassList] = useState([...classes]);
-  const [subjList, setSubjList] = useState([...subjectsList]);
-  const [newClassName, setNewClassName] = useState("");
-  const [newSubjName, setNewSubjName] = useState("");
-
-  const addClass = () => {
-    if (newClassName.trim() && !classList.includes(newClassName.trim())) {
-      setClassList([...classList, newClassName.trim()]);
-      setNewClassName("");
-    }
-  };
-
-  const addSubject = () => {
-    if (newSubjName.trim() && !subjList.includes(newSubjName.trim())) {
-      setSubjList([...subjList, newSubjName.trim()]);
-      setNewSubjName("");
-    }
-  };
-
-  const handleSave = () => {
-    onSaveClasses(classList);
-    onSaveSubjects(subjList);
-    onClose();
-  };
-
-  return (
-    <Modal title="Manage Classes & Master Subjects" onClose={onClose}>
-      <Field label="Add Custom Class">
-        <div className="flex gap-2">
-          <input className={inputCls} style={inputStyle} value={newClassName} onChange={e => setNewClassName(e.target.value)} placeholder="Class name" />
-          <button onClick={addClass} className="px-3 py-2 bg-[#12312B] text-white text-xs rounded font-semibold whitespace-nowrap">Add Class</button>
-        </div>
-      </Field>
-
-      <div className="my-3 flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-2 border bg-white rounded">
-        {classList.map(c => (
-          <span key={c} className="px-2 py-0.5 text-xs bg-[#FAF6EC] border rounded font-medium flex items-center gap-1">
-            Class {c}
-            <button onClick={() => setClassList(classList.filter(x => x !== c))} className="text-[#A63D2F]"><X size={10} /></button>
-          </span>
-        ))}
-      </div>
-
-      <hr className="my-4" />
-
-      <Field label="Add Master Subject (e.g., Hindi, Computer, Biology)">
-        <div className="flex gap-2">
-          <input className={inputCls} style={inputStyle} value={newSubjName} onChange={e => setNewSubjName(e.target.value)} placeholder="Subject name" />
-          <button onClick={addSubject} className="px-3 py-2 bg-[#12312B] text-white text-xs rounded font-semibold whitespace-nowrap">Add Subject</button>
-        </div>
-      </Field>
-
-      <div className="my-3 flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-2 border bg-white rounded">
-        {subjList.map(s => (
-          <span key={s} className="px-2 py-0.5 text-xs bg-[#FAF6EC] border rounded font-medium flex items-center gap-1">
-            {s}
-            <button onClick={() => setSubjList(subjList.filter(x => x !== s))} className="text-[#A63D2F]"><X size={10} /></button>
-          </span>
-        ))}
-      </div>
-
-      <button onClick={handleSave} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        Save All Changes
-      </button>
-    </Modal>
-  );
-}
-
-function ReceiptModal({ deposit, student, totalRemainingDue, onClose }) {
-  const receiptRef = useRef();
-
-  const handlePrint = () => {
-    const printContent = receiptRef.current.innerHTML;
-    const win = window.open("", "", "width=600,height=700");
-    win.document.write(`
-      <html>
-        <head>
-          <title>Fee Receipt - Coaching Ledger</title>
-          <style>
-            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
-            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
-            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
-            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
-            .bold { font-weight: bold; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
-          </style>
-        </head>
-        <body>
-          <div class="receipt-box">${printContent}</div>
-        </body>
-      </html>
-    `);
-    win.document.close();
-    win.focus();
-    win.print();
-    win.close();
-  };
-
-  const receiptNo = deposit.id ? deposit.id.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
-
-  return (
-    <Modal title="Official Fee Receipt" onClose={onClose}>
-      <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
-        <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Payment Receipt</p>
-        </div>
-
-        <div className="space-y-2 text-xs">
-          <div className="flex justify-between text-[#6E6650]">
-            <span>Receipt No: <strong className="text-[#12312B]">#{receiptNo}</strong></span>
-            <span>Date: <strong className="text-[#12312B]">{deposit.date}</strong></span>
-          </div>
-          <div className="flex justify-between text-[#6E6650]">
-            <span>Student Name:</span>
-            <strong className="text-[#12312B]">{student ? student.name : "N/A"}</strong>
-          </div>
-          <div className="flex justify-between text-[#6E6650]">
-            <span>Class:</span>
-            <strong className="text-[#12312B]">Class {student ? student.class : "N/A"}</strong>
-          </div>
-          <div className="flex justify-between text-[#6E6650]">
-            <span>{deposit.isCarriedOverPayment ? "Payment For:" : "Fee Month:"}</span>
-            <strong className="text-[#12312B]">{monthLabel(deposit.month)}</strong>
-          </div>
-          <div className="flex justify-between text-[#6E6650]">
-            <span>Payment Mode:</span>
-            <strong className="text-[#12312B]">{deposit.mode || "Cash"}</strong>
-          </div>
-
-          <div className="pt-3 mt-3 border-t-2 border-[#12312B]">
-            <div className="flex justify-between items-center text-sm mb-1">
-              <span className="font-bold">Amount Paid Today:</span>
-              <span className="font-bold text-[#3F6B52] text-lg" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(deposit.amount)}</span>
-            </div>
-            <div className="flex justify-between items-center text-xs text-[#A63D2F]">
-              <span>Remaining Total Balance:</span>
-              <span className="font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(totalRemainingDue)}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="text-center pt-3 mt-3 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
-          Status: PAYMENT ACKNOWLEDGED ✅ · Computer Generated Receipt
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <button 
-          onClick={handlePrint} 
-          className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"
-        >
-          <Printer size={15} /> Print Receipt
-        </button>
-        <button 
-          onClick={() => sendWhatsAppReceipt(deposit, student, totalRemainingDue)} 
-          className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#25D366] hover:bg-[#1DA851]"
-        >
-          <Send size={15} /> Send to WhatsApp
-        </button>
-      </div>
-    </Modal>
+    </div>
   );
 }
