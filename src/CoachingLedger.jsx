@@ -65,6 +65,17 @@ function getReceiptNo(depositId) {
   return depositId ? depositId.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
 }
 
+// Deterministic short code used to build a stable, readable Charge ID for
+// any ledger line — ad-hoc charges get one stored at creation time, but
+// recurring tuition-fee lines are computed on the fly each render, so their
+// ID has to be derivable from their own (stable) raw id instead of stored.
+function shortId(str) {
+  let h = 0;
+  const s = String(str || "");
+  for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
+  return h.toString(36).toUpperCase().padStart(6, "0").slice(-6);
+}
+
 const defaultFeeStructure = (classes) => {
   const fs = {};
   classes.forEach((c, i) => {
@@ -106,9 +117,9 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
 
   if (Number(student.previousDues) > 0) {
     chargeLines.push({
-      id: `opening-${student.id}`, type: "opening",
+      id: `opening-${student.id}`, chargeId: `CHG-OPN${shortId(student.id)}`, type: "opening",
       date: `${student.admissionMonth || curMonth}-01`, month: null,
-      label: "Opening Balance (Carried Forward)", amount: round2(student.previousDues),
+      label: "Opening Balance (Carried Forward)", amount: round2(student.previousDues), remarks: "",
     });
   }
 
@@ -118,10 +129,11 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
       const bc = batches.length || 1;
       const expected = expectedFeeFor(student.class, bc, student.monthlyDiscount || 0);
       if (expected > 0) {
+        const lineId = `fee-${student.id}-${m}`;
         chargeLines.push({
-          id: `fee-${student.id}-${m}`, type: "monthly_fee", date: `${m}-01`, month: m,
+          id: lineId, chargeId: `CHG-${shortId(lineId)}`, type: "monthly_fee", date: `${m}-01`, month: m,
           label: `Tuition Fee — ${monthLabel(m)}${batches.length ? " (" + batches.join(", ") + ")" : ""}`,
-          amount: round2(expected),
+          amount: round2(expected), remarks: "",
         });
       }
     });
@@ -129,9 +141,10 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
 
   (charges || []).filter(c => c.studentId === student.id && !c.deleted).forEach(c => {
     chargeLines.push({
-      id: c.id, type: "extra_charge", date: c.date || `${c.month || curMonth}-01`, month: c.month || null,
+      id: c.id, chargeId: c.chargeId || `CHG-${shortId(c.id)}`, type: "extra_charge",
+      date: c.date || `${c.month || curMonth}-01`, month: c.month || null,
       label: c.remarks ? `Additional Charge — ${c.remarks}` : `Additional Charge${c.month ? " (" + monthLabel(c.month) + ")" : ""}`,
-      amount: round2(c.amount), remarks: c.remarks,
+      amount: round2(c.amount), remarks: c.remarks || "",
     });
   });
 
@@ -386,7 +399,7 @@ export default function CoachingLedger() {
   const outstandingRows = visibleStudents.flatMap(st =>
     ledgers[st.id].chargeLines.filter(l => l.outstanding > 0).map(l => ({
       studentId: st.id, name: st.name, cls: st.class, phone: st.phone,
-      type: l.type, month: l.month, label: l.label,
+      type: l.type, month: l.month, label: l.label, chargeId: l.chargeId, remarks: l.remarks,
       expected: l.amount, paid: l.paid, outstanding: l.outstanding,
       isCurrent: l.month === curMonth, status: st.status || "active",
     }))
@@ -559,7 +572,8 @@ export default function CoachingLedger() {
 
   async function addCharge(data) {
     const id = uid();
-    await setDoc(doc(db, "charges", id), { ...data, id, deleted: false, createdAt: todayStr() });
+    const chargeId = `CHG-${shortId(id)}`;
+    await setDoc(doc(db, "charges", id), { ...data, id, chargeId, deleted: false, createdAt: todayStr() });
     setShowChargeModal(null);
   }
   async function softDeleteCharge(id) {
@@ -692,18 +706,18 @@ export default function CoachingLedger() {
         {tab === "structure" && <StructureTab feeStructure={feeStructure} setFeeStructure={saveFeeStructure} classes={classes} />}
         {tab === "deposits" && (
           <DepositsTab
-            deposits={visibleDeposits} students={visibleStudents} studentDues={studentDuesMap}
+            deposits={visibleDeposits} students={visibleStudents} classes={classes} studentDues={studentDuesMap}
             onAdd={() => setShowDepositForm(true)} onRemove={softDeleteDeposit}
             onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
           />
         )}
         {tab === "charges" && (
           <ChargesTab
-            charges={visibleCharges} students={visibleStudents}
+            charges={visibleCharges} students={visibleStudents} classes={classes}
             onAdd={() => setShowChargeModal({ student: null })} onRemove={softDeleteCharge}
           />
         )}
-        {tab === "dues" && <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} students={visibleStudents} studentDues={studentDuesMap} />}
+        {tab === "dues" && <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} students={visibleStudents} studentDues={studentDuesMap} classes={classes} />}
         {tab === "statement" && (
           <CenterStatementTab
             transactions={allTransactions} totals={centerTotals} students={visibleStudents} classes={classes}
@@ -926,11 +940,14 @@ function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, 
 function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, batchesForMonth, curMonth, onManageClasses, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge }) {
   const [selectedClass, setSelectedClass] = useState("ALL");
   const [viewMode, setViewMode] = useState("class");
+  const [search, setSearch] = useState("");
 
   const filteredStudents = useMemo(() => {
-    if (selectedClass === "ALL") return students;
-    return students.filter(s => s.class === selectedClass);
-  }, [students, selectedClass]);
+    let list = selectedClass === "ALL" ? students : students.filter(s => s.class === selectedClass);
+    const q = search.trim().toLowerCase();
+    if (q) list = list.filter(s => (s.name || "").toLowerCase().includes(q) || (s.phone || "").toLowerCase().includes(q));
+    return list;
+  }, [students, selectedClass, search]);
 
   const sendWhatsAppReminder = (phone, name, label, amount) => {
     if (!phone) { alert("No phone number recorded for this student."); return; }
@@ -959,6 +976,10 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
         </div>
         {viewMode === "class" && (
           <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className="border rounded-sm pl-7 pr-3 py-1.5 text-xs bg-white w-48" style={{ borderColor: "#D8CFB8" }} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name or phone…" />
+            </div>
             <span className="text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Filter Class:</span>
             <select value={selectedClass} onChange={e => setSelectedClass(e.target.value)} className="border rounded-sm px-3 py-1.5 text-xs bg-white" style={{ borderColor: "#D8CFB8" }}>
               <option value="ALL">All Classes ({students.length})</option>
@@ -971,7 +992,7 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
       {viewMode === "class" ? (
         <Card>
           {filteredStudents.length === 0 ? (
-            <div className="p-8 text-center text-sm text-[#9C8F6E]">No students found for class "{selectedClass}".</div>
+            <div className="p-8 text-center text-sm text-[#9C8F6E]">No students match{search ? ` "${search}"` : ""}{selectedClass !== "ALL" ? ` in Class ${selectedClass}` : ""}.</div>
           ) : (
             <table className="w-full text-sm">
               <thead>
@@ -1018,7 +1039,7 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                  {["Student", "Class", "Line Item", "Expected", "Paid", "Pending Balance", "WhatsApp Reminder"].map(h => (
+                  {["Charge ID", "Student", "Class", "Line Item", "Expected", "Paid", "Pending Balance", "WhatsApp Reminder"].map(h => (
                     <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                   ))}
                 </tr>
@@ -1026,6 +1047,7 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
               <tbody>
                 {outstandingRows.map((r, i) => (
                   <tr key={i} className="ledger-row">
+                    <td className="px-4 py-2.5 text-[10px] font-mono text-[#9C8F6E]">{r.chargeId}</td>
                     <td className="px-4 py-2.5 font-medium">{r.name}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{r.cls}</td>
                     <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -1052,6 +1074,18 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
 }
 
 function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth, onAdd, onEdit, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge, onRemove }) {
+  const [search, setSearch] = useState("");
+  const [expanded, setExpanded] = useState({});
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return students;
+    return students.filter(s => {
+      const haystack = [s.name, s.fatherName, s.phone, s.guardianPhone, s.address].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [students, search]);
+
   return (
     <div>
       <SectionHeader eyebrow="Register" title="Students Directory" action={
@@ -1059,42 +1093,73 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
           <Plus size={15} /> Add student
         </button>
       } />
+
+      <Card className="p-3.5 mb-4">
+        <div className="relative max-w-sm">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+          <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, father's name, phone, guardian phone, or address…" />
+        </div>
+      </Card>
+
       <Card>
-        {students.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No students registered yet.</div>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{students.length === 0 ? "No students registered yet." : "No students match this search."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Name", "Class", "Subjects (this month)", "Total Due", "Status", "Actions"].map(h => (
+                {["", "Name", "Class", "Subjects (this month)", "Total Due", "Status", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {students.map(s => {
+              {filtered.map(s => {
                 const dueAmount = studentDues[s.id] || 0;
                 const status = s.status || "active";
                 const badgeText = status === "active" ? "Active" : status === "dropped" ? "Dropped Out" : (s.resultStatus || "On Break");
                 const badgeTone = status === "active" ? "paid" : status === "dropped" ? "overdue" : "break";
+                const isOpen = !!expanded[s.id];
+                const hasDetails = s.fatherName || s.guardianPhone || s.address;
                 return (
-                  <tr key={s.id} className="ledger-row">
-                    <td className="px-4 py-2.5 font-medium">
-                      <div>{s.name}</div>
-                      {s.phone && <div className="text-[10px] text-[#9C8F6E]">{s.phone}</div>}
-                    </td>
-                    <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
-                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{batchesForMonth(s, curMonth).join(", ") || "—"}</td>
-                    <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: dueAmount > 0 ? "#A63D2F" : "#3F6B52" }}>{fmtINR(dueAmount)}</td>
-                    <td className="px-4 py-2.5 text-xs"><Stamp text={badgeText} tone={badgeTone} /></td>
-                    <td className="px-4 py-2.5 text-right">
-                      <div className="flex flex-wrap gap-2 justify-end">
-                        <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} onStatement={onStatement} onAddCharge={onAddCharge} compact />
-                        <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline">Edit</button>
-                        <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
-                      </div>
-                    </td>
-                  </tr>
+                  <React.Fragment key={s.id}>
+                    <tr className="ledger-row">
+                      <td className="pl-3 py-2.5">
+                        {hasDetails && (
+                          <button onClick={() => setExpanded(prev => ({ ...prev, [s.id]: !prev[s.id] }))} className="text-[#9C8F6E] hover:text-[#12312B] text-xs w-4">
+                            {isOpen ? "▾" : "▸"}
+                          </button>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 font-medium">
+                        <div>{s.name}</div>
+                        {s.phone && <div className="text-[10px] text-[#9C8F6E]">{s.phone}</div>}
+                      </td>
+                      <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
+                      <td className="px-4 py-2.5 text-xs text-[#6E6650]">{batchesForMonth(s, curMonth).join(", ") || "—"}</td>
+                      <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: dueAmount > 0 ? "#A63D2F" : "#3F6B52" }}>{fmtINR(dueAmount)}</td>
+                      <td className="px-4 py-2.5 text-xs"><Stamp text={badgeText} tone={badgeTone} /></td>
+                      <td className="px-4 py-2.5 text-right">
+                        <div className="flex flex-wrap gap-2 justify-end">
+                          <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} onStatement={onStatement} onAddCharge={onAddCharge} compact />
+                          <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline">Edit</button>
+                          <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                        </div>
+                      </td>
+                    </tr>
+                    {isOpen && hasDetails && (
+                      <tr>
+                        <td></td>
+                        <td colSpan={6} className="px-4 pb-3 pt-0">
+                          <div className="grid grid-cols-3 gap-3 p-3 rounded bg-[#FAF6EC] border text-xs" style={{ borderColor: "#D8CFB8" }}>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Father's Name</span>{s.fatherName || "—"}</div>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Guardian Phone</span>{s.guardianPhone || "—"}</div>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Address</span>{s.address || "—"}</div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 );
               })}
             </tbody>
@@ -1146,9 +1211,30 @@ function StructureTab({ feeStructure, setFeeStructure, classes }) {
   );
 }
 
-function DepositsTab({ deposits, students, studentDues, onAdd, onRemove, onOpenReceipt }) {
-  const sorted = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+function DepositsTab({ deposits, students, classes, studentDues, onAdd, onRemove, onOpenReceipt }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [modeFilter, setModeFilter] = useState("all");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [receiptSearch, setReceiptSearch] = useState("");
+
   const byId = Object.fromEntries(students.map(s => [s.id, s]));
+
+  const sorted = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const filtered = sorted.filter(d => {
+    const st = byId[d.studentId];
+    const q = search.trim().toLowerCase();
+    if (q && !(st && st.name.toLowerCase().includes(q))) return false;
+    if (classFilter !== "all" && !(st && String(st.class) === classFilter)) return false;
+    if (modeFilter !== "all" && d.mode !== modeFilter) return false;
+    if (fromDate && d.date < fromDate) return false;
+    if (toDate && d.date > toDate) return false;
+    if (receiptSearch.trim() && !getReceiptNo(d.id).toLowerCase().includes(receiptSearch.trim().toLowerCase())) return false;
+    return true;
+  });
+  const isFiltered = search || classFilter !== "all" || modeFilter !== "all" || fromDate || toDate || receiptSearch;
+
   return (
     <div>
       <SectionHeader eyebrow="Fee Deposits" title="Deposits Log" action={
@@ -1156,24 +1242,67 @@ function DepositsTab({ deposits, students, studentDues, onAdd, onRemove, onOpenR
           <Plus size={15} /> Record deposit
         </button>
       } />
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[150px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Student Name</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>Class {c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Mode</div>
+            <select className={inputCls} style={inputStyle} value={modeFilter} onChange={e => setModeFilter(e.target.value)}>
+              <option value="all">All Modes</option>
+              {PAYMENT_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">From</div>
+            <input type="date" className={inputCls} style={inputStyle} value={fromDate} onChange={e => setFromDate(e.target.value)} />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">To</div>
+            <input type="date" className={inputCls} style={inputStyle} value={toDate} onChange={e => setToDate(e.target.value)} />
+          </div>
+          <div className="min-w-[130px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Receipt No.</div>
+            <input className={inputCls} style={inputStyle} value={receiptSearch} onChange={e => setReceiptSearch(e.target.value)} placeholder="e.g. A1B2C3" />
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setModeFilter("all"); setFromDate(""); setToDate(""); setReceiptSearch(""); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
       <Card>
-        {sorted.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No fee deposits recorded yet.</div>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{sorted.length === 0 ? "No fee deposits recorded yet." : "No deposits match these filters."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date", "Student", "Class", "Amount Paid", "Write-off", "Mode", "Reference", "Remarks", "Actions"].map(h => (
+                {["Receipt No", "Date", "Student", "Class", "Amount Paid", "Write-off", "Mode", "Reference", "Remarks", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {sorted.map(d => {
+              {filtered.map(d => {
                 const st = byId[d.studentId];
                 const ref = d.utr || d.chequeNumber || "—";
                 return (
                   <tr key={d.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-[10px] font-mono text-[#9C8F6E]">#{getReceiptNo(d.id)}</td>
                     <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{d.date}</td>
                     <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{st ? st.class : "—"}</td>
@@ -1198,9 +1327,23 @@ function DepositsTab({ deposits, students, studentDues, onAdd, onRemove, onOpenR
   );
 }
 
-function ChargesTab({ charges, students, onAdd, onRemove }) {
-  const sorted = [...charges].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+function ChargesTab({ charges, students, classes, onAdd, onRemove }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [monthFilter, setMonthFilter] = useState("");
+
   const byId = Object.fromEntries(students.map(s => [s.id, s]));
+  const sorted = [...charges].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const filtered = sorted.filter(c => {
+    const st = byId[c.studentId];
+    const q = search.trim().toLowerCase();
+    if (q && !(st && st.name.toLowerCase().includes(q))) return false;
+    if (classFilter !== "all" && !(st && String(st.class) === classFilter)) return false;
+    if (monthFilter && c.month !== monthFilter) return false;
+    return true;
+  });
+  const isFiltered = search || classFilter !== "all" || monthFilter;
+
   return (
     <div>
       <SectionHeader eyebrow="Ad-hoc Billing" title="Additional Charges" action={
@@ -1209,23 +1352,51 @@ function ChargesTab({ charges, students, onAdd, onRemove }) {
         </button>
       } />
       <div className="text-sm text-[#6E6650] mb-4">Every extra charge — exam fee, material cost, late fee, anything outside the regular tuition — logged here with who, when, how much, and why. It automatically adds to that student's balance and shows up in Dues.</div>
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[150px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Student Name</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>Class {c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Month</div>
+            <input type="month" className={inputCls} style={inputStyle} value={monthFilter} onChange={e => setMonthFilter(e.target.value)} />
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setMonthFilter(""); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
       <Card>
-        {sorted.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No additional charges logged yet.</div>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{sorted.length === 0 ? "No additional charges logged yet." : "No charges match these filters."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date Added", "Student", "Class", "For Month", "Amount", "Remarks", "Actions"].map(h => (
+                {["Charge ID", "Date Added", "Student", "Class", "For Month", "Amount", "Remarks", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {sorted.map(c => {
+              {filtered.map(c => {
                 const st = byId[c.studentId];
                 return (
                   <tr key={c.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-[10px] font-mono text-[#9C8F6E]">{c.chargeId || `CHG-${shortId(c.id)}`}</td>
                     <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{c.date}</td>
                     <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{st ? st.class : "—"}</td>
@@ -1244,7 +1415,29 @@ function ChargesTab({ charges, students, onAdd, onRemove }) {
   );
 }
 
-function DuesTab({ rows, totalOutstanding, students, studentDues }) {
+const DUE_TYPE_OPTIONS = [
+  { value: "opening", label: "Carried Forward" },
+  { value: "monthly_fee", label: "Current Month Tuition" },
+  { value: "extra_charge", label: "Additional Charge" },
+];
+
+function DuesTab({ rows, totalOutstanding, students, studentDues, classes }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+
+  const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return rows.filter(r => {
+      if (q && !r.name.toLowerCase().includes(q)) return false;
+      if (classFilter !== "all" && String(r.cls) !== classFilter) return false;
+      if (typeFilter !== "all" && r.type !== typeFilter) return false;
+      return true;
+    });
+  }, [rows, search, classFilter, typeFilter]);
+
+  const isFiltered = search || classFilter !== "all" || typeFilter !== "all";
+
   return (
     <div>
       <SectionHeader eyebrow="Outstanding Dues" title="Pending Dues Ledger" />
@@ -1275,21 +1468,51 @@ function DuesTab({ rows, totalOutstanding, students, studentDues }) {
         </div>
       </Card>
 
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[160px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search Student</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>Class {c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Due Type</div>
+            <select className={inputCls} style={inputStyle} value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
+              <option value="all">All Types</option>
+              {DUE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setTypeFilter("all"); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
       <Card>
-        {rows.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No dues pending — active or carried forward.</div>
+        {filteredRows.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{rows.length === 0 ? "No dues pending — active or carried forward." : "No dues match these filters."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Student", "Class", "Line Item", "Expected", "Paid", "Outstanding", "Status"].map(h => (
+                {["Charge ID", "Student", "Class", "Line Item", "Expected", "Paid", "Outstanding", "Status"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
+              {filteredRows.map((r, i) => (
                 <tr key={i} className="ledger-row">
+                  <td className="px-4 py-2.5 text-[10px] font-mono text-[#9C8F6E]">{r.chargeId}</td>
                   <td className="px-4 py-2.5 font-medium">{r.name}</td>
                   <td className="px-4 py-2.5 font-semibold text-[#12312B]">{r.cls}</td>
                   <td className="px-4 py-2.5 text-xs">{r.label}</td>
@@ -1449,7 +1672,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                  {["Date", "Student", "Class", "Description", "Type", "Receipt No", "Debit", "Credit"].map(h => (
+                  {["Charge ID", "Date", "Charges Month", "Student", "Class", "Description", "Remarks", "Type", "Receipt No", "Debit", "Credit"].map(h => (
                     <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                   ))}
                 </tr>
@@ -1460,10 +1683,13 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
                   const hasReceipt = t.kind === "credit" && (t.type === "payment" || t.type === "writeoff");
                   return (
                     <tr key={t.id + "-" + i} className="ledger-row">
+                      <td className="px-4 py-2.5 text-[10px] font-mono text-[#9C8F6E]">{t.chargeId || "—"}</td>
                       <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{t.date}</td>
+                      <td className="px-4 py-2.5 text-xs font-mono">{t.month ? monthLabel(t.month) : "—"}</td>
                       <td className="px-4 py-2.5 font-medium">{t.studentName}{t.studentStatus !== "active" && <span className="ml-1.5 text-[10px] text-[#4A7B9D]">({t.studentStatus === "dropped" ? "dropped" : "on break"})</span>}</td>
                       <td className="px-4 py-2.5 font-semibold text-[#12312B]">{t.studentClass}</td>
                       <td className="px-4 py-2.5 text-xs">{t.label}</td>
+                      <td className="px-4 py-2.5 text-xs text-[#6E6650]">{t.remarks || "—"}</td>
                       <td className="px-4 py-2.5"><Stamp text={meta.label} tone={meta.tone} /></td>
                       <td className="px-4 py-2.5 font-mono">
                         {hasReceipt ? (
@@ -1482,7 +1708,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
               </tbody>
               <tfoot>
                 <tr style={{ borderTop: "1.5px solid #26231D" }}>
-                  <td colSpan={6} className="px-4 py-2.5 text-right text-xs font-semibold text-[#6E6650]">Filtered Totals:</td>
+                  <td colSpan={9} className="px-4 py-2.5 text-right text-xs font-semibold text-[#6E6650]">Filtered Totals:</td>
                   <td className="px-4 py-2.5 font-mono font-bold text-[#A63D2F]">{fmtINR(filteredTotals.debit)}</td>
                   <td className="px-4 py-2.5 font-mono font-bold text-[#3F6B52]">{fmtINR(filteredTotals.credit)}</td>
                 </tr>
@@ -1629,6 +1855,9 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
   const [cls, setCls] = useState(initial?.class || classes[0] || "10");
   const [batches, setBatches] = useState(initial?.batches || []);
   const [phone, setPhone] = useState(initial?.phone || "");
+  const [fatherName, setFatherName] = useState(initial?.fatherName || "");
+  const [guardianPhone, setGuardianPhone] = useState(initial?.guardianPhone || "");
+  const [address, setAddress] = useState(initial?.address || "");
   const [admissionMonth, setAdmissionMonth] = useState(initial?.admissionMonth || currentMonthKey());
   const [monthlyDiscount, setMonthlyDiscount] = useState(initial?.monthlyDiscount || 0);
   const [previousDues, setPreviousDues] = useState(initial?.previousDues || 0);
@@ -1644,14 +1873,18 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
     if (initial?.batchHistory && initial.batchHistory.length) baseHistory[0] = { ...baseHistory[0], batches };
     onSave({
       ...initial, id: initial?.id, name: name.trim(), class: cls, batches, batchHistory: baseHistory,
-      phone: phone.trim(), admissionMonth, monthlyDiscount: Number(monthlyDiscount) || 0,
+      phone: phone.trim(), fatherName: fatherName.trim(), guardianPhone: guardianPhone.trim(), address: address.trim(),
+      admissionMonth, monthlyDiscount: Number(monthlyDiscount) || 0,
       previousDues: Number(previousDues) || 0, status,
     });
   }
 
   return (
     <Modal title={initial ? "Edit Student Details" : "Add New Student"} onClose={onClose}>
-      <Field label="Full Name"><input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Rahul Sharma" /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Full Name"><input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Rahul Sharma" /></Field>
+        <Field label="Father's Name"><input className={inputCls} style={inputStyle} value={fatherName} onChange={e => setFatherName(e.target.value)} placeholder="e.g. Suresh Sharma" /></Field>
+      </div>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Class">
           <select className={inputCls} style={inputStyle} value={cls} onChange={e => setCls(e.target.value)}>
@@ -1662,8 +1895,10 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
       </div>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Phone / WhatsApp Number"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit phone number" /></Field>
-        <Field label="Monthly Concession / Discount (₹)"><input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} placeholder="0" /></Field>
+        <Field label="Guardian Phone Number"><input className={inputCls} style={inputStyle} value={guardianPhone} onChange={e => setGuardianPhone(e.target.value)} placeholder="Alternate contact (optional)" /></Field>
       </div>
+      <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="House / street / area / city" /></Field>
+      <Field label="Monthly Concession / Discount (₹)"><input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} placeholder="0" /></Field>
       <Field label="Opening Balance / Legacy Carried Dues (₹)">
         <input type="number" className={inputCls} style={inputStyle} value={previousDues} onChange={e => setPreviousDues(e.target.value)} placeholder="0" />
         <div className="text-[10px] text-[#9C8F6E] mt-1">Only for a one-time starting balance (e.g. migrating from a paper register). For anything ongoing, use "Add Charge" instead — it keeps a dated log.</div>
@@ -1966,7 +2201,7 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt }) {
           <table className="w-full text-xs">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date", "Description", "Receipt No", "Debit", "Credit", "Balance"].map(h => (
+                {["Charge ID", "Date", "Charges Month", "Description", "Remarks", "Receipt No", "Debit", "Credit", "Balance"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-3 py-2 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
@@ -1974,11 +2209,14 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt }) {
             <tbody>
               {ledger.timeline.map((l, i) => (
                 <tr key={i} className="ledger-row">
+                  <td className="px-3 py-2 font-mono text-[#9C8F6E]">{l.chargeId || "—"}</td>
                   <td className="px-3 py-2 font-mono">{l.date}</td>
+                  <td className="px-3 py-2 font-mono">{l.month ? monthLabel(l.month) : "—"}</td>
                   <td className="px-3 py-2">
                     {l.label}
                     {l.kind === "debit" && l.outstanding > 0 && <span className="ml-2"><Stamp text="Unpaid" tone="overdue" /></span>}
                   </td>
+                  <td className="px-3 py-2 text-[#6E6650]">{l.remarks || "—"}</td>
                   <td className="px-3 py-2 font-mono">
                     {l.kind === "credit" && (l.type === "payment" || l.type === "writeoff") ? (
                       onViewReceipt ? (
@@ -2019,7 +2257,14 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt }) {
 
 function DepositFormModal({ students, studentDues, onClose, onSave }) {
   const [studentId, setStudentId] = useState(students[0]?.id || "");
+  const [studentSearch, setStudentSearch] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const student = students.find(s => s.id === studentId);
+  const filteredStudents = useMemo(() => {
+    const q = studentSearch.trim().toLowerCase();
+    if (!q) return students;
+    return students.filter(s => (s.name || "").toLowerCase().includes(q) || String(s.class || "").toLowerCase().includes(q) || (s.phone || "").toLowerCase().includes(q));
+  }, [students, studentSearch]);
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayStr());
   const [mode, setMode] = useState("Cash");
@@ -2047,9 +2292,31 @@ function DepositFormModal({ students, studentDues, onClose, onSave }) {
   return (
     <Modal title="Record Payment / Receipt" onClose={onClose}>
       <Field label="Select Student">
-        <select className={inputCls} style={inputStyle} value={studentId} onChange={e => setStudentId(e.target.value)}>
-          {students.map(s => <option key={s.id} value={s.id}>{s.name} — Class {s.class} ({s.status || "active"})</option>)}
-        </select>
+        <div className="relative">
+          <div className="flex items-center border rounded-sm bg-white px-3 py-2 cursor-pointer" style={inputStyle} onClick={() => setPickerOpen(o => !o)}>
+            <Search size={13} className="text-[#9C8F6E] mr-2 shrink-0" />
+            <span className="text-sm flex-1 truncate">{student ? `${student.name} — Class ${student.class}${student.phone ? " · " + student.phone : ""}` : "Search by name, class, or phone…"}</span>
+          </div>
+          {pickerOpen && (
+            <div className="absolute z-10 mt-1 w-full bg-white border rounded-sm shadow-lg max-h-64 overflow-y-auto" style={{ borderColor: "#D8CFB8" }}>
+              <div className="p-2 sticky top-0 bg-white border-b" style={{ borderColor: "#EEE7D2" }}>
+                <input autoFocus className={inputCls} style={inputStyle} value={studentSearch} onChange={e => setStudentSearch(e.target.value)} placeholder="Type name, class, or phone…" />
+              </div>
+              {filteredStudents.length === 0 ? (
+                <div className="p-3 text-xs text-[#9C8F6E] text-center">No students match.</div>
+              ) : (
+                filteredStudents.map(s => (
+                  <button key={s.id} type="button" onClick={() => { setStudentId(s.id); setPickerOpen(false); setStudentSearch(""); }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#F5F0E1] flex items-center justify-between"
+                    style={{ background: s.id === studentId ? "#F5F0E1" : "white" }}>
+                    <span>{s.name} <span className="text-xs text-[#9C8F6E]">— Class {s.class}</span></span>
+                    <span className="text-xs text-[#9C8F6E] font-mono">{s.phone || ""}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </div>
       </Field>
       <div className="text-xs text-[#6E6650] mb-3">
         Current outstanding balance: <strong className={currentBalance > 0 ? "text-[#A63D2F]" : "text-[#3F6B52]"}>{fmtINR(currentBalance)}</strong>
