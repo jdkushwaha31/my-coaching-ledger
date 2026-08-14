@@ -58,6 +58,12 @@ function fmtINR(n) {
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
 function todayStr() { return new Date().toISOString().slice(0, 10); }
+// Single source of truth for receipt numbering, so the Deposit Receipt,
+// the WhatsApp receipt message, and the Student Statement always show
+// the exact same receipt number for a given deposit.
+function getReceiptNo(depositId) {
+  return depositId ? depositId.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
+}
 
 const defaultFeeStructure = (classes) => {
   const fs = {};
@@ -81,7 +87,7 @@ function sendWhatsAppReceipt(deposit, student, totalRemainingDue) {
   }
   const cleanPhone = student.phone.replace(/[^0-9]/g, "");
   const formattedPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
-  const receiptNo = deposit.id ? deposit.id.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
+  const receiptNo = getReceiptNo(deposit.id);
   const woLine = deposit.writeOffAmount > 0 ? `\n*Discount/Write-off:* ₹${deposit.writeOffAmount}` : "";
   const refLine = deposit.utr ? `\n*Reference/UTR:* ${deposit.utr}` : (deposit.chequeNumber ? `\n*Cheque No:* ${deposit.chequeNumber}` : "");
   const msg = `*FEE PAYMENT RECEIPT*\n----------------------------------------\n*Receipt No:* #${receiptNo}\n*Date:* ${deposit.date}\n*Student Name:* ${student.name}\n*Class:* ${student.class}\n*Payment Mode:* ${deposit.mode || "Cash"}${refLine}\n----------------------------------------\n*Amount Paid Today:* ₹${deposit.amount}${woLine}\n*Remaining Balance:* ₹${totalRemainingDue}\n*Status:* ACKNOWLEDGED ✅\n----------------------------------------\nThank you for your payment!`;
@@ -138,7 +144,7 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
       creditLines.push({
         id: `${d.id}-pay`, depositId: d.id, type: "payment", date: d.date || todayStr(),
         label: `Payment Received — ${d.mode || "Cash"}${ref}`, amount: round2(d.amount),
-        mode: d.mode, remarks: d.remarks,
+        mode: d.mode, remarks: d.remarks, receiptNo: getReceiptNo(d.id),
       });
     }
     if (Number(d.writeOffAmount) > 0) {
@@ -716,7 +722,15 @@ export default function CoachingLedger() {
         <AddChargeModal students={visibleStudents} initialStudent={showChargeModal.student} curMonth={curMonth} onClose={() => setShowChargeModal(null)} onSave={addCharge} />
       )}
       {showStatementModal && (
-        <StudentStatementModal student={showStatementModal} ledger={ledgers[showStatementModal.id]} onClose={() => setShowStatementModal(null)} />
+        <StudentStatementModal
+          student={showStatementModal}
+          ledger={ledgers[showStatementModal.id]}
+          onClose={() => setShowStatementModal(null)}
+          onViewReceipt={(depositId) => {
+            const dep = visibleDeposits.find(d => d.id === depositId);
+            if (dep) setReceiptData({ deposit: dep, student: showStatementModal });
+          }}
+        />
       )}
       {receiptData && (
         <ReceiptModal deposit={receiptData.deposit} student={receiptData.student} totalRemainingDue={studentDuesMap[receiptData.student?.id] || 0} onClose={() => setReceiptData(null)} />
@@ -1659,51 +1673,134 @@ function AddChargeModal({ students, initialStudent, curMonth, onClose, onSave })
   );
 }
 
-function StudentStatementModal({ student, ledger, onClose }) {
+// ============================================================================
+// STUDENT STATEMENT — a bank-style "account statement" of every transaction
+// (tuition accrual, ad-hoc charges, deposits, write-offs) for one student,
+// each row carrying a running balance like the ledger engine produces.
+// Payment rows show a Receipt No that links straight to that deposit's
+// official receipt (via onViewReceipt), so nothing has to be looked up by hand.
+// ============================================================================
+function StudentStatementModal({ student, ledger, onClose, onViewReceipt }) {
+  const statementRef = useRef();
   if (!ledger) return null;
+
+  const generatedOn = todayStr();
+
+  const handlePrintStatement = () => {
+    const printContent = statementRef.current.innerHTML;
+    const win = window.open("", "", "width=850,height=900");
+    win.document.write(`
+      <html>
+        <head>
+          <title>Account Statement - ${student.name}</title>
+          <style>
+            body { font-family: 'Inter', sans-serif; padding: 24px; color: #12312B; }
+            .stmt-header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 12px; margin-bottom: 16px; }
+            .stmt-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; font-size: 12px; margin-bottom: 16px; }
+            .stmt-meta div { display: flex; justify-content: space-between; border-bottom: 1px dotted #D8CFB8; padding: 3px 0; }
+            table { width: 100%; border-collapse: collapse; font-size: 11px; }
+            th { text-align: left; text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; color: #6E6650; border-bottom: 1.5px solid #26231D; padding: 6px 8px; }
+            td { padding: 6px 8px; border-bottom: 1px solid #EEE7D2; }
+            .num { font-family: monospace; }
+            .debit { color: #A63D2F; }
+            .credit { color: #3F6B52; }
+            .summary { display: flex; justify-content: space-between; margin: 14px 0; font-size: 12px; font-weight: bold; }
+            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 16px; text-align: center; font-size: 10px; color: #6E6650; }
+          </style>
+        </head>
+        <body>${printContent}</body>
+      </html>
+    `);
+    win.document.close(); win.focus(); win.print(); win.close();
+  };
+
   return (
     <WideModal title={`Statement — ${student.name}`} onClose={onClose}>
-      <div className="grid grid-cols-3 gap-3 mb-4">
-        <div className="p-2.5 rounded bg-[#FAF6EC] border" style={{ borderColor: "#D8CFB8" }}>
-          <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Total Charged</div>
-          <div className="text-lg font-bold" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(ledger.totalCharged)}</div>
+      <div ref={statementRef}>
+        {/* Letterhead — mirrors the official receipt so the statement reads as one professional record system */}
+        <div className="text-center pb-3 mb-4 border-b-2 border-dashed border-[#12312B]">
+          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Account Statement — All Recorded Transactions</p>
         </div>
-        <div className="p-2.5 rounded bg-[#EAF1EA] border" style={{ borderColor: "#3F6B52" }}>
-          <div className="text-[10px] uppercase text-[#3F6B52] font-mono">Total Cleared</div>
-          <div className="text-lg font-bold text-[#3F6B52]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(ledger.totalCleared)}</div>
+
+        {/* Student / account details */}
+        <div className="grid grid-cols-2 gap-x-6 gap-y-1 mb-4 text-xs">
+          <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Student Name:</span><strong className="text-[#12312B]">{student.name}</strong></div>
+          <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Statement Date:</span><strong className="text-[#12312B]">{generatedOn}</strong></div>
+          <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Class:</span><strong className="text-[#12312B]">Class {student.class}</strong></div>
+          <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Phone:</span><strong className="text-[#12312B]">{student.phone || "—"}</strong></div>
+          <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Fee Start Month:</span><strong className="text-[#12312B]">{monthLabel(student.admissionMonth)}</strong></div>
+          <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Status:</span><strong className="text-[#12312B] capitalize">{(student.status || "active").replace("_", " ")}</strong></div>
         </div>
-        <div className="p-2.5 rounded bg-[#F7E7E3] border" style={{ borderColor: "#A63D2F" }}>
-          <div className="text-[10px] uppercase text-[#A63D2F] font-mono">Current Balance</div>
-          <div className="text-lg font-bold text-[#A63D2F]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(ledger.balance)}</div>
+
+        <div className="grid grid-cols-3 gap-3 mb-4">
+          <div className="p-2.5 rounded bg-[#FAF6EC] border" style={{ borderColor: "#D8CFB8" }}>
+            <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Total Charged</div>
+            <div className="text-lg font-bold" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(ledger.totalCharged)}</div>
+          </div>
+          <div className="p-2.5 rounded bg-[#EAF1EA] border" style={{ borderColor: "#3F6B52" }}>
+            <div className="text-[10px] uppercase text-[#3F6B52] font-mono">Total Cleared</div>
+            <div className="text-lg font-bold text-[#3F6B52]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(ledger.totalCleared)}</div>
+          </div>
+          <div className="p-2.5 rounded bg-[#F7E7E3] border" style={{ borderColor: "#A63D2F" }}>
+            <div className="text-[10px] uppercase text-[#A63D2F] font-mono">Current Balance</div>
+            <div className="text-lg font-bold text-[#A63D2F]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(ledger.balance)}</div>
+          </div>
+        </div>
+
+        {ledger.timeline.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No transactions recorded yet for this student.</div>
+        ) : (
+          <table className="w-full text-xs">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Date", "Description", "Receipt No", "Debit", "Credit", "Balance"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-3 py-2 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {ledger.timeline.map((l, i) => (
+                <tr key={i} className="ledger-row">
+                  <td className="px-3 py-2 font-mono">{l.date}</td>
+                  <td className="px-3 py-2">
+                    {l.label}
+                    {l.kind === "debit" && l.outstanding > 0 && <span className="ml-2"><Stamp text="Unpaid" tone="overdue" /></span>}
+                  </td>
+                  <td className="px-3 py-2 font-mono">
+                    {l.kind === "credit" && l.type === "payment" ? (
+                      onViewReceipt ? (
+                        <button
+                          onClick={() => onViewReceipt(l.depositId)}
+                          className="underline text-[#12312B] font-semibold inline-flex items-center gap-1 hover:text-[#3F6B52]"
+                          title="Open official receipt for this payment"
+                        >
+                          <Receipt size={10} /> #{l.receiptNo}
+                        </button>
+                      ) : (
+                        <span className="text-[#6E6650]">#{l.receiptNo}</span>
+                      )
+                    ) : (
+                      <span className="text-[#D8CFB8]">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-[#A63D2F]">{l.kind === "debit" ? fmtINR(l.amount) : ""}</td>
+                  <td className="px-3 py-2 font-mono text-[#3F6B52]">{l.kind === "credit" ? fmtINR(l.amount) : ""}</td>
+                  <td className="px-3 py-2 font-mono font-semibold">{fmtINR(l.runningBalance)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <div className="text-center pt-3 mt-4 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
+          This statement reflects every deposit, tuition charge, additional charge, and write-off recorded for this student · Computer Generated Statement
         </div>
       </div>
-      {ledger.timeline.length === 0 ? (
-        <div className="p-8 text-center text-sm text-[#9C8F6E]">No transactions recorded yet for this student.</div>
-      ) : (
-        <table className="w-full text-xs">
-          <thead>
-            <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-              {["Date", "Description", "Debit", "Credit", "Balance"].map(h => (
-                <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-3 py-2 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {ledger.timeline.map((l, i) => (
-              <tr key={i} className="ledger-row">
-                <td className="px-3 py-2 font-mono">{l.date}</td>
-                <td className="px-3 py-2">
-                  {l.label}
-                  {l.kind === "debit" && l.outstanding > 0 && <span className="ml-2"><Stamp text="Unpaid" tone="overdue" /></span>}
-                </td>
-                <td className="px-3 py-2 font-mono text-[#A63D2F]">{l.kind === "debit" ? fmtINR(l.amount) : ""}</td>
-                <td className="px-3 py-2 font-mono text-[#3F6B52]">{l.kind === "credit" ? fmtINR(l.amount) : ""}</td>
-                <td className="px-3 py-2 font-mono font-semibold">{fmtINR(l.runningBalance)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+
+      <button onClick={handlePrintStatement} className="w-full mt-4 flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]">
+        <Printer size={15} /> Print / Export Statement
+      </button>
     </WideModal>
   );
 }
@@ -1868,7 +1965,7 @@ function ReceiptModal({ deposit, student, totalRemainingDue, onClose }) {
     win.document.close(); win.focus(); win.print(); win.close();
   };
 
-  const receiptNo = deposit.id ? deposit.id.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
+  const receiptNo = getReceiptNo(deposit.id);
   const totalCleared = Number(deposit.amount || 0) + Number(deposit.writeOffAmount || 0);
   const ref = deposit.utr || deposit.chequeNumber;
 
