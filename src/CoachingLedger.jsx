@@ -7,7 +7,9 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid 
 } from "recharts";
 import { 
-  LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut, BookOpen, Send, Printer, Award, ArrowUpRight, History, Tag, Undo2
+  LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut, 
+  BookOpen, Send, Printer, Award, ArrowUpRight, History, Tag, Undo2, Archive, RotateCcw, 
+  ClipboardList, Percent
 } from "lucide-react";
 
 // Admin Access Password
@@ -18,10 +20,9 @@ const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Zilla
 const DEFAULT_CLASSES = ["Nursery", "LKG", "UKG", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
 const DEFAULT_SUBJECTS = ["Mathematics", "Physics", "Chemistry", "Science", "Hindi", "English", "Social Studies", "Computer"];
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const PAYMENT_MODES = ["Cash", "UPI", "Bank Transfer", "Cheque"];
 
 // Exit reasons — used whenever a student leaves an active billing cycle.
-// "status" controls whether they can be silently reactivated (on_break) or
-// are flagged as a hard dropout (dropped). Both stop new monthly dues.
 const EXIT_REASONS = [
   { value: "Passed", label: "Passed — completed this class", status: "on_break" },
   { value: "Repeat", label: "Repeating this class next session", status: "on_break" },
@@ -34,6 +35,7 @@ function monthLabel(key) {
   if (!key) return "—";
   if (key === "carried-over") return "Carried Forward";
   const [y, m] = key.split("-").map(Number); 
+  if (!m || m < 1 || m > 12) return key;
   return `${MONTH_NAMES[m - 1]} ${y}`; 
 }
 function currentMonthKey() { return monthKey(new Date()); }
@@ -53,7 +55,9 @@ function fmtINR(n) {
   const v = Number(n) || 0;
   return "₹" + v.toLocaleString("en-IN");
 }
+function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
+function todayStr() { return new Date().toISOString().slice(0, 10); }
 
 const defaultFeeStructure = (classes) => {
   const fs = {};
@@ -77,11 +81,99 @@ function sendWhatsAppReceipt(deposit, student, totalRemainingDue) {
   }
   const cleanPhone = student.phone.replace(/[^0-9]/g, "");
   const formattedPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
-  
   const receiptNo = deposit.id ? deposit.id.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
-  const msg = `*FEE PAYMENT RECEIPT*\n----------------------------------------\n*Receipt No:* #${receiptNo}\n*Date:* ${deposit.date}\n*Student Name:* ${student.name}\n*Class:* ${student.class}\n*For:* ${monthLabel(deposit.month)}\n*Payment Mode:* ${deposit.mode || "Cash"}\n----------------------------------------\n*Amount Paid Today:* ₹${deposit.amount}\n*Remaining Balance:* ₹${totalRemainingDue}\n*Status:* ACKNOWLEDGED ✅\n----------------------------------------\nThank you for your payment!`;
-  
+  const woLine = deposit.writeOffAmount > 0 ? `\n*Discount/Write-off:* ₹${deposit.writeOffAmount}` : "";
+  const refLine = deposit.utr ? `\n*Reference/UTR:* ${deposit.utr}` : (deposit.chequeNumber ? `\n*Cheque No:* ${deposit.chequeNumber}` : "");
+  const msg = `*FEE PAYMENT RECEIPT*\n----------------------------------------\n*Receipt No:* #${receiptNo}\n*Date:* ${deposit.date}\n*Student Name:* ${student.name}\n*Class:* ${student.class}\n*Payment Mode:* ${deposit.mode || "Cash"}${refLine}\n----------------------------------------\n*Amount Paid Today:* ₹${deposit.amount}${woLine}\n*Remaining Balance:* ₹${totalRemainingDue}\n*Status:* ACKNOWLEDGED ✅\n----------------------------------------\nThank you for your payment!`;
   window.open(`https://wa.me/${formattedPhone}?text=${encodeURIComponent(msg)}`, "_blank");
+}
+
+// ============================================================================
+// LEDGER ENGINE — the single source of truth for "how much does this student
+// owe". Everything (tuition accrual, ad-hoc charges, payments, write-offs)
+// becomes one chronological list of debit/credit lines, credits are applied
+// oldest-charge-first, and a running balance falls out naturally. This is
+// what powers Dues, the Dashboard totals, and the per-student Statement.
+// ============================================================================
+function computeStudentLedger(student, deposits, charges, batchesForMonth, expectedFeeFor, curMonth) {
+  const chargeLines = [];
+
+  if (Number(student.previousDues) > 0) {
+    chargeLines.push({
+      id: `opening-${student.id}`, type: "opening",
+      date: `${student.admissionMonth || curMonth}-01`, month: null,
+      label: "Opening Balance (Carried Forward)", amount: round2(student.previousDues),
+    });
+  }
+
+  if (student.admissionMonth && (student.status || "active") === "active" && student.admissionMonth <= curMonth) {
+    monthsBetween(student.admissionMonth, curMonth).forEach(m => {
+      const batches = batchesForMonth(student, m);
+      const bc = batches.length || 1;
+      const expected = expectedFeeFor(student.class, bc, student.monthlyDiscount || 0);
+      if (expected > 0) {
+        chargeLines.push({
+          id: `fee-${student.id}-${m}`, type: "monthly_fee", date: `${m}-01`, month: m,
+          label: `Tuition Fee — ${monthLabel(m)}${batches.length ? " (" + batches.join(", ") + ")" : ""}`,
+          amount: round2(expected),
+        });
+      }
+    });
+  }
+
+  (charges || []).filter(c => c.studentId === student.id && !c.deleted).forEach(c => {
+    chargeLines.push({
+      id: c.id, type: "extra_charge", date: c.date || `${c.month || curMonth}-01`, month: c.month || null,
+      label: c.remarks ? `Additional Charge — ${c.remarks}` : `Additional Charge${c.month ? " (" + monthLabel(c.month) + ")" : ""}`,
+      amount: round2(c.amount), remarks: c.remarks,
+    });
+  });
+
+  chargeLines.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  const creditLines = [];
+  (deposits || []).filter(d => d.studentId === student.id && !d.deleted).forEach(d => {
+    if (Number(d.amount) > 0) {
+      const ref = d.utr ? ` · Ref ${d.utr}` : (d.chequeNumber ? ` · Chq #${d.chequeNumber}` : "");
+      creditLines.push({
+        id: `${d.id}-pay`, depositId: d.id, type: "payment", date: d.date || todayStr(),
+        label: `Payment Received — ${d.mode || "Cash"}${ref}`, amount: round2(d.amount),
+        mode: d.mode, remarks: d.remarks,
+      });
+    }
+    if (Number(d.writeOffAmount) > 0) {
+      creditLines.push({
+        id: `${d.id}-wo`, depositId: d.id, type: "writeoff", date: d.date || todayStr(),
+        label: d.writeOffRemarks ? `Discount / Write-off — ${d.writeOffRemarks}` : "Discount / Write-off",
+        amount: round2(d.writeOffAmount), remarks: d.writeOffRemarks,
+      });
+    }
+  });
+  creditLines.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  let pool = creditLines.reduce((a, c) => a + c.amount, 0);
+  const allocatedCharges = chargeLines.map(line => {
+    const applied = Math.min(line.amount, pool);
+    pool = round2(pool - applied);
+    return { ...line, paid: round2(applied), outstanding: round2(line.amount - applied) };
+  });
+
+  const totalCharged = round2(chargeLines.reduce((a, l) => a + l.amount, 0));
+  const totalCleared = round2(creditLines.reduce((a, l) => a + l.amount, 0));
+  const balance = Math.max(0, round2(totalCharged - totalCleared));
+
+  const timeline = [
+    ...allocatedCharges.map(l => ({ ...l, kind: "debit" })),
+    ...creditLines.map(l => ({ ...l, kind: "credit" })),
+  ].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.kind === "debit" ? -1 : 1)));
+
+  let running = 0;
+  const timelineWithBalance = timeline.map(l => {
+    running = round2(running + (l.kind === "debit" ? l.amount : -l.amount));
+    return { ...l, runningBalance: running };
+  });
+
+  return { chargeLines: allocatedCharges, creditLines, totalCharged, totalCleared, balance, timeline: timelineWithBalance };
 }
 
 function Stamp({ text, tone }) {
@@ -137,14 +229,17 @@ export default function CoachingLedger() {
   const [subjectsList, setSubjectsList] = useState(DEFAULT_SUBJECTS);
   const [feeStructure, setFeeStructure] = useState({});
   const [deposits, setDeposits] = useState([]);
-  
+  const [charges, setCharges] = useState([]);
+
   const [showStudentForm, setShowStudentForm] = useState(false);
   const [showDepositForm, setShowDepositForm] = useState(false);
   const [showClassModal, setShowClassModal] = useState(false);
-  const [showPromoteModal, setShowPromoteModal] = useState(null); // student object
-  const [showHistoryModal, setShowHistoryModal] = useState(null); // student object
-  const [showExitModal, setShowExitModal] = useState(null); // student object
-  const [showBatchChangeModal, setShowBatchChangeModal] = useState(null); // student object
+  const [showPromoteModal, setShowPromoteModal] = useState(null);
+  const [showHistoryModal, setShowHistoryModal] = useState(null);
+  const [showExitModal, setShowExitModal] = useState(null);
+  const [showBatchChangeModal, setShowBatchChangeModal] = useState(null);
+  const [showChargeModal, setShowChargeModal] = useState(null); // { student } or { student: null } for picker
+  const [showStatementModal, setShowStatementModal] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
   const [receiptData, setReceiptData] = useState(null);
 
@@ -165,19 +260,23 @@ export default function CoachingLedger() {
     setPassInput("");
   };
 
-  // Real-time Cloud Sync
   useEffect(() => {
     if (!isAuthenticated) return;
 
     const unsubStudents = onSnapshot(collection(db, "students"), (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, status: "active", ...doc.data() }));
+      const data = snapshot.docs.map(doc => ({ id: doc.id, status: "active", deleted: false, ...doc.data() }));
       setStudents(data);
       setLoaded(true);
     });
 
     const unsubDeposits = onSnapshot(collection(db, "deposits"), (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
       setDeposits(data);
+    });
+
+    const unsubCharges = onSnapshot(collection(db, "charges"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setCharges(data);
     });
 
     const unsubFee = onSnapshot(doc(db, "settings", "feeStructure"), (docSnap) => {
@@ -207,11 +306,7 @@ export default function CoachingLedger() {
     });
 
     return () => {
-      unsubStudents();
-      unsubDeposits();
-      unsubFee();
-      unsubClasses();
-      unsubSubjects();
+      unsubStudents(); unsubDeposits(); unsubCharges(); unsubFee(); unsubClasses(); unsubSubjects();
     };
   }, [isAuthenticated]);
 
@@ -227,13 +322,9 @@ export default function CoachingLedger() {
             <div>
               <label className="block text-xs uppercase tracking-wider text-[#6E6650] mb-1" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Enter Passcode</label>
               <input
-                type="password"
-                value={passInput}
-                onChange={(e) => setPassInput(e.target.value)}
-                placeholder="••••••••"
+                type="password" value={passInput} onChange={(e) => setPassInput(e.target.value)} placeholder="••••••••"
                 className="w-full border rounded-sm px-3 py-2 text-sm bg-white focus:outline-none"
-                style={{ borderColor: passError ? "#A63D2F" : "#D8CFB8" }}
-                autoFocus
+                style={{ borderColor: passError ? "#A63D2F" : "#D8CFB8" }} autoFocus
               />
               {passError && <p className="text-xs text-[#A63D2F] mt-1 font-medium">Incorrect passcode. Try again.</p>}
             </div>
@@ -251,6 +342,14 @@ export default function CoachingLedger() {
   }
 
   const curMonth = currentMonthKey();
+
+  const visibleStudents = students.filter(s => !s.deleted);
+  const visibleDeposits = deposits.filter(d => !d.deleted);
+  const visibleCharges = charges.filter(c => !c.deleted);
+  const trashedStudents = students.filter(s => s.deleted);
+  const trashedDeposits = deposits.filter(d => d.deleted);
+  const trashedCharges = charges.filter(c => c.deleted);
+
   const studentById = Object.fromEntries(students.map(s => [s.id, s]));
 
   function expectedFeeFor(cls, batchCount, monthlyDiscount = 0) {
@@ -259,11 +358,6 @@ export default function CoachingLedger() {
     return Math.max(0, baseFee - (Number(monthlyDiscount) || 0));
   }
 
-  // Effective-dated batch assignment. A student's subjects can change from any
-  // given month onward (e.g. "add Physics starting September") without
-  // touching earlier months' calculations. This is the single source of
-  // truth for "which batches was this student in, in month X" — deposits no
-  // longer carry their own batch snapshot.
   function batchesForMonth(student, month) {
     const history = (student.batchHistory && student.batchHistory.length)
       ? student.batchHistory
@@ -273,158 +367,111 @@ export default function CoachingLedger() {
     return student.batches || [];
   }
 
-  // How much of a student's carried-forward (previousDues) balance has
-  // already been paid off via a "Carried-Forward Dues" type deposit.
-  function carriedOverPaid(studentId) {
-    return deposits.filter(d => d.studentId === studentId && d.isCarriedOverPayment).reduce((a, d) => a + Number(d.amount || 0), 0);
-  }
-
-  // Dues Engine — only ACTIVE students accrue new monthly dues. The moment a
-  // student goes on break or is marked dropped, their outstanding balance up
-  // to that point is folded into previousDues (see exitStudent) so nothing
-  // is lost — it just moves from "monthly ledger" to "carried forward".
-  const duesLedger = [];
-  students.forEach(st => {
-    if (!st.admissionMonth) return;
-    if ((st.status || "active") !== "active") return;
-    if (st.admissionMonth > curMonth) return;
-
-    const months = monthsBetween(st.admissionMonth, curMonth);
-    months.forEach(m => {
-      const batches = batchesForMonth(st, m);
-      const bc = batches.length || 1;
-      const expected = expectedFeeFor(st.class, bc, st.monthlyDiscount || 0);
-      const paid = deposits.filter(d => d.studentId === st.id && d.month === m && !d.isCarriedOverPayment).reduce((a, d) => a + Number(d.amount || 0), 0);
-      const outstanding = Math.max(0, expected - paid);
-      duesLedger.push({ 
-        studentId: st.id, name: st.name, cls: st.class, phone: st.phone, 
-        month: m, batches, expected, paid, outstanding, 
-        isCurrent: m === curMonth, status: st.status || "active" 
-      });
-    });
+  // Per-student ledger (tuition + charges vs payments + write-offs), computed
+  // fresh each render — this is the single source of truth used everywhere.
+  const ledgers = {};
+  visibleStudents.forEach(st => {
+    ledgers[st.id] = computeStudentLedger(st, visibleDeposits, visibleCharges, batchesForMonth, expectedFeeFor, curMonth);
   });
-
-  // Carried-forward balance still owed by ANY student — active, on break, or
-  // dropped. This is what used to silently disappear once a student left
-  // "active" status; now it always shows up in Dues.
-  const carriedOverMap = {};
-  students.forEach(st => {
-    carriedOverMap[st.id] = Math.max(0, (Number(st.previousDues) || 0) - carriedOverPaid(st.id));
-  });
-
-  const carriedOverRows = students
-    .map(st => {
-      const rem = carriedOverMap[st.id] || 0;
-      if (rem <= 0) return null;
-      return {
-        studentId: st.id, name: st.name, cls: st.class, phone: st.phone,
-        month: "carried-over", batches: [], expected: rem, paid: 0, outstanding: rem,
-        isCurrent: false, status: st.status || "active", carriedOver: true,
-      };
-    })
-    .filter(Boolean);
 
   const studentDuesMap = {};
-  students.forEach(st => {
-    const currentAcademicOutstanding = duesLedger.filter(r => r.studentId === st.id).reduce((a, r) => a + r.outstanding, 0);
-    studentDuesMap[st.id] = currentAcademicOutstanding + (carriedOverMap[st.id] || 0);
-  });
+  visibleStudents.forEach(st => { studentDuesMap[st.id] = ledgers[st.id].balance; });
 
-  const activeStudents = students.filter(s => (s.status || "active") === "active");
-  const outstandingRows = [...duesLedger.filter(r => r.outstanding > 0), ...carriedOverRows].sort((a, b) => (a.month < b.month ? -1 : 1));
-  const totalOutstanding = Object.values(studentDuesMap).reduce((a, v) => a + v, 0);
+  const outstandingRows = visibleStudents.flatMap(st =>
+    ledgers[st.id].chargeLines.filter(l => l.outstanding > 0).map(l => ({
+      studentId: st.id, name: st.name, cls: st.class, phone: st.phone,
+      type: l.type, month: l.month, label: l.label,
+      expected: l.amount, paid: l.paid, outstanding: l.outstanding,
+      isCurrent: l.month === curMonth, status: st.status || "active",
+    }))
+  ).sort((a, b) => (a.month || "") < (b.month || "") ? -1 : 1);
 
-  const thisMonthCollected = deposits.filter(d => d.month === curMonth && !d.isCarriedOverPayment).reduce((a, d) => a + Number(d.amount || 0), 0);
-  const thisMonthExpected = duesLedger.filter(r => r.month === curMonth).reduce((a, r) => a + r.expected, 0);
+  const totalOutstanding = round2(Object.values(studentDuesMap).reduce((a, v) => a + v, 0));
+
+  function depositMonthOf(d) { return d.date ? d.date.slice(0, 7) : null; }
+  const thisMonthCollected = visibleDeposits.filter(d => depositMonthOf(d) === curMonth).reduce((a, d) => a + Number(d.amount || 0), 0);
+  const thisMonthWriteOffs = visibleDeposits.filter(d => depositMonthOf(d) === curMonth).reduce((a, d) => a + Number(d.writeOffAmount || 0), 0);
+  const thisMonthExpected = visibleStudents.reduce((a, st) => a + ledgers[st.id].chargeLines.filter(l => l.month === curMonth).reduce((s, l) => s + l.amount, 0), 0);
 
   const start = addMonths(curMonth, -5);
   const trendMonths = monthsBetween(start, curMonth);
   const trend = trendMonths.map(m => ({
     month: monthLabel(m).split(" ")[0],
-    collected: deposits.filter(d => d.month === m && !d.isCarriedOverPayment).reduce((a, d) => a + Number(d.amount || 0), 0),
+    collected: visibleDeposits.filter(d => depositMonthOf(d) === m).reduce((a, d) => a + Number(d.amount || 0), 0),
   }));
 
+  const activeStudents = visibleStudents.filter(s => (s.status || "active") === "active");
   const classStrength = Object.fromEntries(classes.map(c => [c, 0]));
   activeStudents.forEach(s => { if (classStrength[s.class] !== undefined) classStrength[s.class]++; });
 
-  const recentDeposits = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
+  const recentDeposits = [...visibleDeposits].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
 
-  // Actions
+  // Fee forecast — "how much will be charged in month X" across active
+  // students (tuition) plus any additional charges already logged for X.
+  function forecastForMonth(month) {
+    const rows = [];
+    activeStudents.forEach(st => {
+      if (!st.admissionMonth || st.admissionMonth > month) return;
+      const batches = batchesForMonth(st, month);
+      const bc = batches.length || 1;
+      const expected = expectedFeeFor(st.class, bc, st.monthlyDiscount || 0);
+      if (expected > 0) rows.push({ student: st, batches, expected });
+    });
+    const extra = visibleCharges.filter(c => c.month === month);
+    const tuitionTotal = round2(rows.reduce((a, r) => a + r.expected, 0));
+    const extraTotal = round2(extra.reduce((a, c) => a + Number(c.amount || 0), 0));
+    return { rows, extra, tuitionTotal, extraTotal, total: round2(tuitionTotal + extraTotal) };
+  }
+
+  // ---- Student lifecycle actions ----
   async function saveStudent(data) {
     const id = data.id || uid();
-    await setDoc(doc(db, "students", id), { ...data, id });
+    await setDoc(doc(db, "students", id), { ...data, id, deleted: false });
     setShowStudentForm(false);
     setEditingStudent(null);
   }
 
-  // Ends (or pauses) a student's active billing. Whatever they still owe up
-  // to this point is rolled into previousDues so it keeps showing in Dues.
-  // A full snapshot of the pre-change state is stashed on the student so the
-  // action can be undone in one click if it was a mistake.
   async function exitStudent(student, resultStatus, exitDateInput) {
     const reason = EXIT_REASONS.find(r => r.value === resultStatus) || EXIT_REASONS[2];
-    const totalCurrentOutstanding = duesLedger.filter(r => r.studentId === student.id).reduce((a, r) => a + r.outstanding, 0);
-    const accumulatedPreviousDues = (Number(student.previousDues) || 0) + totalCurrentOutstanding;
+    const ledger = ledgers[student.id] || computeStudentLedger(student, visibleDeposits, visibleCharges, batchesForMonth, expectedFeeFor, curMonth);
+    const openingLine = ledger.chargeLines.find(l => l.type === "opening");
+    const tuitionOutstanding = ledger.chargeLines.filter(l => l.type === "monthly_fee").reduce((a, l) => a + l.outstanding, 0);
+    const openingOutstanding = openingLine ? openingLine.outstanding : 0;
+    const newPreviousDues = round2(openingOutstanding + tuitionOutstanding);
 
     const historyItem = {
-      class: student.class,
-      batches: student.batches || [],
-      admissionMonth: student.admissionMonth,
-      completionDate: exitDateInput || new Date().toISOString().slice(0, 10),
-      resultStatus,
-      unpaidBalanceAtEnd: totalCurrentOutstanding,
+      class: student.class, batches: student.batches || [], admissionMonth: student.admissionMonth,
+      completionDate: exitDateInput || todayStr(), resultStatus, unpaidBalanceAtEnd: tuitionOutstanding,
     };
 
     const snapshot = {
-      class: student.class,
-      batches: student.batches || [],
+      class: student.class, batches: student.batches || [],
       batchHistory: student.batchHistory || [{ fromMonth: student.admissionMonth, batches: student.batches || [] }],
-      admissionMonth: student.admissionMonth,
-      previousDues: Number(student.previousDues) || 0,
-      academicHistory: student.academicHistory || [],
-      status: student.status || "active",
-      resultStatus: student.resultStatus || null,
-      exitDate: student.exitDate || null,
+      admissionMonth: student.admissionMonth, previousDues: Number(student.previousDues) || 0,
+      academicHistory: student.academicHistory || [], status: student.status || "active",
+      resultStatus: student.resultStatus || null, exitDate: student.exitDate || null,
     };
 
     const updatedStudent = {
-      ...student,
-      status: reason.status,
-      resultStatus,
-      previousDues: accumulatedPreviousDues,
+      ...student, status: reason.status, resultStatus, previousDues: newPreviousDues,
       academicHistory: [...(student.academicHistory || []), historyItem],
-      exitDate: exitDateInput || new Date().toISOString().slice(0, 10),
-      lastSnapshot: snapshot,
+      exitDate: exitDateInput || todayStr(), lastSnapshot: snapshot,
     };
 
     await setDoc(doc(db, "students", student.id), updatedStudent);
     setShowExitModal(null);
   }
 
-  // One-click undo for a mistaken "Complete Year / Drop Out / Break" action.
-  // Restores class, batch timeline, admission month, dues and history exactly
-  // as they were right before the exit. Available until the next lifecycle
-  // action (promote or another exit) overwrites the snapshot.
   async function undoExit(student) {
-    if (!student.lastSnapshot) {
-      alert("Nothing to undo for this student.");
-      return;
-    }
+    if (!student.lastSnapshot) { alert("Nothing to undo for this student."); return; }
     if (!window.confirm(`Undo the last status change for ${student.name}? This restores Class ${student.lastSnapshot.class} as Active and removes the most recent history entry.`)) return;
     const snap = student.lastSnapshot;
-    const restoredHistory = (student.academicHistory || []).slice(0, -1); // drop the entry the exit just added
+    const restoredHistory = (student.academicHistory || []).slice(0, -1);
     const restored = {
-      ...student,
-      class: snap.class,
-      batches: snap.batches,
-      batchHistory: snap.batchHistory,
-      admissionMonth: snap.admissionMonth,
-      previousDues: snap.previousDues,
+      ...student, class: snap.class, batches: snap.batches, batchHistory: snap.batchHistory,
+      admissionMonth: snap.admissionMonth, previousDues: snap.previousDues,
       academicHistory: restoredHistory.length ? restoredHistory : snap.academicHistory,
-      status: "active",
-      resultStatus: null,
-      exitDate: null,
-      lastSnapshot: null,
+      status: "active", resultStatus: null, exitDate: null, lastSnapshot: null,
     };
     await setDoc(doc(db, "students", student.id), restored);
   }
@@ -437,25 +484,13 @@ export default function CoachingLedger() {
     history.sort((a, b) => (a.fromMonth < b.fromMonth ? -1 : 1));
 
     const updatedStudent = {
-      ...student,
-      class: newClass,
-      batches: newBatches,
-      batchHistory: history,
-      admissionMonth: newStartMonth,
-      monthlyDiscount: Number(monthlyDiscount) || 0,
-      status: "active", // Resumes monthly billing
-      resultStatus: null,
-      exitDate: null,
-      lastSnapshot: null,
+      ...student, class: newClass, batches: newBatches, batchHistory: history, admissionMonth: newStartMonth,
+      monthlyDiscount: Number(monthlyDiscount) || 0, status: "active", resultStatus: null, exitDate: null, lastSnapshot: null,
     };
-
     await setDoc(doc(db, "students", student.id), updatedStudent);
     setShowPromoteModal(null);
   }
 
-  // Change a student's batches effective from a specific month — past months
-  // keep using whatever was in effect back then, so mid-year additions/drops
-  // (e.g. "add Physics from September") don't disturb earlier dues.
   async function changeStudentBatches(student, fromMonth, newBatches) {
     const history = [...(student.batchHistory || [{ fromMonth: student.admissionMonth, batches: student.batches || [] }])];
     const idx = history.findIndex(h => h.fromMonth === fromMonth);
@@ -463,27 +498,72 @@ export default function CoachingLedger() {
     if (idx >= 0) history[idx] = entry; else history.push(entry);
     history.sort((a, b) => (a.fromMonth < b.fromMonth ? -1 : 1));
     const latest = history[history.length - 1];
-    const updatedStudent = { ...student, batchHistory: history, batches: latest.batches };
-    await setDoc(doc(db, "students", student.id), updatedStudent);
+    await setDoc(doc(db, "students", student.id), { ...student, batchHistory: history, batches: latest.batches });
     setShowBatchChangeModal(null);
   }
 
-  async function removeStudent(id) {
-    if (window.confirm("Are you sure you want to remove this student permanently? This also deletes their deposit history.")) {
-      await deleteDoc(doc(db, "students", id));
-    }
+  // ---- Soft delete / restore (Trash) ----
+  async function softDeleteStudent(id) {
+    const s = studentById[id];
+    if (!s) return;
+    if (!window.confirm("Move this student to Trash? All their data (fees, payments, history) is kept and can be restored.")) return;
+    await setDoc(doc(db, "students", id), { ...s, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreStudent(id) {
+    const s = studentById[id];
+    if (!s) return;
+    await setDoc(doc(db, "students", id), { ...s, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteStudent(id) {
+    if (!window.confirm("Permanently delete this student and all associated records? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "students", id));
+  }
+
+  async function softDeleteDeposit(id) {
+    const d = deposits.find(x => x.id === id);
+    if (!d) return;
+    if (!window.confirm("Move this receipt to Trash? It can be restored later.")) return;
+    await setDoc(doc(db, "deposits", id), { ...d, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreDeposit(id) {
+    const d = deposits.find(x => x.id === id);
+    if (!d) return;
+    await setDoc(doc(db, "deposits", id), { ...d, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteDeposit(id) {
+    if (!window.confirm("Permanently delete this receipt? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "deposits", id));
+  }
+
+  async function addCharge(data) {
+    const id = uid();
+    await setDoc(doc(db, "charges", id), { ...data, id, deleted: false, createdAt: todayStr() });
+    setShowChargeModal(null);
+  }
+  async function softDeleteCharge(id) {
+    const c = charges.find(x => x.id === id);
+    if (!c) return;
+    if (!window.confirm("Remove this charge? It can be restored later from Trash.")) return;
+    await setDoc(doc(db, "charges", id), { ...c, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreCharge(id) {
+    const c = charges.find(x => x.id === id);
+    if (!c) return;
+    await setDoc(doc(db, "charges", id), { ...c, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteCharge(id) {
+    if (!window.confirm("Permanently delete this charge? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "charges", id));
   }
 
   async function saveFeeStructure(updatedMatrix) {
     setFeeStructure(updatedMatrix);
     await setDoc(doc(db, "settings", "feeStructure"), { matrix: updatedMatrix });
   }
-
   async function saveClasses(updatedList) {
     setClasses(updatedList);
     await setDoc(doc(db, "settings", "classList"), { list: updatedList });
   }
-
   async function saveSubjects(updatedList) {
     setSubjectsList(updatedList);
     await setDoc(doc(db, "settings", "subjectList"), { list: updatedList });
@@ -491,16 +571,11 @@ export default function CoachingLedger() {
 
   async function saveDeposit(data) {
     const id = uid();
-    const newDep = { ...data, id };
+    const newDep = { ...data, id, deleted: false };
     await setDoc(doc(db, "deposits", id), newDep);
     setShowDepositForm(false);
-    
     const st = studentById[data.studentId];
     setReceiptData({ deposit: newDep, student: st });
-  }
-
-  async function removeDeposit(id) {
-    await deleteDoc(doc(db, "deposits", id));
   }
 
   const navItems = [
@@ -509,8 +584,12 @@ export default function CoachingLedger() {
     { id: "students", label: "Students Register", icon: Users },
     { id: "structure", label: "Fee Matrix", icon: Wallet },
     { id: "deposits", label: "Deposits Log", icon: Receipt },
+    { id: "charges", label: "Additional Charges", icon: ClipboardList },
     { id: "dues", label: "Pending Dues", icon: AlertCircle },
+    { id: "trash", label: "Trash / Restore", icon: Archive },
   ];
+
+  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length;
 
   return (
     <div className="min-h-screen flex" style={{ background: "#FAF6EC", fontFamily: "'Inter', sans-serif", color: "#26231D" }}>
@@ -520,8 +599,7 @@ export default function CoachingLedger() {
         ::selection { background: #B8862B33; }
       `}</style>
 
-      {/* Sidebar */}
-      <aside className="w-56 shrink-0 flex flex-col justify-between" style={{ background: "#12312B" }}>
+      <aside className="w-60 shrink-0 flex flex-col justify-between" style={{ background: "#12312B" }}>
         <div>
           <div className="px-5 pt-6 pb-5" style={{ borderBottom: "1px solid #24473F" }}>
             <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#F4EFDE] leading-tight">Batch<br/>Ledger Pro</div>
@@ -532,30 +610,21 @@ export default function CoachingLedger() {
               const Icon = item.icon;
               const active = tab === item.id;
               return (
-                <button
-                  key={item.id}
-                  onClick={() => setTab(item.id)}
-                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-sm text-sm transition-colors"
-                  style={{
-                    background: active ? "#F4EFDE" : "transparent",
-                    color: active ? "#12312B" : "#C9D9CF",
-                    fontWeight: active ? 600 : 500,
-                  }}
-                >
+                <button key={item.id} onClick={() => setTab(item.id)}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-sm text-sm transition-colors relative"
+                  style={{ background: active ? "#F4EFDE" : "transparent", color: active ? "#12312B" : "#C9D9CF", fontWeight: active ? 600 : 500 }}>
                   <Icon size={16} />
                   {item.label}
+                  {item.id === "trash" && trashCount > 0 && (
+                    <span className="ml-auto text-[10px] font-mono px-1.5 rounded-full" style={{ background: "#A63D2F", color: "white" }}>{trashCount}</span>
+                  )}
                 </button>
               );
             })}
           </nav>
         </div>
-
         <div style={{ borderTop: "1px solid #24473F" }}>
-          <button
-            onClick={handleLogout}
-            className="w-full flex items-center gap-2 px-5 py-3 text-xs font-medium text-[#8FAE9F] hover:text-[#F4EFDE] transition-colors"
-            style={{ fontFamily: "'IBM Plex Mono', monospace" }}
-          >
+          <button onClick={handleLogout} className="w-full flex items-center gap-2 px-5 py-3 text-xs font-medium text-[#8FAE9F] hover:text-[#F4EFDE] transition-colors" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
             <LogOut size={14} /> Lock Portal
           </button>
           <div className="px-5 pb-4 text-[10px]" style={{ color: "#6E9384", fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -564,139 +633,93 @@ export default function CoachingLedger() {
         </div>
       </aside>
 
-      {/* Main Content */}
       <main className="flex-1 px-8 py-7 max-w-6xl">
         {tab === "dashboard" && (
           <DashboardTab
-            students={activeStudents} thisMonthCollected={thisMonthCollected} thisMonthExpected={thisMonthExpected}
-            totalOutstanding={totalOutstanding} trend={trend} classStrength={classStrength}
+            students={activeStudents} thisMonthCollected={thisMonthCollected} thisMonthWriteOffs={thisMonthWriteOffs}
+            thisMonthExpected={thisMonthExpected} totalOutstanding={totalOutstanding} trend={trend} classStrength={classStrength}
             recentDeposits={recentDeposits} studentById={studentById} curMonth={curMonth} classes={classes}
-            studentDues={studentDuesMap}
+            studentDues={studentDuesMap} forecastForMonth={forecastForMonth}
             onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
           />
         )}
         {tab === "class_hub" && (
-          <ClassAndDuesHubTab 
-            students={students} 
-            classes={classes} 
-            studentDues={studentDuesMap} 
-            outstandingRows={outstandingRows}
-            batchesForMonth={batchesForMonth}
-            curMonth={curMonth}
+          <ClassAndDuesHubTab
+            students={visibleStudents} classes={classes} studentDues={studentDuesMap} outstandingRows={outstandingRows}
+            batchesForMonth={batchesForMonth} curMonth={curMonth}
             onManageClasses={() => setShowClassModal(true)}
-            onEditStudent={(s) => { setEditingStudent(s); setShowStudentForm(true); }}
-            onExit={(s) => setShowExitModal(s)}
-            onPromote={(s) => setShowPromoteModal(s)}
-            onViewHistory={(s) => setShowHistoryModal(s)}
-            onBatchChange={(s) => setShowBatchChangeModal(s)}
-            onUndo={undoExit}
+            onExit={(s) => setShowExitModal(s)} onPromote={(s) => setShowPromoteModal(s)}
+            onViewHistory={(s) => setShowHistoryModal(s)} onBatchChange={(s) => setShowBatchChangeModal(s)}
+            onUndo={undoExit} onStatement={(s) => setShowStatementModal(s)}
           />
         )}
         {tab === "students" && (
           <StudentsTab
-            students={students}
-            studentDues={studentDuesMap}
-            classes={classes}
-            batchesForMonth={batchesForMonth}
-            curMonth={curMonth}
+            students={visibleStudents} studentDues={studentDuesMap} classes={classes}
+            batchesForMonth={batchesForMonth} curMonth={curMonth}
             onAdd={() => { setEditingStudent(null); setShowStudentForm(true); }}
             onEdit={(s) => { setEditingStudent(s); setShowStudentForm(true); }}
-            onExit={(s) => setShowExitModal(s)}
-            onPromote={(s) => setShowPromoteModal(s)}
-            onViewHistory={(s) => setShowHistoryModal(s)}
-            onBatchChange={(s) => setShowBatchChangeModal(s)}
-            onUndo={undoExit}
-            onRemove={removeStudent}
+            onExit={(s) => setShowExitModal(s)} onPromote={(s) => setShowPromoteModal(s)}
+            onViewHistory={(s) => setShowHistoryModal(s)} onBatchChange={(s) => setShowBatchChangeModal(s)}
+            onUndo={undoExit} onStatement={(s) => setShowStatementModal(s)}
+            onAddCharge={(s) => setShowChargeModal({ student: s })}
+            onRemove={softDeleteStudent}
           />
         )}
-        {tab === "structure" && (
-          <StructureTab feeStructure={feeStructure} setFeeStructure={saveFeeStructure} classes={classes} />
-        )}
+        {tab === "structure" && <StructureTab feeStructure={feeStructure} setFeeStructure={saveFeeStructure} classes={classes} />}
         {tab === "deposits" && (
-          <DepositsTab 
-            deposits={deposits} 
-            students={students} 
-            studentDues={studentDuesMap}
-            batchesForMonth={batchesForMonth}
-            onAdd={() => setShowDepositForm(true)} 
-            onRemove={removeDeposit} 
+          <DepositsTab
+            deposits={visibleDeposits} students={visibleStudents} studentDues={studentDuesMap}
+            onAdd={() => setShowDepositForm(true)} onRemove={softDeleteDeposit}
             onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
           />
         )}
-        {tab === "dues" && (
-          <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} students={students} studentDues={studentDuesMap} />
+        {tab === "charges" && (
+          <ChargesTab
+            charges={visibleCharges} students={visibleStudents}
+            onAdd={() => setShowChargeModal({ student: null })} onRemove={softDeleteCharge}
+          />
+        )}
+        {tab === "dues" && <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} students={visibleStudents} studentDues={studentDuesMap} />}
+        {tab === "trash" && (
+          <TrashTab
+            trashedStudents={trashedStudents} trashedDeposits={trashedDeposits} trashedCharges={trashedCharges}
+            studentById={studentById}
+            onRestoreStudent={restoreStudent} onDeleteStudent={permanentlyDeleteStudent}
+            onRestoreDeposit={restoreDeposit} onDeleteDeposit={permanentlyDeleteDeposit}
+            onRestoreCharge={restoreCharge} onDeleteCharge={permanentlyDeleteCharge}
+          />
         )}
       </main>
 
       {showStudentForm && (
-        <StudentFormModal
-          classes={classes}
-          subjectsList={subjectsList}
-          initial={editingStudent}
-          onClose={() => { setShowStudentForm(false); setEditingStudent(null); }}
-          onSave={saveStudent}
-        />
+        <StudentFormModal classes={classes} subjectsList={subjectsList} initial={editingStudent}
+          onClose={() => { setShowStudentForm(false); setEditingStudent(null); }} onSave={saveStudent} />
       )}
       {showDepositForm && (
-        <DepositFormModal
-          students={students}
-          curMonth={curMonth}
-          expectedFeeFor={expectedFeeFor}
-          batchesForMonth={batchesForMonth}
-          carriedOverMap={carriedOverMap}
-          onClose={() => setShowDepositForm(false)}
-          onSave={saveDeposit}
-        />
+        <DepositFormModal students={visibleStudents} studentDues={studentDuesMap} onClose={() => setShowDepositForm(false)} onSave={saveDeposit} />
       )}
       {showClassModal && (
-        <ClassManagerModal 
-          classes={classes} 
-          subjectsList={subjectsList}
-          onClose={() => setShowClassModal(false)} 
-          onSaveClasses={saveClasses}
-          onSaveSubjects={saveSubjects}
-        />
+        <ClassManagerModal classes={classes} subjectsList={subjectsList} onClose={() => setShowClassModal(false)} onSaveClasses={saveClasses} onSaveSubjects={saveSubjects} />
       )}
       {showPromoteModal && (
-        <PromoteModal
-          student={showPromoteModal}
-          classes={classes}
-          subjectsList={subjectsList}
-          curMonth={curMonth}
-          onClose={() => setShowPromoteModal(null)}
-          onPromote={promoteStudent}
-        />
+        <PromoteModal student={showPromoteModal} classes={classes} subjectsList={subjectsList} curMonth={curMonth} onClose={() => setShowPromoteModal(null)} onPromote={promoteStudent} />
       )}
       {showExitModal && (
-        <ExitStudentModal
-          student={showExitModal}
-          currentDue={studentDuesMap[showExitModal.id] || 0}
-          onClose={() => setShowExitModal(null)}
-          onConfirm={(reason, exitDate) => exitStudent(showExitModal, reason, exitDate)}
-        />
+        <ExitStudentModal student={showExitModal} currentDue={studentDuesMap[showExitModal.id] || 0} onClose={() => setShowExitModal(null)} onConfirm={(reason, exitDate) => exitStudent(showExitModal, reason, exitDate)} />
       )}
       {showBatchChangeModal && (
-        <BatchChangeModal
-          student={showBatchChangeModal}
-          subjectsList={subjectsList}
-          curMonth={curMonth}
-          onClose={() => setShowBatchChangeModal(null)}
-          onSave={changeStudentBatches}
-        />
+        <BatchChangeModal student={showBatchChangeModal} subjectsList={subjectsList} curMonth={curMonth} onClose={() => setShowBatchChangeModal(null)} onSave={changeStudentBatches} />
       )}
-      {showHistoryModal && (
-        <AcademicHistoryModal
-          student={showHistoryModal}
-          onClose={() => setShowHistoryModal(null)}
-        />
+      {showHistoryModal && <AcademicHistoryModal student={showHistoryModal} onClose={() => setShowHistoryModal(null)} />}
+      {showChargeModal && (
+        <AddChargeModal students={visibleStudents} initialStudent={showChargeModal.student} curMonth={curMonth} onClose={() => setShowChargeModal(null)} onSave={addCharge} />
+      )}
+      {showStatementModal && (
+        <StudentStatementModal student={showStatementModal} ledger={ledgers[showStatementModal.id]} onClose={() => setShowStatementModal(null)} />
       )}
       {receiptData && (
-        <ReceiptModal 
-          deposit={receiptData.deposit} 
-          student={receiptData.student} 
-          totalRemainingDue={studentDuesMap[receiptData.student?.id] || 0}
-          onClose={() => setReceiptData(null)} 
-        />
+        <ReceiptModal deposit={receiptData.deposit} student={receiptData.student} totalRemainingDue={studentDuesMap[receiptData.student?.id] || 0} onClose={() => setReceiptData(null)} />
       )}
     </div>
   );
@@ -713,7 +736,52 @@ function StatCard({ label, value, sub, tone }) {
   );
 }
 
-function DashboardTab({ students, thisMonthCollected, thisMonthExpected, totalOutstanding, trend, classStrength, recentDeposits, studentById, curMonth, classes, studentDues, onOpenReceipt }) {
+function FeeForecastCard({ curMonth, forecastForMonth }) {
+  const [month, setMonth] = useState(curMonth);
+  const result = forecastForMonth(month);
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold">Fee Forecast</div>
+        <input type="month" value={month} onChange={e => setMonth(e.target.value)} className="border rounded-sm px-2.5 py-1.5 text-xs bg-white" style={{ borderColor: "#D8CFB8" }} />
+      </div>
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <div className="p-2.5 rounded bg-[#FAF6EC] border" style={{ borderColor: "#D8CFB8" }}>
+          <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Tuition</div>
+          <div className="text-lg font-bold text-[#12312B]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(result.tuitionTotal)}</div>
+        </div>
+        <div className="p-2.5 rounded bg-[#FAF6EC] border" style={{ borderColor: "#D8CFB8" }}>
+          <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Additional Charges</div>
+          <div className="text-lg font-bold text-[#B8862B]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(result.extraTotal)}</div>
+        </div>
+        <div className="p-2.5 rounded bg-[#EAF1EA] border" style={{ borderColor: "#3F6B52" }}>
+          <div className="text-[10px] uppercase text-[#3F6B52] font-mono">Total for {monthLabel(month)}</div>
+          <div className="text-lg font-bold text-[#3F6B52]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(result.total)}</div>
+        </div>
+      </div>
+      <div className="max-h-48 overflow-y-auto">
+        {result.rows.length === 0 ? (
+          <div className="text-xs text-[#9C8F6E] p-2 text-center">No students will be billed for {monthLabel(month)}.</div>
+        ) : (
+          <table className="w-full text-xs">
+            <tbody>
+              {result.rows.map(r => (
+                <tr key={r.student.id} className="ledger-row">
+                  <td className="px-2 py-1.5 font-medium">{r.student.name}</td>
+                  <td className="px-2 py-1.5 text-[#6E6650]">Class {r.student.class}</td>
+                  <td className="px-2 py-1.5 text-[#6E6650]">{r.batches.join(", ") || "—"}</td>
+                  <td className="px-2 py-1.5 text-right font-mono font-semibold">{fmtINR(r.expected)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMonthExpected, totalOutstanding, trend, classStrength, recentDeposits, studentById, curMonth, classes, studentDues, forecastForMonth, onOpenReceipt }) {
   const collectionRate = thisMonthExpected > 0 ? Math.round((thisMonthCollected / thisMonthExpected) * 100) : 0;
   return (
     <div>
@@ -722,7 +790,7 @@ function DashboardTab({ students, thisMonthCollected, thisMonthExpected, totalOu
         <StatCard label="Active Students" value={students.length} sub={`${classes.filter(c => students.some(s => s.class === c)).length} active classes`} />
         <StatCard label="Collected this month" value={fmtINR(thisMonthCollected)} sub={`of ${fmtINR(thisMonthExpected)} expected`} tone="good" />
         <StatCard label="Collection rate" value={`${collectionRate}%`} tone={collectionRate >= 80 ? "good" : collectionRate >= 50 ? "warn" : "bad"} />
-        <StatCard label="Total Dues Balance" value={fmtINR(totalOutstanding)} sub="includes carried-over dues" tone={totalOutstanding > 0 ? "bad" : "good"} />
+        <StatCard label="Total Dues Balance" value={fmtINR(totalOutstanding)} sub={thisMonthWriteOffs > 0 ? `${fmtINR(thisMonthWriteOffs)} written off this month` : "includes carried-over dues"} tone={totalOutstanding > 0 ? "bad" : "good"} />
       </div>
 
       <div className="grid grid-cols-3 gap-5 mb-6">
@@ -756,52 +824,49 @@ function DashboardTab({ students, thisMonthCollected, thisMonthExpected, totalOu
         </Card>
       </div>
 
-      <Card className="p-5">
-        <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Recent Deposits Logged</div>
-        {recentDeposits.length === 0 ? (
-          <div className="text-sm text-[#9C8F6E]">No deposits recorded yet.</div>
-        ) : (
-          <div className="space-y-0">
-            {recentDeposits.map(d => {
-              const st = studentById[d.studentId];
-              return (
-                <div key={d.id} className="flex items-center justify-between py-2 text-sm ledger-row px-2 -mx-2" style={{ borderBottom: "1px solid #EEE7D2" }}>
-                  <div>
-                    <span className="font-medium">{st ? st.name : "Unknown"}</span>
-                    <span className="text-[#9C8F6E] ml-2 text-xs">Class {st ? st.class : "—"} · {monthLabel(d.month)}</span>
+      <div className="grid grid-cols-2 gap-5 mb-6">
+        <FeeForecastCard curMonth={curMonth} forecastForMonth={forecastForMonth} />
+        <Card className="p-5">
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Recent Deposits Logged</div>
+          {recentDeposits.length === 0 ? (
+            <div className="text-sm text-[#9C8F6E]">No deposits recorded yet.</div>
+          ) : (
+            <div className="space-y-0 max-h-64 overflow-y-auto">
+              {recentDeposits.map(d => {
+                const st = studentById[d.studentId];
+                return (
+                  <div key={d.id} className="flex items-center justify-between py-2 text-sm ledger-row px-2 -mx-2" style={{ borderBottom: "1px solid #EEE7D2" }}>
+                    <div>
+                      <span className="font-medium">{st ? st.name : "Unknown"}</span>
+                      <span className="text-[#9C8F6E] ml-2 text-xs">Class {st ? st.class : "—"} · {d.date}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="font-semibold text-[#3F6B52]">{fmtINR(d.amount)}</span>
+                      <button onClick={() => onOpenReceipt(d)} className="p-1 text-[#12312B] hover:bg-[#E4DCC5] rounded" title="View / Print Receipt">
+                        <Printer size={14} />
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="font-semibold text-[#3F6B52]">{fmtINR(d.amount)}</span>
-                    <button onClick={() => onOpenReceipt(d)} className="p-1 text-[#12312B] hover:bg-[#E4DCC5] rounded" title="View / Print Receipt">
-                      <Printer size={14} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      </div>
     </div>
   );
 }
 
-function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, onUndo, compact }) {
+function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, onUndo, onStatement, onAddCharge, compact }) {
   const status = s.status || "active";
   return (
     <>
       {status === "active" ? (
-        <button
-          onClick={() => onExit(s)}
-          className={compact ? "text-xs text-[#26231D] font-semibold underline" : "px-2 py-1 bg-[#26231D] text-[#FAF6EC] rounded text-[11px] font-medium hover:bg-black inline-flex items-center gap-1"}
-        >
+        <button onClick={() => onExit(s)} className={compact ? "text-xs text-[#26231D] font-semibold underline" : "px-2 py-1 bg-[#26231D] text-[#FAF6EC] rounded text-[11px] font-medium hover:bg-black inline-flex items-center gap-1"}>
           {compact ? "End / Pause" : (<><Award size={11} /> End / Pause</>)}
         </button>
       ) : (
-        <button
-          onClick={() => onPromote(s)}
-          className={compact ? "text-xs text-[#3F6B52] font-semibold underline" : "px-2 py-1 bg-[#3F6B52] text-white rounded text-[11px] font-medium hover:bg-[#2E5240] inline-flex items-center gap-1"}
-        >
+        <button onClick={() => onPromote(s)} className={compact ? "text-xs text-[#3F6B52] font-semibold underline" : "px-2 py-1 bg-[#3F6B52] text-white rounded text-[11px] font-medium hover:bg-[#2E5240] inline-flex items-center gap-1"}>
           {compact ? (status === "dropped" ? "Reactivate" : "Promote") : (<><ArrowUpRight size={11} /> {status === "dropped" ? "Reactivate" : "Promote / Resume"}</>)}
         </button>
       )}
@@ -810,17 +875,15 @@ function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, 
           <Undo2 size={11} /> Undo
         </button>
       )}
-      <button onClick={() => onBatchChange(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs">
-        <Tag size={11} /> Batches
-      </button>
-      <button onClick={() => onViewHistory(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs">
-        <History size={11} /> Log
-      </button>
+      <button onClick={() => onBatchChange(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><Tag size={11} /> Batches</button>
+      <button onClick={() => onAddCharge(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><Plus size={11} /> Charge</button>
+      <button onClick={() => onStatement(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><Receipt size={11} /> Statement</button>
+      <button onClick={() => onViewHistory(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><History size={11} /> Log</button>
     </>
   );
 }
 
-function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, batchesForMonth, curMonth, onManageClasses, onEditStudent, onExit, onPromote, onViewHistory, onBatchChange, onUndo }) {
+function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, batchesForMonth, curMonth, onManageClasses, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge }) {
   const [selectedClass, setSelectedClass] = useState("ALL");
   const [viewMode, setViewMode] = useState("class");
 
@@ -829,60 +892,37 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
     return students.filter(s => s.class === selectedClass);
   }, [students, selectedClass]);
 
-  const sendWhatsAppReminder = (phone, name, month, amount) => {
-    if (!phone) {
-      alert("No phone number recorded for this student.");
-      return;
-    }
+  const sendWhatsAppReminder = (phone, name, label, amount) => {
+    if (!phone) { alert("No phone number recorded for this student."); return; }
     const cleanPhone = phone.replace(/[^0-9]/g, "");
     const formattedPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
-    const msg = `Dear Parent, this is a gentle reminder regarding ${name}'s tuition fee for ${monthLabel(month)}. Pending Balance: ₹${amount}. Please clear it at your earliest convenience. Thank you!`;
+    const msg = `Dear Parent, this is a gentle reminder regarding ${name}'s pending balance — ${label}. Pending: ₹${amount}. Please clear it at your earliest convenience. Thank you!`;
     window.open(`https://wa.me/${formattedPhone}?text=${encodeURIComponent(msg)}`, "_blank");
   };
 
   return (
     <div>
-      <SectionHeader 
-        eyebrow="Dedicated Analytics" 
-        title="Class & Dues Hub" 
-        action={
-          <button onClick={onManageClasses} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border rounded-sm" style={{ background: "white", borderColor: "#26231D" }}>
-            <Plus size={14} /> Manage Classes & Subjects
-          </button>
-        }
-      />
+      <SectionHeader eyebrow="Dedicated Analytics" title="Class & Dues Hub" action={
+        <button onClick={onManageClasses} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border rounded-sm" style={{ background: "white", borderColor: "#26231D" }}>
+          <Plus size={14} /> Manage Classes & Subjects
+        </button>
+      } />
 
       <div className="flex items-center justify-between mb-5 gap-4">
         <div className="flex border rounded-sm overflow-hidden" style={{ borderColor: "#12312B" }}>
-          <button 
-            onClick={() => setViewMode("class")}
-            className="px-4 py-2 text-xs font-semibold"
-            style={{ background: viewMode === "class" ? "#12312B" : "white", color: viewMode === "class" ? "#F4EFDE" : "#12312B" }}
-          >
+          <button onClick={() => setViewMode("class")} className="px-4 py-2 text-xs font-semibold" style={{ background: viewMode === "class" ? "#12312B" : "white", color: viewMode === "class" ? "#F4EFDE" : "#12312B" }}>
             Class Directory & Promotions
           </button>
-          <button 
-            onClick={() => setViewMode("dues")}
-            className="px-4 py-2 text-xs font-semibold"
-            style={{ background: viewMode === "dues" ? "#12312B" : "white", color: viewMode === "dues" ? "#F4EFDE" : "#12312B" }}
-          >
+          <button onClick={() => setViewMode("dues")} className="px-4 py-2 text-xs font-semibold" style={{ background: viewMode === "dues" ? "#12312B" : "white", color: viewMode === "dues" ? "#F4EFDE" : "#12312B" }}>
             Dues Breakdown ({outstandingRows.length})
           </button>
         </div>
-
         {viewMode === "class" && (
           <div className="flex items-center gap-2">
             <span className="text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Filter Class:</span>
-            <select 
-              value={selectedClass} 
-              onChange={e => setSelectedClass(e.target.value)}
-              className="border rounded-sm px-3 py-1.5 text-xs bg-white"
-              style={{ borderColor: "#D8CFB8" }}
-            >
+            <select value={selectedClass} onChange={e => setSelectedClass(e.target.value)} className="border rounded-sm px-3 py-1.5 text-xs bg-white" style={{ borderColor: "#D8CFB8" }}>
               <option value="ALL">All Classes ({students.length})</option>
-              {classes.map(c => (
-                <option key={c} value={c}>Class {c}</option>
-              ))}
+              {classes.map(c => <option key={c} value={c}>Class {c}</option>)}
             </select>
           </div>
         )}
@@ -918,15 +958,10 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
                       </td>
                       <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
                       <td className="px-4 py-2.5 text-xs text-[#6E6650]">{batchesForMonth(s, curMonth).join(", ") || "—"}</td>
-                      <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: due > 0 ? "#A63D2F" : "#3F6B52" }}>
-                        {fmtINR(due)}
-                        {s.previousDues > 0 && <div className="text-[9px] text-[#A63D2F]">({fmtINR(s.previousDues)} old)</div>}
-                      </td>
-                      <td className="px-4 py-2.5 text-xs">
-                        <Stamp text={badgeText} tone={badgeTone} />
-                      </td>
-                      <td className="px-4 py-2.5 text-xs space-x-2 whitespace-nowrap">
-                        <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} />
+                      <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: due > 0 ? "#A63D2F" : "#3F6B52" }}>{fmtINR(due)}</td>
+                      <td className="px-4 py-2.5 text-xs"><Stamp text={badgeText} tone={badgeTone} /></td>
+                      <td className="px-4 py-2.5 text-xs flex flex-wrap gap-2">
+                        <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} onStatement={onStatement} onAddCharge={onAddCharge} />
                       </td>
                     </tr>
                   );
@@ -943,7 +978,7 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                  {["Student", "Class", "Month", "Expected", "Paid", "Pending Balance", "WhatsApp Reminder"].map(h => (
+                  {["Student", "Class", "Line Item", "Expected", "Paid", "Pending Balance", "WhatsApp Reminder"].map(h => (
                     <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                   ))}
                 </tr>
@@ -953,18 +988,15 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
                   <tr key={i} className="ledger-row">
                     <td className="px-4 py-2.5 font-medium">{r.name}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{r.cls}</td>
-                    <td className="px-4 py-2.5 text-xs font-medium" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-                      {monthLabel(r.month)}
-                      {r.carriedOver && <div><Stamp text={r.status === "dropped" ? "Dropped Out" : "On Break"} tone={r.status === "dropped" ? "overdue" : "break"} /></div>}
+                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
+                      {r.label}
+                      <div><Stamp text={r.type === "opening" ? "Carried Forward" : r.type === "extra_charge" ? "Additional Charge" : (r.isCurrent ? "This Month" : "Overdue")} tone={r.type === "opening" ? "carried" : r.type === "extra_charge" ? "due" : (r.isCurrent ? "due" : "overdue")} /></div>
                     </td>
                     <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.expected)}</td>
                     <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.paid)}</td>
                     <td className="px-4 py-2.5 font-bold text-[#A63D2F]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.outstanding)}</td>
                     <td className="px-4 py-2.5">
-                      <button 
-                        onClick={() => sendWhatsAppReminder(r.phone, r.name, r.month, r.outstanding)}
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold text-white bg-[#25D366] hover:bg-[#1DA851] transition-colors"
-                      >
+                      <button onClick={() => sendWhatsAppReminder(r.phone, r.name, r.label, r.outstanding)} className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold text-white bg-[#25D366] hover:bg-[#1DA851] transition-colors">
                         <Send size={11} /> Send Notice
                       </button>
                     </td>
@@ -979,7 +1011,7 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
   );
 }
 
-function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth, onAdd, onEdit, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onRemove }) {
+function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth, onAdd, onEdit, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge, onRemove }) {
   return (
     <div>
       <SectionHeader eyebrow="Register" title="Students Directory" action={
@@ -1013,16 +1045,14 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
                     </td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
                     <td className="px-4 py-2.5 text-xs text-[#6E6650]">{batchesForMonth(s, curMonth).join(", ") || "—"}</td>
-                    <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: dueAmount > 0 ? "#A63D2F" : "#3F6B52" }}>
-                      {fmtINR(dueAmount)}
-                    </td>
-                    <td className="px-4 py-2.5 text-xs">
-                      <Stamp text={badgeText} tone={badgeTone} />
-                    </td>
-                    <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-2">
-                      <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} compact />
-                      <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline">Edit</button>
-                      <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                    <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: dueAmount > 0 ? "#A63D2F" : "#3F6B52" }}>{fmtINR(dueAmount)}</td>
+                    <td className="px-4 py-2.5 text-xs"><Stamp text={badgeText} tone={badgeTone} /></td>
+                    <td className="px-4 py-2.5 text-right">
+                      <div className="flex flex-wrap gap-2 justify-end">
+                        <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} onStatement={onStatement} onAddCharge={onAddCharge} compact />
+                        <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline">Edit</button>
+                        <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -1062,13 +1092,8 @@ function StructureTab({ feeStructure, setFeeStructure, classes }) {
                   <td key={count} className="px-2 py-2">
                     <div className="flex items-center gap-0.5">
                       <span className="text-[#9C8F6E] text-xs">₹</span>
-                      <input
-                        type="number"
-                        value={feeStructure[c] ? feeStructure[c][count] || 0 : 0}
-                        onChange={(e) => update(c, count, e.target.value)}
-                        style={{ fontFamily: "'IBM Plex Mono', monospace" }}
-                        className="w-20 border rounded-sm px-1.5 py-1 text-xs bg-white"
-                      />
+                      <input type="number" value={feeStructure[c] ? feeStructure[c][count] || 0 : 0} onChange={(e) => update(c, count, e.target.value)}
+                        style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="w-20 border rounded-sm px-1.5 py-1 text-xs bg-white" />
                     </div>
                   </td>
                 ))}
@@ -1081,7 +1106,7 @@ function StructureTab({ feeStructure, setFeeStructure, classes }) {
   );
 }
 
-function DepositsTab({ deposits, students, studentDues, batchesForMonth, onAdd, onRemove, onOpenReceipt }) {
+function DepositsTab({ deposits, students, studentDues, onAdd, onRemove, onOpenReceipt }) {
   const sorted = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
   const byId = Object.fromEntries(students.map(s => [s.id, s]));
   return (
@@ -1098,7 +1123,7 @@ function DepositsTab({ deposits, students, studentDues, batchesForMonth, onAdd, 
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date", "Student", "Class", "Applied To", "Subjects", "Mode", "Amount Paid", "Actions"].map(h => (
+                {["Date", "Student", "Class", "Amount Paid", "Write-off", "Mode", "Reference", "Remarks", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
@@ -1106,24 +1131,68 @@ function DepositsTab({ deposits, students, studentDues, batchesForMonth, onAdd, 
             <tbody>
               {sorted.map(d => {
                 const st = byId[d.studentId];
+                const ref = d.utr || d.chequeNumber || "—";
                 return (
                   <tr key={d.id} className="ledger-row">
                     <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{d.date}</td>
                     <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{st ? st.class : "—"}</td>
-                    <td className="px-4 py-2.5 text-xs">{monthLabel(d.month)}</td>
-                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{d.isCarriedOverPayment || !st ? "—" : (batchesForMonth(st, d.month) || []).join(", ") || "—"}</td>
-                    <td className="px-4 py-2.5 text-xs">{d.mode}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#3F6B52]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(d.amount)}</td>
+                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace", color: d.writeOffAmount > 0 ? "#B8862B" : "#9C8F6E" }}>{d.writeOffAmount > 0 ? fmtINR(d.writeOffAmount) : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs">{d.mode}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{ref}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{d.remarks || "—"}</td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                      <button onClick={() => onOpenReceipt(d)} className="flex items-center gap-1 text-xs text-[#12312B] underline mr-3 inline-flex">
-                        <Printer size={12} /> Receipt
-                      </button>
-                      <button onClick={() => sendWhatsAppReceipt(d, st, studentDues[st?.id] || 0)} className="text-xs text-[#25D366] font-semibold underline mr-3 inline-flex items-center gap-1">
-                        <Send size={11} /> WhatsApp
-                      </button>
+                      <button onClick={() => onOpenReceipt(d)} className="flex items-center gap-1 text-xs text-[#12312B] underline mr-3 inline-flex"><Printer size={12} /> Receipt</button>
+                      <button onClick={() => sendWhatsAppReceipt(d, st, studentDues[st?.id] || 0)} className="text-xs text-[#25D366] font-semibold underline mr-3 inline-flex items-center gap-1"><Send size={11} /> WhatsApp</button>
                       <button onClick={() => onRemove(d.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
                     </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function ChargesTab({ charges, students, onAdd, onRemove }) {
+  const sorted = [...charges].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const byId = Object.fromEntries(students.map(s => [s.id, s]));
+  return (
+    <div>
+      <SectionHeader eyebrow="Ad-hoc Billing" title="Additional Charges" action={
+        <button onClick={onAdd} disabled={students.length === 0} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Add Charge
+        </button>
+      } />
+      <div className="text-sm text-[#6E6650] mb-4">Every extra charge — exam fee, material cost, late fee, anything outside the regular tuition — logged here with who, when, how much, and why. It automatically adds to that student's balance and shows up in Dues.</div>
+      <Card>
+        {sorted.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No additional charges logged yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Date Added", "Student", "Class", "For Month", "Amount", "Remarks", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map(c => {
+                const st = byId[c.studentId];
+                return (
+                  <tr key={c.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{c.date}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5 font-semibold text-[#12312B]">{st ? st.class : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs">{monthLabel(c.month)}</td>
+                    <td className="px-4 py-2.5 font-semibold text-[#B8862B]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(c.amount)}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{c.remarks || "—"}</td>
+                    <td className="px-4 py-2.5 text-right"><button onClick={() => onRemove(c.id)} className="text-xs text-[#A63D2F] underline">Delete</button></td>
                   </tr>
                 );
               })}
@@ -1158,7 +1227,6 @@ function DuesTab({ rows, totalOutstanding, students, studentDues }) {
                 <div>
                   <div className="font-semibold">{s.name} (Class {s.class})</div>
                   {(s.status || "active") !== "active" && <div className="text-[10px] text-[#4A7B9D]">{s.status === "dropped" ? "Dropped Out" : "On Break / Gap"}</div>}
-                  {s.previousDues > 0 && <div className="text-[10px] text-[#A63D2F]">Carried Dues: ₹{s.previousDues}</div>}
                 </div>
                 <div className="font-bold text-[#A63D2F]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(due)}</div>
               </div>
@@ -1174,7 +1242,7 @@ function DuesTab({ rows, totalOutstanding, students, studentDues }) {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Student", "Class", "Month", "Expected", "Paid", "Outstanding", "Status"].map(h => (
+                {["Student", "Class", "Line Item", "Expected", "Paid", "Outstanding", "Status"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
@@ -1184,14 +1252,14 @@ function DuesTab({ rows, totalOutstanding, students, studentDues }) {
                 <tr key={i} className="ledger-row">
                   <td className="px-4 py-2.5 font-medium">{r.name}</td>
                   <td className="px-4 py-2.5 font-semibold text-[#12312B]">{r.cls}</td>
-                  <td className="px-4 py-2.5 text-xs">{monthLabel(r.month)}</td>
+                  <td className="px-4 py-2.5 text-xs">{r.label}</td>
                   <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.expected)}</td>
                   <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.paid)}</td>
                   <td className="px-4 py-2.5 font-semibold text-[#A63D2F]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(r.outstanding)}</td>
                   <td className="px-4 py-2.5">
-                    <Stamp 
-                      text={r.carriedOver ? "Carried Forward" : (r.isCurrent ? "due" : "overdue")} 
-                      tone={r.carriedOver ? "carried" : (r.isCurrent ? "due" : "overdue")} 
+                    <Stamp
+                      text={r.type === "opening" ? "Carried Forward" : r.type === "extra_charge" ? "Additional Charge" : (r.isCurrent ? "due" : "overdue")}
+                      tone={r.type === "opening" ? "carried" : r.type === "extra_charge" ? "due" : (r.isCurrent ? "due" : "overdue")}
                     />
                   </td>
                 </tr>
@@ -1204,10 +1272,110 @@ function DuesTab({ rows, totalOutstanding, students, studentDues }) {
   );
 }
 
+function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge }) {
+  return (
+    <div>
+      <SectionHeader eyebrow="Recycle Bin" title="Trash / Restore" />
+      <div className="text-sm text-[#6E6650] mb-5">Deleted students, receipts, and charges land here first — nothing is gone for good until you permanently delete it. Restoring brings back the exact record with no data lost.</div>
+
+      <div className="mb-3" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Students</span></div>
+      <Card className="mb-6">
+        {trashedStudents.length === 0 ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted students.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedStudents.map(s => (
+                <tr key={s.id} className="ledger-row">
+                  <td className="px-4 py-2.5 font-medium">{s.name}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#6E6650]">Class {s.class}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {s.deletedAt || ""}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRestoreStudent(s.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                    <button onClick={() => onDeleteStudent(s.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <div className="mb-3" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Receipts</span></div>
+      <Card className="mb-6">
+        {trashedDeposits.length === 0 ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted receipts.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedDeposits.map(d => {
+                const st = studentById[d.studentId];
+                return (
+                  <tr key={d.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs font-mono">{d.date}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#3F6B52]">{fmtINR(d.amount)}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {d.deletedAt || ""}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onRestoreDeposit(d.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                      <button onClick={() => onDeleteDeposit(d.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <div className="mb-3" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Charges</span></div>
+      <Card>
+        {trashedCharges.length === 0 ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted charges.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedCharges.map(c => {
+                const st = studentById[c.studentId];
+                return (
+                  <tr key={c.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs font-mono">{c.date}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#B8862B]">{fmtINR(c.amount)}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {c.deletedAt || ""}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onRestoreCharge(c.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                      <button onClick={() => onDeleteCharge(c.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
 function Modal({ title, onClose, children }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "#12312Bcc" }}>
       <div className="w-full max-w-lg bg-[#FAF6EC] rounded-sm" style={{ border: "2px dashed #B8862B" }}>
+        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: "1.5px solid #26231D" }}>
+          <h3 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold">{title}</h3>
+          <button onClick={onClose} className="text-[#6E6650]"><X size={18} /></button>
+        </div>
+        <div className="px-6 py-5 max-h-[80vh] overflow-y-auto">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function WideModal({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "#12312Bcc" }}>
+      <div className="w-full max-w-2xl bg-[#FAF6EC] rounded-sm" style={{ border: "2px dashed #B8862B" }}>
         <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: "1.5px solid #26231D" }}>
           <h3 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold">{title}</h3>
           <button onClick={onClose} className="text-[#6E6650]"><X size={18} /></button>
@@ -1241,75 +1409,45 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
   const [status] = useState(initial?.status || "active");
 
   function toggleSubject(sub) {
-    setBatches(prev => {
-      if (prev.includes(sub)) return prev.filter(x => x !== sub);
-      if (prev.length >= 6) return prev;
-      return [...prev, sub];
-    });
+    setBatches(prev => prev.includes(sub) ? prev.filter(x => x !== sub) : (prev.length >= 6 ? prev : [...prev, sub]));
   }
 
   function submit() {
     if (!name.trim()) return;
-    // The main form only sets the ORIGINAL enrollment batches (from admission
-    // month). For a change effective in a specific month later on, use
-    // "Change Batches" on the student's row instead — that's what keeps past
-    // months' dues untouched.
-    const baseHistory = initial?.batchHistory && initial.batchHistory.length
-      ? [...initial.batchHistory]
-      : [{ fromMonth: admissionMonth, batches }];
-    if (initial?.batchHistory && initial.batchHistory.length) {
-      baseHistory[0] = { ...baseHistory[0], batches };
-    }
-    onSave({ 
-      ...initial,
-      id: initial?.id, 
-      name: name.trim(), 
-      class: cls, 
-      batches, 
-      batchHistory: baseHistory,
-      phone: phone.trim(), 
-      admissionMonth, 
-      monthlyDiscount: Number(monthlyDiscount) || 0,
-      previousDues: Number(previousDues) || 0,
-      status
+    const baseHistory = initial?.batchHistory && initial.batchHistory.length ? [...initial.batchHistory] : [{ fromMonth: admissionMonth, batches }];
+    if (initial?.batchHistory && initial.batchHistory.length) baseHistory[0] = { ...baseHistory[0], batches };
+    onSave({
+      ...initial, id: initial?.id, name: name.trim(), class: cls, batches, batchHistory: baseHistory,
+      phone: phone.trim(), admissionMonth, monthlyDiscount: Number(monthlyDiscount) || 0,
+      previousDues: Number(previousDues) || 0, status,
     });
   }
 
   return (
     <Modal title={initial ? "Edit Student Details" : "Add New Student"} onClose={onClose}>
-      <Field label="Full Name">
-        <input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Rahul Sharma" />
-      </Field>
+      <Field label="Full Name"><input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Rahul Sharma" /></Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Class">
           <select className={inputCls} style={inputStyle} value={cls} onChange={e => setCls(e.target.value)}>
             {classes.map(c => <option key={c} value={c}>Class {c}</option>)}
           </select>
         </Field>
-        <Field label="Fee Start Month">
-          <input type="month" className={inputCls} style={inputStyle} value={admissionMonth} onChange={e => setAdmissionMonth(e.target.value)} />
-        </Field>
+        <Field label="Fee Start Month"><input type="month" className={inputCls} style={inputStyle} value={admissionMonth} onChange={e => setAdmissionMonth(e.target.value)} /></Field>
       </div>
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Phone / WhatsApp Number">
-          <input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit phone number" />
-        </Field>
-        <Field label="Monthly Concession / Discount (₹)">
-          <input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} placeholder="0" />
-        </Field>
+        <Field label="Phone / WhatsApp Number"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit phone number" /></Field>
+        <Field label="Monthly Concession / Discount (₹)"><input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} placeholder="0" /></Field>
       </div>
-
-      <Field label="Carried-Over Previous Dues (₹)">
+      <Field label="Opening Balance / Legacy Carried Dues (₹)">
         <input type="number" className={inputCls} style={inputStyle} value={previousDues} onChange={e => setPreviousDues(e.target.value)} placeholder="0" />
+        <div className="text-[10px] text-[#9C8F6E] mt-1">Only for a one-time starting balance (e.g. migrating from a paper register). For anything ongoing, use "Add Charge" instead — it keeps a dated log.</div>
       </Field>
-
       <Field label={`Select Subjects / Batches at admission (${batches.length}/6 max)`}>
         <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 border bg-white rounded-sm">
           {subjectsList.map(sub => {
             const active = batches.includes(sub);
             return (
-              <button key={sub} type="button" onClick={() => toggleSubject(sub)}
-                className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
+              <button key={sub} type="button" onClick={() => toggleSubject(sub)} className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
                 style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>
                 {active && <Check size={12} />}{sub}
               </button>
@@ -1318,7 +1456,6 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
         </div>
         {initial && <div className="text-[10px] text-[#9C8F6E] mt-1">To change subjects from a later month (e.g. add one in September), close this and use "Batches" on the student's row instead.</div>}
       </Field>
-
       <button onClick={submit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
         {initial ? "Save Changes" : "Register Student"}
       </button>
@@ -1328,13 +1465,11 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
 
 function ExitStudentModal({ student, currentDue, onClose, onConfirm }) {
   const [reason, setReason] = useState("Passed");
-  const [exitDate, setExitDate] = useState(new Date().toISOString().slice(0, 10));
-
+  const [exitDate, setExitDate] = useState(todayStr());
   return (
     <Modal title={`End / Pause Enrollment — ${student.name}`} onClose={onClose}>
       <div className="p-3 bg-[#F7E7E3] border border-[#A63D2F] rounded text-xs mb-4">
-        This stops monthly fee generation for this student. Their current outstanding balance
-        (<strong>{fmtINR(currentDue)}</strong>) is carried forward and stays visible on the Dues tab.
+        This stops monthly fee generation for this student. Their current outstanding balance (<strong>{fmtINR(currentDue)}</strong>) is carried forward and stays visible on the Dues tab.
         Made a mistake? You can undo this in one click from the student's row right after confirming.
       </div>
       <Field label="Reason">
@@ -1347,12 +1482,8 @@ function ExitStudentModal({ student, currentDue, onClose, onConfirm }) {
           ))}
         </div>
       </Field>
-      <Field label="Effective Date">
-        <input type="date" className={inputCls} style={inputStyle} value={exitDate} onChange={e => setExitDate(e.target.value)} />
-      </Field>
-      <button onClick={() => onConfirm(reason, exitDate)} className="w-full mt-3 py-2.5 rounded-sm text-sm font-semibold text-white" style={{ background: "#A63D2F" }}>
-        Confirm
-      </button>
+      <Field label="Effective Date"><input type="date" className={inputCls} style={inputStyle} value={exitDate} onChange={e => setExitDate(e.target.value)} /></Field>
+      <button onClick={() => onConfirm(reason, exitDate)} className="w-full mt-3 py-2.5 rounded-sm text-sm font-semibold text-white" style={{ background: "#A63D2F" }}>Confirm</button>
     </Modal>
   );
 }
@@ -1364,34 +1495,23 @@ function BatchChangeModal({ student, subjectsList, curMonth, onClose, onSave }) 
   const sortedHistory = [...(student.batchHistory || [])].sort((a, b) => (a.fromMonth < b.fromMonth ? -1 : 1));
 
   function toggleSubject(sub) {
-    setBatches(prev => {
-      if (prev.includes(sub)) return prev.filter(x => x !== sub);
-      if (prev.length >= 6) return prev;
-      return [...prev, sub];
-    });
+    setBatches(prev => prev.includes(sub) ? prev.filter(x => x !== sub) : (prev.length >= 6 ? prev : [...prev, sub]));
   }
-
   function submit() {
-    if (fromMonth < minMonth) {
-      alert(`Effective month can't be before this student's start month (${monthLabel(minMonth)}).`);
-      return;
-    }
+    if (fromMonth < minMonth) { alert(`Effective month can't be before this student's start month (${monthLabel(minMonth)}).`); return; }
     onSave(student, fromMonth, batches);
   }
 
   return (
     <Modal title={`Change Batches — ${student.name}`} onClose={onClose}>
       <div className="text-xs text-[#6E6650] mb-3">Pick the month this change should start from. Months before it keep using whatever subjects applied back then — nothing already billed gets recalculated.</div>
-      <Field label="Effective From Month">
-        <input type="month" min={minMonth} className={inputCls} style={inputStyle} value={fromMonth} onChange={e => setFromMonth(e.target.value)} />
-      </Field>
+      <Field label="Effective From Month"><input type="month" min={minMonth} className={inputCls} style={inputStyle} value={fromMonth} onChange={e => setFromMonth(e.target.value)} /></Field>
       <Field label={`Subjects from ${monthLabel(fromMonth)} onward (${batches.length}/6)`}>
         <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 border bg-white rounded-sm">
           {subjectsList.map(sub => {
             const active = batches.includes(sub);
             return (
-              <button key={sub} type="button" onClick={() => toggleSubject(sub)}
-                className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
+              <button key={sub} type="button" onClick={() => toggleSubject(sub)} className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
                 style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>
                 {active && <Check size={12} />}{sub}
               </button>
@@ -1412,9 +1532,7 @@ function BatchChangeModal({ student, subjectsList, curMonth, onClose, onSave }) 
           </div>
         </div>
       )}
-      <button onClick={submit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        Save Batch Change
-      </button>
+      <button onClick={submit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>Save Batch Change</button>
     </Modal>
   );
 }
@@ -1426,45 +1544,30 @@ function PromoteModal({ student, classes, subjectsList, curMonth, onClose, onPro
   const [monthlyDiscount, setMonthlyDiscount] = useState(student.monthlyDiscount || 0);
 
   function toggleSubject(sub) {
-    setNewBatches(prev => {
-      if (prev.includes(sub)) return prev.filter(x => x !== sub);
-      if (prev.length >= 6) return prev;
-      return [...prev, sub];
-    });
+    setNewBatches(prev => prev.includes(sub) ? prev.filter(x => x !== sub) : (prev.length >= 6 ? prev : [...prev, sub]));
   }
-
-  function submit() {
-    onPromote(student, newClass, newBatches, newStartMonth, monthlyDiscount);
-  }
+  function submit() { onPromote(student, newClass, newBatches, newStartMonth, monthlyDiscount); }
 
   return (
     <Modal title={`${(student.status || "active") === "dropped" ? "Reactivate" : "Promote / Re-Enroll"}: ${student.name}`} onClose={onClose}>
       <div className="p-3 bg-[#EAF1EA] border border-[#3F6B52] rounded text-xs mb-3">
         Carried Dues from previous sessions: <strong>{fmtINR(student.previousDues || 0)}</strong>
       </div>
-
       <div className="grid grid-cols-2 gap-3">
         <Field label="New Class">
           <select className={inputCls} style={inputStyle} value={newClass} onChange={e => setNewClass(e.target.value)}>
             {classes.map(c => <option key={c} value={c}>Class {c}</option>)}
           </select>
         </Field>
-        <Field label="Fee Resume Start Month">
-          <input type="month" className={inputCls} style={inputStyle} value={newStartMonth} onChange={e => setNewStartMonth(e.target.value)} />
-        </Field>
+        <Field label="Fee Resume Start Month"><input type="month" className={inputCls} style={inputStyle} value={newStartMonth} onChange={e => setNewStartMonth(e.target.value)} /></Field>
       </div>
-
-      <Field label="Monthly Concession (₹)">
-        <input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} />
-      </Field>
-
+      <Field label="Monthly Concession (₹)"><input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} /></Field>
       <Field label={`Select Subjects (${newBatches.length}/6)`}>
         <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 border bg-white rounded-sm">
           {subjectsList.map(sub => {
             const active = newBatches.includes(sub);
             return (
-              <button key={sub} type="button" onClick={() => toggleSubject(sub)}
-                className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
+              <button key={sub} type="button" onClick={() => toggleSubject(sub)} className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
                 style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>
                 {active && <Check size={12} />}{sub}
               </button>
@@ -1472,7 +1575,6 @@ function PromoteModal({ student, classes, subjectsList, curMonth, onClose, onPro
           })}
         </div>
       </Field>
-
       <button onClick={submit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-semibold bg-[#3F6B52] text-white">
         {(student.status || "active") === "dropped" ? "Reactivate Student & Resume Fee Counter" : "Promote Student & Resume Fee Counter"}
       </button>
@@ -1495,23 +1597,18 @@ function AcademicHistoryModal({ student, onClose }) {
                 <span>Class {h.class}</span>
                 <Stamp text={h.resultStatus || "Completed"} tone={h.resultStatus === "Dropped" ? "overdue" : "paid"} />
               </div>
-              <div className="text-xs text-[#6E6650] mt-1">
-                Subjects: {(h.batches || []).join(", ") || "General"}
-              </div>
+              <div className="text-xs text-[#6E6650] mt-1">Subjects: {(h.batches || []).join(", ") || "General"}</div>
               <div className="text-[11px] text-[#9C8F6E] mt-1 flex justify-between" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
                 <span>Joined: {monthLabel(h.admissionMonth)}</span>
                 <span>Ended: {h.completionDate}</span>
               </div>
               {h.unpaidBalanceAtEnd > 0 && (
-                <div className="text-[11px] text-[#A63D2F] mt-1" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-                  Balance carried forward: {fmtINR(h.unpaidBalanceAtEnd)}
-                </div>
+                <div className="text-[11px] text-[#A63D2F] mt-1" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Balance carried forward: {fmtINR(h.unpaidBalanceAtEnd)}</div>
               )}
             </div>
           ))
         )}
       </div>
-
       {batchTimeline.length > 0 && (
         <div className="mt-4 pt-4" style={{ borderTop: "1.5px solid #26231D" }}>
           <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-sm font-semibold mb-2">Batch change timeline</div>
@@ -1529,94 +1626,172 @@ function AcademicHistoryModal({ student, onClose }) {
   );
 }
 
-function DepositFormModal({ students, curMonth, expectedFeeFor, batchesForMonth, carriedOverMap, onClose, onSave }) {
-  const [studentId, setStudentId] = useState(students[0]?.id || "");
-  const student = students.find(s => s.id === studentId);
-  const [paymentType, setPaymentType] = useState(student && (student.status || "active") !== "active" ? "carried" : "monthly");
+function AddChargeModal({ students, initialStudent, curMonth, onClose, onSave }) {
+  const [studentId, setStudentId] = useState(initialStudent?.id || students[0]?.id || "");
   const [month, setMonth] = useState(curMonth);
   const [amount, setAmount] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [mode, setMode] = useState("Cash");
-
-  useEffect(() => {
-    const s = students.find(x => x.id === studentId);
-    setPaymentType(s && (s.status || "active") !== "active" ? "carried" : "monthly");
-  }, [studentId]);
-
-  const monthBatches = student ? batchesForMonth(student, month) : [];
-  const suggested = paymentType === "monthly" && student ? expectedFeeFor(student.class, monthBatches.length || 1, student.monthlyDiscount || 0) : 0;
-  const carriedRemaining = student ? (carriedOverMap[student.id] || 0) : 0;
+  const [remarks, setRemarks] = useState("");
+  const [date, setDate] = useState(todayStr());
 
   function submit() {
     if (!studentId || !amount) return;
-    if (paymentType === "carried") {
-      onSave({ studentId, month: "carried-over", amount: Number(amount), date, mode, isCarriedOverPayment: true });
-    } else {
-      onSave({ studentId, month, amount: Number(amount), date, mode, isCarriedOverPayment: false });
-    }
+    onSave({ studentId, month, amount: Number(amount), remarks: remarks.trim(), date });
   }
 
   return (
-    <Modal title="Record Fee Deposit" onClose={onClose}>
+    <Modal title="Add Additional Charge" onClose={onClose}>
+      <div className="text-xs text-[#6E6650] mb-3">Use this for anything outside regular tuition — exam fee, study material, late fee, damaged equipment, etc. It's logged permanently with a date and remark, and adds straight to the student's balance.</div>
+      <Field label="Student">
+        <select className={inputCls} style={inputStyle} value={studentId} onChange={e => setStudentId(e.target.value)}>
+          {students.map(s => <option key={s.id} value={s.id}>{s.name} — Class {s.class}</option>)}
+        </select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="For Month"><input type="month" className={inputCls} style={inputStyle} value={month} onChange={e => setMonth(e.target.value)} /></Field>
+        <Field label="Date Added"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+      </div>
+      <Field label="Amount (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" /></Field>
+      <Field label="Remarks — what is this charge for?"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="e.g. Annual exam fee" /></Field>
+      <button onClick={submit} disabled={!studentId || !amount} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Add Charge
+      </button>
+    </Modal>
+  );
+}
+
+function StudentStatementModal({ student, ledger, onClose }) {
+  if (!ledger) return null;
+  return (
+    <WideModal title={`Statement — ${student.name}`} onClose={onClose}>
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="p-2.5 rounded bg-[#FAF6EC] border" style={{ borderColor: "#D8CFB8" }}>
+          <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Total Charged</div>
+          <div className="text-lg font-bold" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(ledger.totalCharged)}</div>
+        </div>
+        <div className="p-2.5 rounded bg-[#EAF1EA] border" style={{ borderColor: "#3F6B52" }}>
+          <div className="text-[10px] uppercase text-[#3F6B52] font-mono">Total Cleared</div>
+          <div className="text-lg font-bold text-[#3F6B52]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(ledger.totalCleared)}</div>
+        </div>
+        <div className="p-2.5 rounded bg-[#F7E7E3] border" style={{ borderColor: "#A63D2F" }}>
+          <div className="text-[10px] uppercase text-[#A63D2F] font-mono">Current Balance</div>
+          <div className="text-lg font-bold text-[#A63D2F]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(ledger.balance)}</div>
+        </div>
+      </div>
+      {ledger.timeline.length === 0 ? (
+        <div className="p-8 text-center text-sm text-[#9C8F6E]">No transactions recorded yet for this student.</div>
+      ) : (
+        <table className="w-full text-xs">
+          <thead>
+            <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+              {["Date", "Description", "Debit", "Credit", "Balance"].map(h => (
+                <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-3 py-2 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {ledger.timeline.map((l, i) => (
+              <tr key={i} className="ledger-row">
+                <td className="px-3 py-2 font-mono">{l.date}</td>
+                <td className="px-3 py-2">
+                  {l.label}
+                  {l.kind === "debit" && l.outstanding > 0 && <span className="ml-2"><Stamp text="Unpaid" tone="overdue" /></span>}
+                </td>
+                <td className="px-3 py-2 font-mono text-[#A63D2F]">{l.kind === "debit" ? fmtINR(l.amount) : ""}</td>
+                <td className="px-3 py-2 font-mono text-[#3F6B52]">{l.kind === "credit" ? fmtINR(l.amount) : ""}</td>
+                <td className="px-3 py-2 font-mono font-semibold">{fmtINR(l.runningBalance)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </WideModal>
+  );
+}
+
+function DepositFormModal({ students, studentDues, onClose, onSave }) {
+  const [studentId, setStudentId] = useState(students[0]?.id || "");
+  const student = students.find(s => s.id === studentId);
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [mode, setMode] = useState("Cash");
+  const [utr, setUtr] = useState("");
+  const [chequeNumber, setChequeNumber] = useState("");
+  const [remarks, setRemarks] = useState("");
+  const [showWriteOff, setShowWriteOff] = useState(false);
+  const [writeOffAmount, setWriteOffAmount] = useState("");
+  const [writeOffRemarks, setWriteOffRemarks] = useState("");
+
+  const currentBalance = student ? (studentDues[student.id] || 0) : 0;
+
+  function submit() {
+    if (!studentId || (!amount && !writeOffAmount)) return;
+    onSave({
+      studentId, amount: Number(amount) || 0, date, mode,
+      utr: (mode === "UPI" || mode === "Bank Transfer") ? utr.trim() : "",
+      chequeNumber: mode === "Cheque" ? chequeNumber.trim() : "",
+      remarks: remarks.trim(),
+      writeOffAmount: showWriteOff ? (Number(writeOffAmount) || 0) : 0,
+      writeOffRemarks: showWriteOff ? writeOffRemarks.trim() : "",
+    });
+  }
+
+  return (
+    <Modal title="Record Payment / Receipt" onClose={onClose}>
       <Field label="Select Student">
         <select className={inputCls} style={inputStyle} value={studentId} onChange={e => setStudentId(e.target.value)}>
           {students.map(s => <option key={s.id} value={s.id}>{s.name} — Class {s.class} ({s.status || "active"})</option>)}
         </select>
       </Field>
+      <div className="text-xs text-[#6E6650] mb-3">
+        Current outstanding balance: <strong className={currentBalance > 0 ? "text-[#A63D2F]" : "text-[#3F6B52]"}>{fmtINR(currentBalance)}</strong>
+        <div className="text-[10px] text-[#9C8F6E] mt-0.5">Any amount you enter here clears the oldest pending charges first — no need to pick which month it's for.</div>
+      </div>
 
-      <Field label="Payment Type">
-        <div className="flex gap-2">
-          <button type="button" onClick={() => setPaymentType("monthly")}
-            className="flex-1 px-3 py-2 text-xs rounded-sm border font-semibold"
-            style={{ background: paymentType === "monthly" ? "#12312B" : "white", color: paymentType === "monthly" ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
-            Monthly Fee
-          </button>
-          <button type="button" onClick={() => setPaymentType("carried")}
-            className="flex-1 px-3 py-2 text-xs rounded-sm border font-semibold"
-            style={{ background: paymentType === "carried" ? "#12312B" : "white", color: paymentType === "carried" ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
-            Carried-Forward Dues
-          </button>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Amount Received (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" /></Field>
+        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+      </div>
+
+      <Field label="Payment Mode">
+        <div className="flex gap-2 flex-wrap">
+          {PAYMENT_MODES.map(m => (
+            <button key={m} type="button" onClick={() => setMode(m)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+              style={{ background: mode === m ? "#12312B" : "white", color: mode === m ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+              {m}
+            </button>
+          ))}
         </div>
       </Field>
 
-      {paymentType === "monthly" ? (
-        <>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="For Month">
-              <input type="month" className={inputCls} style={inputStyle} value={month} onChange={e => setMonth(e.target.value)} />
-            </Field>
-            <Field label="Deposit Date">
-              <input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} />
-            </Field>
-          </div>
-          <div className="text-xs text-[#6E6650] mb-3">
-            Subjects billed for {monthLabel(month)}: <strong>{monthBatches.join(", ") || "—"}</strong>
-            <div className="text-[10px] text-[#9C8F6E] mt-0.5">Wrong subjects for this month? Use "Batches" on the student's row.</div>
-          </div>
-        </>
-      ) : (
-        <>
-          <Field label="Deposit Date">
-            <input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} />
-          </Field>
-          <div className="p-3 bg-[#FBEFE3] border border-[#B8862B] rounded text-xs mb-3">
-            This reduces {student ? student.name : "the student"}'s carried-forward balance of <strong>{fmtINR(carriedRemaining)}</strong> instead of billing a specific month.
-          </div>
-        </>
+      {(mode === "UPI" || mode === "Bank Transfer") && (
+        <Field label="UTR / Reference Number"><input className={inputCls} style={inputStyle} value={utr} onChange={e => setUtr(e.target.value)} placeholder="e.g. 402913827461" /></Field>
+      )}
+      {mode === "Cheque" && (
+        <Field label="Cheque Number"><input className={inputCls} style={inputStyle} value={chequeNumber} onChange={e => setChequeNumber(e.target.value)} placeholder="e.g. 004521" /></Field>
       )}
 
-      <div className="grid grid-cols-2 gap-3">
-        <Field label={paymentType === "monthly" ? `Amount (Suggested ₹${suggested})` : "Amount"}>
-          <input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder={paymentType === "monthly" ? String(suggested) : "0"} />
-        </Field>
-        <Field label="Payment Mode">
-          <select className={inputCls} style={inputStyle} value={mode} onChange={e => setMode(e.target.value)}>
-            <option>Cash</option><option>UPI</option><option>Bank Transfer</option><option>Cheque</option>
-          </select>
-        </Field>
-      </div>
-      <button onClick={submit} disabled={!studentId || !amount} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        Record Deposit & Generate Receipt
+      <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any note for this payment" /></Field>
+
+      {!showWriteOff ? (
+        <button type="button" onClick={() => setShowWriteOff(true)} className="text-xs text-[#B8862B] font-semibold underline mb-3 inline-flex items-center gap-1">
+          <Percent size={12} /> Add a discount / write-off to this receipt
+        </button>
+      ) : (
+        <div className="p-3 border rounded-sm mb-3 bg-white" style={{ borderColor: "#B8862B" }}>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-[#8A6420]">Discount / Write-off</span>
+            <button type="button" onClick={() => { setShowWriteOff(false); setWriteOffAmount(""); setWriteOffRemarks(""); }} className="text-xs text-[#A63D2F] underline">Remove</button>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Amount to Forgive (₹)"><input type="number" className={inputCls} style={inputStyle} value={writeOffAmount} onChange={e => setWriteOffAmount(e.target.value)} placeholder="0" /></Field>
+            <Field label="Reason"><input className={inputCls} style={inputStyle} value={writeOffRemarks} onChange={e => setWriteOffRemarks(e.target.value)} placeholder="e.g. Sibling discount" /></Field>
+          </div>
+          <div className="text-[10px] text-[#9C8F6E]">This clears the balance the same way a payment does, but isn't counted as cash collected.</div>
+        </div>
+      )}
+
+      <button onClick={submit} disabled={!studentId || (!amount && !writeOffAmount)} className="w-full mt-1 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Record & Generate Receipt
       </button>
     </Modal>
   );
@@ -1628,25 +1803,9 @@ function ClassManagerModal({ classes, subjectsList, onClose, onSaveClasses, onSa
   const [newClassName, setNewClassName] = useState("");
   const [newSubjName, setNewSubjName] = useState("");
 
-  const addClass = () => {
-    if (newClassName.trim() && !classList.includes(newClassName.trim())) {
-      setClassList([...classList, newClassName.trim()]);
-      setNewClassName("");
-    }
-  };
-
-  const addSubject = () => {
-    if (newSubjName.trim() && !subjList.includes(newSubjName.trim())) {
-      setSubjList([...subjList, newSubjName.trim()]);
-      setNewSubjName("");
-    }
-  };
-
-  const handleSave = () => {
-    onSaveClasses(classList);
-    onSaveSubjects(subjList);
-    onClose();
-  };
+  const addClass = () => { if (newClassName.trim() && !classList.includes(newClassName.trim())) { setClassList([...classList, newClassName.trim()]); setNewClassName(""); } };
+  const addSubject = () => { if (newSubjName.trim() && !subjList.includes(newSubjName.trim())) { setSubjList([...subjList, newSubjName.trim()]); setNewSubjName(""); } };
+  const handleSave = () => { onSaveClasses(classList); onSaveSubjects(subjList); onClose(); };
 
   return (
     <Modal title="Manage Classes & Master Subjects" onClose={onClose}>
@@ -1656,7 +1815,6 @@ function ClassManagerModal({ classes, subjectsList, onClose, onSaveClasses, onSa
           <button onClick={addClass} className="px-3 py-2 bg-[#12312B] text-white text-xs rounded font-semibold whitespace-nowrap">Add Class</button>
         </div>
       </Field>
-
       <div className="my-3 flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-2 border bg-white rounded">
         {classList.map(c => (
           <span key={c} className="px-2 py-0.5 text-xs bg-[#FAF6EC] border rounded font-medium flex items-center gap-1">
@@ -1665,16 +1823,13 @@ function ClassManagerModal({ classes, subjectsList, onClose, onSaveClasses, onSa
           </span>
         ))}
       </div>
-
       <hr className="my-4" />
-
       <Field label="Add Master Subject (e.g., Hindi, Computer, Biology)">
         <div className="flex gap-2">
           <input className={inputCls} style={inputStyle} value={newSubjName} onChange={e => setNewSubjName(e.target.value)} placeholder="Subject name" />
           <button onClick={addSubject} className="px-3 py-2 bg-[#12312B] text-white text-xs rounded font-semibold whitespace-nowrap">Add Subject</button>
         </div>
       </Field>
-
       <div className="my-3 flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-2 border bg-white rounded">
         {subjList.map(s => (
           <span key={s} className="px-2 py-0.5 text-xs bg-[#FAF6EC] border rounded font-medium flex items-center gap-1">
@@ -1683,10 +1838,7 @@ function ClassManagerModal({ classes, subjectsList, onClose, onSaveClasses, onSa
           </span>
         ))}
       </div>
-
-      <button onClick={handleSave} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        Save All Changes
-      </button>
+      <button onClick={handleSave} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>Save All Changes</button>
     </Modal>
   );
 }
@@ -1710,18 +1862,15 @@ function ReceiptModal({ deposit, student, totalRemainingDue, onClose }) {
             .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
           </style>
         </head>
-        <body>
-          <div class="receipt-box">${printContent}</div>
-        </body>
+        <body><div class="receipt-box">${printContent}</div></body>
       </html>
     `);
-    win.document.close();
-    win.focus();
-    win.print();
-    win.close();
+    win.document.close(); win.focus(); win.print(); win.close();
   };
 
   const receiptNo = deposit.id ? deposit.id.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
+  const totalCleared = Number(deposit.amount || 0) + Number(deposit.writeOffAmount || 0);
+  const ref = deposit.utr || deposit.chequeNumber;
 
   return (
     <Modal title="Official Fee Receipt" onClose={onClose}>
@@ -1730,59 +1879,47 @@ function ReceiptModal({ deposit, student, totalRemainingDue, onClose }) {
           <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
           <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Payment Receipt</p>
         </div>
-
         <div className="space-y-2 text-xs">
           <div className="flex justify-between text-[#6E6650]">
             <span>Receipt No: <strong className="text-[#12312B]">#{receiptNo}</strong></span>
             <span>Date: <strong className="text-[#12312B]">{deposit.date}</strong></span>
           </div>
-          <div className="flex justify-between text-[#6E6650]">
-            <span>Student Name:</span>
-            <strong className="text-[#12312B]">{student ? student.name : "N/A"}</strong>
-          </div>
-          <div className="flex justify-between text-[#6E6650]">
-            <span>Class:</span>
-            <strong className="text-[#12312B]">Class {student ? student.class : "N/A"}</strong>
-          </div>
-          <div className="flex justify-between text-[#6E6650]">
-            <span>{deposit.isCarriedOverPayment ? "Payment For:" : "Fee Month:"}</span>
-            <strong className="text-[#12312B]">{monthLabel(deposit.month)}</strong>
-          </div>
-          <div className="flex justify-between text-[#6E6650]">
-            <span>Payment Mode:</span>
-            <strong className="text-[#12312B]">{deposit.mode || "Cash"}</strong>
-          </div>
+          <div className="flex justify-between text-[#6E6650]"><span>Student Name:</span><strong className="text-[#12312B]">{student ? student.name : "N/A"}</strong></div>
+          <div className="flex justify-between text-[#6E6650]"><span>Class:</span><strong className="text-[#12312B]">Class {student ? student.class : "N/A"}</strong></div>
+          <div className="flex justify-between text-[#6E6650]"><span>Payment Mode:</span><strong className="text-[#12312B]">{deposit.mode || "Cash"}</strong></div>
+          {ref && <div className="flex justify-between text-[#6E6650]"><span>{deposit.utr ? "UTR / Reference:" : "Cheque No:"}</span><strong className="text-[#12312B]">{ref}</strong></div>}
+          {deposit.remarks && <div className="flex justify-between text-[#6E6650]"><span>Remarks:</span><strong className="text-[#12312B]">{deposit.remarks}</strong></div>}
 
           <div className="pt-3 mt-3 border-t-2 border-[#12312B]">
             <div className="flex justify-between items-center text-sm mb-1">
               <span className="font-bold">Amount Paid Today:</span>
               <span className="font-bold text-[#3F6B52] text-lg" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(deposit.amount)}</span>
             </div>
+            {deposit.writeOffAmount > 0 && (
+              <div className="flex justify-between items-center text-xs mb-1 text-[#8A6420]">
+                <span>Discount / Write-off{deposit.writeOffRemarks ? ` (${deposit.writeOffRemarks})` : ""}:</span>
+                <span className="font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(deposit.writeOffAmount)}</span>
+              </div>
+            )}
+            {deposit.writeOffAmount > 0 && (
+              <div className="flex justify-between items-center text-xs mb-1 font-semibold text-[#12312B]">
+                <span>Total Cleared:</span>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(totalCleared)}</span>
+              </div>
+            )}
             <div className="flex justify-between items-center text-xs text-[#A63D2F]">
               <span>Remaining Total Balance:</span>
               <span className="font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(totalRemainingDue)}</span>
             </div>
           </div>
         </div>
-
         <div className="text-center pt-3 mt-3 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
           Status: PAYMENT ACKNOWLEDGED ✅ · Computer Generated Receipt
         </div>
       </div>
-
       <div className="grid grid-cols-2 gap-3">
-        <button 
-          onClick={handlePrint} 
-          className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"
-        >
-          <Printer size={15} /> Print Receipt
-        </button>
-        <button 
-          onClick={() => sendWhatsAppReceipt(deposit, student, totalRemainingDue)} 
-          className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#25D366] hover:bg-[#1DA851]"
-        >
-          <Send size={15} /> Send to WhatsApp
-        </button>
+        <button onClick={handlePrint} className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Receipt</button>
+        <button onClick={() => sendWhatsAppReceipt(deposit, student, totalRemainingDue)} className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#25D366] hover:bg-[#1DA851]"><Send size={15} /> Send to WhatsApp</button>
       </div>
     </Modal>
   );
