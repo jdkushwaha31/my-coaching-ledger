@@ -9,7 +9,7 @@ import {
 import { 
   LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut, 
   BookOpen, Send, Printer, Award, ArrowUpRight, History, Tag, Undo2, Archive, RotateCcw, 
-  ClipboardList, Percent
+  ClipboardList, Percent, FileText, Search
 } from "lucide-react";
 
 // Admin Access Password
@@ -151,7 +151,7 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
       creditLines.push({
         id: `${d.id}-wo`, depositId: d.id, type: "writeoff", date: d.date || todayStr(),
         label: d.writeOffRemarks ? `Discount / Write-off — ${d.writeOffRemarks}` : "Discount / Write-off",
-        amount: round2(d.writeOffAmount), remarks: d.writeOffRemarks,
+        amount: round2(d.writeOffAmount), remarks: d.writeOffRemarks, receiptNo: getReceiptNo(d.id),
       });
     }
   });
@@ -394,6 +394,22 @@ export default function CoachingLedger() {
 
   const totalOutstanding = round2(Object.values(studentDuesMap).reduce((a, v) => a + v, 0));
 
+  // Center-wide statement — every ledger line (tuition, additional charges,
+  // payments, write-offs) from every student, merged into one master feed.
+  const allTransactions = visibleStudents.flatMap(st =>
+    (ledgers[st.id]?.timeline || []).map(l => ({
+      ...l,
+      studentId: st.id, studentName: st.name, studentClass: st.class, studentStatus: st.status || "active",
+    }))
+  ).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+  const centerTotals = {
+    charged: round2(Object.values(ledgers).reduce((a, l) => a + l.totalCharged, 0)),
+    collected: round2(visibleDeposits.reduce((a, d) => a + Number(d.amount || 0), 0)),
+    writtenOff: round2(visibleDeposits.reduce((a, d) => a + Number(d.writeOffAmount || 0), 0)),
+    outstanding: totalOutstanding,
+  };
+
   function depositMonthOf(d) { return d.date ? d.date.slice(0, 7) : null; }
   const thisMonthCollected = visibleDeposits.filter(d => depositMonthOf(d) === curMonth).reduce((a, d) => a + Number(d.amount || 0), 0);
   const thisMonthWriteOffs = visibleDeposits.filter(d => depositMonthOf(d) === curMonth).reduce((a, d) => a + Number(d.writeOffAmount || 0), 0);
@@ -592,6 +608,7 @@ export default function CoachingLedger() {
     { id: "deposits", label: "Deposits Log", icon: Receipt },
     { id: "charges", label: "Additional Charges", icon: ClipboardList },
     { id: "dues", label: "Pending Dues", icon: AlertCircle },
+    { id: "statement", label: "Center Statement", icon: FileText },
     { id: "trash", label: "Trash / Restore", icon: Archive },
   ];
 
@@ -687,6 +704,15 @@ export default function CoachingLedger() {
           />
         )}
         {tab === "dues" && <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} students={visibleStudents} studentDues={studentDuesMap} />}
+        {tab === "statement" && (
+          <CenterStatementTab
+            transactions={allTransactions} totals={centerTotals} students={visibleStudents} classes={classes}
+            onViewReceipt={(depositId) => {
+              const dep = visibleDeposits.find(d => d.id === depositId);
+              if (dep) setReceiptData({ deposit: dep, student: studentById[dep.studentId] });
+            }}
+          />
+        )}
         {tab === "trash" && (
           <TrashTab
             trashedStudents={trashedStudents} trashedDeposits={trashedDeposits} trashedCharges={trashedCharges}
@@ -1286,6 +1312,192 @@ function DuesTab({ rows, totalOutstanding, students, studentDues }) {
   );
 }
 
+// Type metadata for the center-wide statement — one place that maps a
+// ledger line's raw `type` to a display label and a Stamp tone.
+const TXN_TYPE_META = {
+  opening: { label: "Opening Balance", tone: "carried" },
+  monthly_fee: { label: "Tuition Fee", tone: "due" },
+  extra_charge: { label: "Additional Charge", tone: "due" },
+  payment: { label: "Payment Received", tone: "paid" },
+  writeoff: { label: "Write-off / Discount", tone: "break" },
+};
+
+function CenterStatementTab({ transactions, totals, students, classes, onViewReceipt }) {
+  const statementRef = useRef();
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [classFilter, setClassFilter] = useState("all");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+
+  const filtered = transactions.filter(t => {
+    if (search && !t.studentName.toLowerCase().includes(search.trim().toLowerCase())) return false;
+    if (typeFilter !== "all" && t.type !== typeFilter) return false;
+    if (classFilter !== "all" && String(t.studentClass) !== classFilter) return false;
+    if (fromDate && t.date < fromDate) return false;
+    if (toDate && t.date > toDate) return false;
+    return true;
+  });
+
+  const filteredTotals = {
+    debit: round2(filtered.filter(t => t.kind === "debit").reduce((a, t) => a + t.amount, 0)),
+    credit: round2(filtered.filter(t => t.kind === "credit").reduce((a, t) => a + t.amount, 0)),
+  };
+
+  const generatedOn = todayStr();
+  const isFiltered = search || typeFilter !== "all" || classFilter !== "all" || fromDate || toDate;
+
+  const handlePrint = () => {
+    const printContent = statementRef.current.innerHTML;
+    const win = window.open("", "", "width=950,height=900");
+    win.document.write(`
+      <html>
+        <head>
+          <title>Center Statement - Coaching Classes</title>
+          <style>
+            body { font-family: 'Inter', sans-serif; padding: 24px; color: #12312B; }
+            .stmt-header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 12px; margin-bottom: 16px; }
+            table { width: 100%; border-collapse: collapse; font-size: 11px; }
+            th { text-align: left; text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; color: #6E6650; border-bottom: 1.5px solid #26231D; padding: 6px 8px; }
+            td { padding: 6px 8px; border-bottom: 1px solid #EEE7D2; }
+            .num { font-family: monospace; }
+            .debit { color: #A63D2F; }
+            .credit { color: #3F6B52; }
+            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 16px; text-align: center; font-size: 10px; color: #6E6650; }
+          </style>
+        </head>
+        <body>${printContent}</body>
+      </html>
+    `);
+    win.document.close(); win.focus(); win.print(); win.close();
+  };
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Center-Wide Ledger" title="Master Transaction Statement" action={
+        <button onClick={handlePrint} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Printer size={15} /> Print / Export
+        </button>
+      } />
+      <div className="text-sm text-[#6E6650] mb-4">Every transaction recorded across the entire coaching center — tuition charges, additional charges, payments, and write-offs — for every student, in one place.</div>
+
+      <div className="grid grid-cols-4 gap-3 mb-5">
+        <Card className="p-3.5">
+          <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Total Charged</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#1B1810]">{fmtINR(totals.charged)}</div>
+        </Card>
+        <Card className="p-3.5" style={{ borderLeft: "3px solid #3F6B52" }}>
+          <div className="text-[10px] uppercase text-[#3F6B52] font-mono">Total Collected</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#3F6B52]">{fmtINR(totals.collected)}</div>
+        </Card>
+        <Card className="p-3.5" style={{ borderLeft: "3px solid #B8862B" }}>
+          <div className="text-[10px] uppercase text-[#B8862B] font-mono">Total Written Off</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#8A6420]">{fmtINR(totals.writtenOff)}</div>
+        </Card>
+        <Card className="p-3.5" style={{ borderLeft: "3px solid #A63D2F" }}>
+          <div className="text-[10px] uppercase text-[#A63D2F] font-mono">Outstanding</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#A63D2F]">{fmtINR(totals.outstanding)}</div>
+        </Card>
+      </div>
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[160px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search Student</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Type</div>
+            <select className={inputCls} style={inputStyle} value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
+              <option value="all">All Transactions</option>
+              {Object.entries(TXN_TYPE_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {classes.map(c => <option key={c} value={c}>Class {c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">From</div>
+            <input type="date" className={inputCls} style={inputStyle} value={fromDate} onChange={e => setFromDate(e.target.value)} />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">To</div>
+            <input type="date" className={inputCls} style={inputStyle} value={toDate} onChange={e => setToDate(e.target.value)} />
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setTypeFilter("all"); setClassFilter("all"); setFromDate(""); setToDate(""); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
+      <Card>
+        <div ref={statementRef}>
+          <div className="stmt-header text-center pb-3 mb-1 px-4 pt-4 border-b-2 border-dashed border-[#12312B]">
+            <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+            <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Center-Wide Master Statement — Generated {generatedOn}</p>
+          </div>
+          {filtered.length === 0 ? (
+            <div className="p-8 text-center text-sm text-[#9C8F6E]">No transactions match these filters.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                  {["Date", "Student", "Class", "Description", "Type", "Receipt No", "Debit", "Credit"].map(h => (
+                    <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((t, i) => {
+                  const meta = TXN_TYPE_META[t.type] || { label: t.type, tone: "due" };
+                  const hasReceipt = t.kind === "credit" && (t.type === "payment" || t.type === "writeoff");
+                  return (
+                    <tr key={t.id + "-" + i} className="ledger-row">
+                      <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{t.date}</td>
+                      <td className="px-4 py-2.5 font-medium">{t.studentName}{t.studentStatus !== "active" && <span className="ml-1.5 text-[10px] text-[#4A7B9D]">({t.studentStatus === "dropped" ? "dropped" : "on break"})</span>}</td>
+                      <td className="px-4 py-2.5 font-semibold text-[#12312B]">{t.studentClass}</td>
+                      <td className="px-4 py-2.5 text-xs">{t.label}</td>
+                      <td className="px-4 py-2.5"><Stamp text={meta.label} tone={meta.tone} /></td>
+                      <td className="px-4 py-2.5 font-mono">
+                        {hasReceipt ? (
+                          <button onClick={() => onViewReceipt(t.depositId)} className="underline text-[#12312B] font-semibold inline-flex items-center gap-1 hover:text-[#3F6B52]" title="Open official receipt">
+                            <Receipt size={10} /> #{t.receiptNo}
+                          </button>
+                        ) : (
+                          <span className="text-[#D8CFB8]">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-[#A63D2F]">{t.kind === "debit" ? fmtINR(t.amount) : ""}</td>
+                      <td className="px-4 py-2.5 font-mono text-[#3F6B52]">{t.kind === "credit" ? fmtINR(t.amount) : ""}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr style={{ borderTop: "1.5px solid #26231D" }}>
+                  <td colSpan={6} className="px-4 py-2.5 text-right text-xs font-semibold text-[#6E6650]">Filtered Totals:</td>
+                  <td className="px-4 py-2.5 font-mono font-bold text-[#A63D2F]">{fmtINR(filteredTotals.debit)}</td>
+                  <td className="px-4 py-2.5 font-mono font-bold text-[#3F6B52]">{fmtINR(filteredTotals.credit)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          )}
+          <div className="footer text-center pt-3 pb-4 mt-2 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
+            Computer Generated Statement · Reflects every deposit, tuition charge, additional charge, and write-off recorded center-wide
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge }) {
   return (
     <div>
@@ -1768,12 +1980,12 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt }) {
                     {l.kind === "debit" && l.outstanding > 0 && <span className="ml-2"><Stamp text="Unpaid" tone="overdue" /></span>}
                   </td>
                   <td className="px-3 py-2 font-mono">
-                    {l.kind === "credit" && l.type === "payment" ? (
+                    {l.kind === "credit" && (l.type === "payment" || l.type === "writeoff") ? (
                       onViewReceipt ? (
                         <button
                           onClick={() => onViewReceipt(l.depositId)}
                           className="underline text-[#12312B] font-semibold inline-flex items-center gap-1 hover:text-[#3F6B52]"
-                          title="Open official receipt for this payment"
+                          title={l.type === "writeoff" ? "Open the receipt this write-off was recorded against" : "Open official receipt for this payment"}
                         >
                           <Receipt size={10} /> #{l.receiptNo}
                         </button>
