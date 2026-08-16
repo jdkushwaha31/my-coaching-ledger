@@ -260,6 +260,7 @@ export default function CoachingLedger() {
   const [showBatchChangeModal, setShowBatchChangeModal] = useState(null);
   const [showChargeModal, setShowChargeModal] = useState(null); // { student } or { student: null } for picker
   const [showStatementModal, setShowStatementModal] = useState(null);
+  const [showJoiningForm, setShowJoiningForm] = useState(null);
   const [showExpenseForm, setShowExpenseForm] = useState(false);
   const [editingStudent, setEditingStudent] = useState(null);
   const [receiptData, setReceiptData] = useState(null);
@@ -510,9 +511,27 @@ export default function CoachingLedger() {
   // ---- Student lifecycle actions ----
   async function saveStudent(data) {
     const id = data.id || uid();
-    await setDoc(doc(db, "students", id), { ...data, id, deleted: false });
+    // Advance Payment is captured on the Student form but is a transaction,
+    // not a student field — split it off before writing the student record.
+    const { advancePayment, advancePaymentMode, advancePaymentRef, ...studentData } = data;
+    const savedStudent = { ...studentData, id, deleted: false };
+    await setDoc(doc(db, "students", id), savedStudent);
     setShowStudentForm(false);
     setEditingStudent(null);
+
+    const advAmt = Number(advancePayment) || 0;
+    if (advAmt > 0) {
+      const depId = uid();
+      const mode = advancePaymentMode || "Cash";
+      const newDep = {
+        id: depId, studentId: id, amount: advAmt, date: todayStr(), mode,
+        utr: (mode === "UPI" || mode === "Bank Transfer") ? (advancePaymentRef || "") : "",
+        chequeNumber: mode === "Cheque" ? (advancePaymentRef || "") : "",
+        remarks: "Advance Payment at Admission", writeOffAmount: 0, writeOffRemarks: "", deleted: false,
+      };
+      await setDoc(doc(db, "deposits", depId), newDep);
+      setReceiptData({ deposit: newDep, student: savedStudent });
+    }
   }
 
   async function exitStudent(student, resultStatus, exitDateInput) {
@@ -765,6 +784,7 @@ export default function CoachingLedger() {
             onViewHistory={(s) => setShowHistoryModal(s)} onBatchChange={(s) => setShowBatchChangeModal(s)}
             onUndo={undoExit} onStatement={(s) => setShowStatementModal(s)}
             onAddCharge={(s) => setShowChargeModal({ student: s })}
+            onJoiningForm={(s) => setShowJoiningForm(s)}
             onRemove={softDeleteStudent}
           />
         )}
@@ -842,6 +862,7 @@ export default function CoachingLedger() {
         <BatchChangeModal student={showBatchChangeModal} subjectsList={subjectsList} curMonth={curMonth} onClose={() => setShowBatchChangeModal(null)} onSave={changeStudentBatches} />
       )}
       {showHistoryModal && <AcademicHistoryModal student={showHistoryModal} onClose={() => setShowHistoryModal(null)} />}
+      {showJoiningForm && <JoiningFormModal student={showJoiningForm} onClose={() => setShowJoiningForm(null)} />}
       {showChargeModal && (
         <AddChargeModal students={visibleStudents} charges={visibleCharges} initialStudent={showChargeModal.student} curMonth={curMonth} onClose={() => setShowChargeModal(null)} onSave={addCharge} />
       )}
@@ -1067,7 +1088,7 @@ function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMo
   );
 }
 
-function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, onUndo, onStatement, onAddCharge, compact }) {
+function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, onUndo, onStatement, onAddCharge, onJoiningForm, compact }) {
   const status = s.status || "active";
   return (
     <>
@@ -1088,12 +1109,13 @@ function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, 
       <button onClick={() => onBatchChange(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><Tag size={11} /> Batches</button>
       <button onClick={() => onAddCharge(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><Plus size={11} /> Charge</button>
       <button onClick={() => onStatement(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><Receipt size={11} /> Statement</button>
+      {onJoiningForm && <button onClick={() => onJoiningForm(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><FileText size={11} /> Joining Form</button>}
       <button onClick={() => onViewHistory(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><History size={11} /> Log</button>
     </>
   );
 }
 
-function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth, onAdd, onEdit, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge, onRemove }) {
+function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth, onAdd, onEdit, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge, onJoiningForm, onRemove }) {
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState({});
 
@@ -1140,7 +1162,7 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
                 const badgeText = status === "active" ? "Active" : status === "dropped" ? "Dropped Out" : (s.resultStatus || "On Break");
                 const badgeTone = status === "active" ? "paid" : status === "dropped" ? "overdue" : "break";
                 const isOpen = !!expanded[s.id];
-                const hasDetails = s.fatherName || s.guardianPhone || s.address;
+                const hasDetails = s.fatherName || s.guardianPhone || s.address || s.dob || s.currentSchool || s.aadharNumber;
                 return (
                   <React.Fragment key={s.id}>
                     <tr className="ledger-row">
@@ -1161,7 +1183,7 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
                       <td className="px-4 py-2.5 text-xs"><Stamp text={badgeText} tone={badgeTone} /></td>
                       <td className="px-4 py-2.5 text-right">
                         <div className="flex flex-wrap gap-2 justify-end">
-                          <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} onStatement={onStatement} onAddCharge={onAddCharge} compact />
+                          <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} onStatement={onStatement} onAddCharge={onAddCharge} onJoiningForm={onJoiningForm} compact />
                           <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline">Edit</button>
                           <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
                         </div>
@@ -1175,6 +1197,9 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
                             <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Father's Name</span>{s.fatherName || "—"}</div>
                             <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Guardian Phone</span>{s.guardianPhone || "—"}</div>
                             <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Address</span>{s.address || "—"}</div>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Date of Birth</span>{s.dob || "—"}</div>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Current School / Institution</span>{s.currentSchool || "—"}</div>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Aadhar Number</span>{s.aadharNumber || "—"}</div>
                           </div>
                         </td>
                       </tr>
@@ -1286,7 +1311,7 @@ function ClassSubjectManager({ classes, subjectsList, onSaveClasses, onSaveSubje
         <div className="mt-2 flex flex-wrap gap-1.5 max-h-56 overflow-y-auto p-2 border bg-white rounded" style={{ borderColor: "#D8CFB8" }}>
           {classList.map(c => (
             <span key={c} className="px-2 py-0.5 text-xs bg-[#FAF6EC] border rounded font-medium flex items-center gap-1" style={{ borderColor: "#D8CFB8" }}>
-              Class {c}
+              {c}
               <button onClick={() => setClassList(classList.filter(x => x !== c))} className="text-[#A63D2F]"><X size={10} /></button>
             </span>
           ))}
@@ -1938,7 +1963,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                  {["Charge ID", "Date", "Charges Month", "Student", "Class", "Description", "Remarks", "Type", "Receipt No", "Reference / UTR", "Debit", "Credit"].map(h => (
+                  {["Charge / Receipt No", "Date", "Charges Month", "Student", "Class", "Description", "Remarks", "Type", "Reference / UTR", "Debit", "Credit"].map(h => (
                     <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                   ))}
                 </tr>
@@ -1952,7 +1977,11 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
                   return (
                     <tr key={t.id + "-" + i} className="ledger-row">
                       <td className="px-4 py-2.5 text-[10px] font-mono">
-                        {isChargeLine ? (
+                        {hasReceipt ? (
+                          <button onClick={() => onViewReceipt(t.depositId)} className="underline text-[#12312B] font-semibold inline-flex items-center gap-1 hover:text-[#3F6B52]" title="Open official receipt">
+                            <Receipt size={10} /> #{t.receiptNo}
+                          </button>
+                        ) : isChargeLine ? (
                           <button onClick={() => onViewCharge(t)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{t.chargeId || "—"}</button>
                         ) : isExpenseLine ? (
                           <button onClick={() => onViewExpense(t)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{t.chargeId || "—"}</button>
@@ -1967,15 +1996,6 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
                       <td className="px-4 py-2.5 text-xs">{t.label}</td>
                       <td className="px-4 py-2.5 text-xs text-[#6E6650]">{t.remarks || "—"}</td>
                       <td className="px-4 py-2.5"><Stamp text={meta.label} tone={meta.tone} /></td>
-                      <td className="px-4 py-2.5 font-mono">
-                        {hasReceipt ? (
-                          <button onClick={() => onViewReceipt(t.depositId)} className="underline text-[#12312B] font-semibold inline-flex items-center gap-1 hover:text-[#3F6B52]" title="Open official receipt">
-                            <Receipt size={10} /> #{t.receiptNo}
-                          </button>
-                        ) : (
-                          <span className="text-[#D8CFB8]">—</span>
-                        )}
-                      </td>
                       <td className="px-4 py-2.5 text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{t.ref || "—"}</td>
                       <td className="px-4 py-2.5 font-mono text-[#A63D2F]">{t.kind === "debit" ? fmtINR(t.amount) : ""}</td>
                       <td className="px-4 py-2.5 font-mono text-[#3F6B52]">{t.kind === "credit" ? fmtINR(t.amount) : ""}</td>
@@ -1985,7 +2005,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
               </tbody>
               <tfoot>
                 <tr style={{ borderTop: "1.5px solid #26231D" }}>
-                  <td colSpan={10} className="px-4 py-2.5 text-right text-xs font-semibold text-[#6E6650]">Filtered Totals:</td>
+                  <td colSpan={9} className="px-4 py-2.5 text-right text-xs font-semibold text-[#6E6650]">Filtered Totals:</td>
                   <td className="px-4 py-2.5 font-mono font-bold text-[#A63D2F]">{fmtINR(filteredTotals.debit)}</td>
                   <td className="px-4 py-2.5 font-mono font-bold text-[#3F6B52]">{fmtINR(filteredTotals.credit)}</td>
                 </tr>
@@ -2159,10 +2179,23 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
   const [fatherName, setFatherName] = useState(initial?.fatherName || "");
   const [guardianPhone, setGuardianPhone] = useState(initial?.guardianPhone || "");
   const [address, setAddress] = useState(initial?.address || "");
+  const [dob, setDob] = useState(initial?.dob || "");
+  const [currentSchool, setCurrentSchool] = useState(initial?.currentSchool || "");
+  const [aadharNumber, setAadharNumber] = useState(initial?.aadharNumber || "");
   const [admissionMonth, setAdmissionMonth] = useState(initial?.admissionMonth || currentMonthKey());
   const [monthlyDiscount, setMonthlyDiscount] = useState(initial?.monthlyDiscount || 0);
   const [previousDues, setPreviousDues] = useState(initial?.previousDues || 0);
   const [status] = useState(initial?.status || "active");
+
+  // Advance Payment — a one-time transaction captured right on the
+  // registration/edit form. It is never stored as a field on the student
+  // record itself; on save the parent hands it off to become a real
+  // Deposit (so it counts toward the student's balance the same as any
+  // other payment), and a Receipt is generated right after the student
+  // is saved successfully.
+  const [advancePayment, setAdvancePayment] = useState("");
+  const [advancePaymentMode, setAdvancePaymentMode] = useState("Cash");
+  const [advancePaymentRef, setAdvancePaymentRef] = useState("");
 
   function toggleSubject(sub) {
     setBatches(prev => prev.includes(sub) ? prev.filter(x => x !== sub) : (prev.length >= 6 ? prev : [...prev, sub]));
@@ -2175,8 +2208,12 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
     onSave({
       ...initial, id: initial?.id, name: name.trim(), class: cls, batches, batchHistory: baseHistory,
       phone: phone.trim(), fatherName: fatherName.trim(), guardianPhone: guardianPhone.trim(), address: address.trim(),
+      dob: dob || "", currentSchool: currentSchool.trim(), aadharNumber: aadharNumber.trim(),
       admissionMonth, monthlyDiscount: Number(monthlyDiscount) || 0,
       previousDues: Number(previousDues) || 0, status,
+      advancePayment: Number(advancePayment) || 0,
+      advancePaymentMode,
+      advancePaymentRef: advancePaymentRef.trim(),
     });
   }
 
@@ -2198,12 +2235,37 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
         <Field label="Phone / WhatsApp Number"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit phone number" /></Field>
         <Field label="Guardian Phone Number"><input className={inputCls} style={inputStyle} value={guardianPhone} onChange={e => setGuardianPhone(e.target.value)} placeholder="Alternate contact (optional)" /></Field>
       </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Date of Birth"><input type="date" className={inputCls} style={inputStyle} value={dob} onChange={e => setDob(e.target.value)} /></Field>
+        <Field label="Current School / Institution"><input className={inputCls} style={inputStyle} value={currentSchool} onChange={e => setCurrentSchool(e.target.value)} placeholder="e.g. Delhi Public School" /></Field>
+      </div>
+      <Field label="Aadhar Number"><input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} placeholder="12-digit Aadhar number" maxLength={14} /></Field>
       <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="House / street / area / city" /></Field>
       <Field label="Monthly Concession / Discount (₹)"><input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} placeholder="0" /></Field>
       <Field label="Opening Balance / Legacy Carried Dues (₹)">
         <input type="number" className={inputCls} style={inputStyle} value={previousDues} onChange={e => setPreviousDues(e.target.value)} placeholder="0" />
         <div className="text-[10px] text-[#9C8F6E] mt-1">Only for a one-time starting balance (e.g. migrating from a paper register). For anything ongoing, use "Add Charge" instead — it keeps a dated log.</div>
       </Field>
+
+      <div className="p-3 border rounded-sm mb-3 bg-white" style={{ borderColor: "#3F6B52" }}>
+        <div className="text-xs font-semibold text-[#3F6B52] mb-2 flex items-center gap-1.5"><Banknote size={13} /> Advance Payment (optional)</div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Amount Received Now (₹)"><input type="number" className={inputCls} style={inputStyle} value={advancePayment} onChange={e => setAdvancePayment(e.target.value)} placeholder="0" /></Field>
+          <Field label="Payment Mode">
+            <select className={inputCls} style={inputStyle} value={advancePaymentMode} onChange={e => setAdvancePaymentMode(e.target.value)}>
+              {PAYMENT_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </Field>
+        </div>
+        {(advancePaymentMode === "UPI" || advancePaymentMode === "Bank Transfer") && (
+          <Field label="UTR / Reference Number"><input className={inputCls} style={inputStyle} value={advancePaymentRef} onChange={e => setAdvancePaymentRef(e.target.value)} placeholder="e.g. 402913827461" /></Field>
+        )}
+        {advancePaymentMode === "Cheque" && (
+          <Field label="Cheque Number"><input className={inputCls} style={inputStyle} value={advancePaymentRef} onChange={e => setAdvancePaymentRef(e.target.value)} placeholder="e.g. 004521" /></Field>
+        )}
+        <div className="text-[10px] text-[#9C8F6E]">If an amount is entered here, it's recorded as a Deposit against this student's balance, and a printable Receipt opens right after you save.</div>
+      </div>
+
       <Field label={`Select Subjects / Batches at admission (${batches.length}/6 max)`}>
         <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 border bg-white rounded-sm">
           {subjectsList.map(sub => {
@@ -2963,6 +3025,99 @@ function ExpenseReceiptModal({ expense, onClose }) {
 // the Additional Charges log, the Student Statement, and the Center
 // Statement, so one receipt design covers all three entry points.
 // ============================================================================
+// ============================================================================
+// JOINING FORM — a full-detail, printable (A4) record of a student's
+// registration, generated on demand from the student's row. Pulls every
+// field captured on the Student Register form so the center always has a
+// complete, printable admission record to keep on file.
+// ============================================================================
+function JoiningFormModal({ student, onClose }) {
+  const formRef = useRef();
+  if (!student) return null;
+
+  const handlePrint = () => {
+    const printContent = formRef.current.innerHTML;
+    const win = window.open("", "", "width=900,height=1000");
+    win.document.write(`
+      <html>
+        <head>
+          <title>Joining Form - ${student.name}</title>
+          <style>
+            @page { size: A4; margin: 16mm; }
+            body { font-family: 'Inter', sans-serif; padding: 0; color: #12312B; }
+            .form-box { max-width: 100%; margin: auto; }
+            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 12px; margin-bottom: 18px; }
+            .section-title { font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8A6420; border-bottom: 1px solid #D8CFB8; padding-bottom: 4px; margin: 18px 0 10px; }
+            .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; }
+            .row { font-size: 13px; padding: 6px 0; border-bottom: 1px dotted #D8CFB8; display: flex; justify-content: space-between; }
+            .label { color: #6E6650; }
+            .value { font-weight: 600; color: #12312B; }
+            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 24px; text-align: center; font-size: 10px; color: #6E6650; }
+            .sign-row { display: flex; justify-content: space-between; margin-top: 60px; font-size: 12px; }
+            .sign-line { border-top: 1px solid #12312B; padding-top: 4px; width: 200px; text-align: center; }
+          </style>
+        </head>
+        <body><div class="form-box">${printContent}</div></body>
+      </html>
+    `);
+    win.document.close(); win.focus(); win.print(); win.close();
+  };
+
+  const statusLabel = (student.status || "active") === "active" ? "Active" : (student.status === "dropped" ? "Dropped Out" : (student.resultStatus || "On Break"));
+
+  return (
+    <WideModal title="Student Joining Form" onClose={onClose}>
+      <div className="p-5 border bg-white rounded-sm mb-4" ref={formRef} style={{ borderColor: "#12312B" }}>
+        <div className="header">
+          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+          <p className="text-[11px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Student Joining / Admission Form</p>
+        </div>
+
+        <div className="section-title">Student Details</div>
+        <div className="grid">
+          <div className="row"><span className="label">Full Name</span><span className="value">{student.name || "—"}</span></div>
+          <div className="row"><span className="label">Father's Name</span><span className="value">{student.fatherName || "—"}</span></div>
+          <div className="row"><span className="label">Date of Birth</span><span className="value">{student.dob || "—"}</span></div>
+          <div className="row"><span className="label">Aadhar Number</span><span className="value">{student.aadharNumber || "—"}</span></div>
+          <div className="row"><span className="label">Current School / Institution</span><span className="value">{student.currentSchool || "—"}</span></div>
+          <div className="row"><span className="label">Status</span><span className="value">{statusLabel}</span></div>
+        </div>
+
+        <div className="section-title">Contact Details</div>
+        <div className="grid">
+          <div className="row"><span className="label">Phone / WhatsApp Number</span><span className="value">{student.phone || "—"}</span></div>
+          <div className="row"><span className="label">Guardian Phone Number</span><span className="value">{student.guardianPhone || "—"}</span></div>
+        </div>
+        <div className="row"><span className="label">Address</span><span className="value">{student.address || "—"}</span></div>
+
+        <div className="section-title">Academic Details</div>
+        <div className="grid">
+          <div className="row"><span className="label">Class</span><span className="value">{student.class || "—"}</span></div>
+          <div className="row"><span className="label">Fee Start Month</span><span className="value">{monthLabel(student.admissionMonth)}</span></div>
+          <div className="row"><span className="label">Subjects / Batches</span><span className="value">{(student.batches || []).join(", ") || "—"}</span></div>
+          <div className="row"><span className="label">Monthly Concession / Discount</span><span className="value">{fmtINR(student.monthlyDiscount || 0)}</span></div>
+        </div>
+
+        <div className="section-title">Fee Details</div>
+        <div className="grid">
+          <div className="row"><span className="label">Opening Balance / Legacy Carried Dues</span><span className="value">{fmtINR(student.previousDues || 0)}</span></div>
+          <div className="row"><span className="label">Form Generated On</span><span className="value">{todayStr()}</span></div>
+        </div>
+
+        <div className="sign-row">
+          <div className="sign-line">Parent / Guardian Signature</div>
+          <div className="sign-line">Authorized Signatory</div>
+        </div>
+
+        <div className="footer">
+          Computer Generated Joining Form · Coaching Classes Admission Record
+        </div>
+      </div>
+      <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Joining Form (A4)</button>
+    </WideModal>
+  );
+}
+
 function ChargeReceiptModal({ line, student, onClose }) {
   const receiptRef = useRef();
   if (!line) return null;
