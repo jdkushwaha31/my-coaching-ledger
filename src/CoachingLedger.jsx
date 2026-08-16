@@ -9,7 +9,7 @@ import {
 import { 
   LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut, 
   BookOpen, Send, Printer, Award, ArrowUpRight, History, Tag, Undo2, Archive, RotateCcw, 
-  ClipboardList, Percent, FileText, Search, TrendingDown
+  ClipboardList, Percent, FileText, Search, Banknote, Landmark, CreditCard
 } from "lucide-react";
 
 // Admin Access Password
@@ -21,8 +21,7 @@ const DEFAULT_CLASSES = ["Nursery", "LKG", "UKG", "1", "2", "3", "4", "5", "6", 
 const DEFAULT_SUBJECTS = ["Mathematics", "Physics", "Chemistry", "Science", "Hindi", "English", "Social Studies", "Computer"];
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const PAYMENT_MODES = ["Cash", "UPI", "Bank Transfer", "Cheque"];
-const ONLINE_MODES = ["UPI", "Bank Transfer", "Cheque"];
-const EXPENSE_CATEGORIES = ["Rent", "Utilities", "Teacher Salary", "Equipment / Stationery", "Marketing", "Maintenance", "Other"];
+const EXPENSE_CATEGORIES = ["Rent", "Electricity", "Staff Salary", "Stationery", "Maintenance", "Marketing", "Internet / Phone", "Furniture", "Miscellaneous"];
 
 // Exit reasons — used whenever a student leaves an active billing cycle.
 const EXIT_REASONS = [
@@ -67,6 +66,17 @@ function getReceiptNo(depositId) {
   return depositId ? depositId.slice(0, 8).toUpperCase() : "REC-" + Date.now().toString().slice(-4);
 }
 
+// Deterministic short code used to build a stable, readable Charge ID for
+// any ledger line — ad-hoc charges get one stored at creation time, but
+// recurring tuition-fee lines are computed on the fly each render, so their
+// ID has to be derivable from their own (stable) raw id instead of stored.
+function shortId(str) {
+  let h = 0;
+  const s = String(str || "");
+  for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
+  return h.toString(36).toUpperCase().padStart(6, "0").slice(-6);
+}
+
 const defaultFeeStructure = (classes) => {
   const fs = {};
   classes.forEach((c, i) => {
@@ -96,17 +106,6 @@ function sendWhatsAppReceipt(deposit, student, totalRemainingDue) {
   window.open(`https://wa.me/${formattedPhone}?text=${encodeURIComponent(msg)}`, "_blank");
 }
 
-function sendWhatsAppDuesNotice(student, dueAmount) {
-  if (!student || !student.phone) {
-    alert("No phone number registered for this student.");
-    return;
-  }
-  const cleanPhone = student.phone.replace(/[^0-9]/g, "");
-  const formattedPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
-  const msg = `*FEE DUES NOTICE*\n----------------------------------------\n*Student Name:* ${student.name}\n*Class:* ${student.class}\n----------------------------------------\n*Pending Dues Amount:* ₹${dueAmount}\n\nKindly clear the pending balance at your earliest convenience. Please contact us if you have already paid or have any questions.\n----------------------------------------\nThank you.`;
-  window.open(`https://wa.me/${formattedPhone}?text=${encodeURIComponent(msg)}`, "_blank");
-}
-
 // ============================================================================
 // LEDGER ENGINE — the single source of truth for "how much does this student
 // owe". Everything (tuition accrual, ad-hoc charges, payments, write-offs)
@@ -119,9 +118,9 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
 
   if (Number(student.previousDues) > 0) {
     chargeLines.push({
-      id: `opening-${student.id}`, type: "opening",
+      id: `opening-${student.id}`, chargeId: `CHG-OPN${shortId(student.id)}`, type: "opening",
       date: `${student.admissionMonth || curMonth}-01`, month: null,
-      label: "Opening Balance (Carried Forward)", amount: round2(student.previousDues),
+      label: "Opening Balance (Carried Forward)", amount: round2(student.previousDues), remarks: "", ref: "",
     });
   }
 
@@ -131,10 +130,11 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
       const bc = batches.length || 1;
       const expected = expectedFeeFor(student.class, bc, student.monthlyDiscount || 0);
       if (expected > 0) {
+        const lineId = `fee-${student.id}-${m}`;
         chargeLines.push({
-          id: `fee-${student.id}-${m}`, type: "monthly_fee", date: `${m}-01`, month: m,
+          id: lineId, chargeId: `CHG-${shortId(lineId)}`, type: "monthly_fee", date: `${m}-01`, month: m,
           label: `Tuition Fee — ${monthLabel(m)}${batches.length ? " (" + batches.join(", ") + ")" : ""}`,
-          amount: round2(expected),
+          amount: round2(expected), remarks: "", ref: "",
         });
       }
     });
@@ -142,9 +142,10 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
 
   (charges || []).filter(c => c.studentId === student.id && !c.deleted).forEach(c => {
     chargeLines.push({
-      id: c.id, type: "extra_charge", date: c.date || `${c.month || curMonth}-01`, month: c.month || null,
+      id: c.id, chargeId: c.chargeId || `CHG-${shortId(c.id)}`, type: "extra_charge",
+      date: c.date || `${c.month || curMonth}-01`, month: c.month || null,
       label: c.remarks ? `Additional Charge — ${c.remarks}` : `Additional Charge${c.month ? " (" + monthLabel(c.month) + ")" : ""}`,
-      amount: round2(c.amount), remarks: c.remarks,
+      amount: round2(c.amount), remarks: c.remarks || "", ref: "",
     });
   });
 
@@ -157,14 +158,14 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
       creditLines.push({
         id: `${d.id}-pay`, depositId: d.id, type: "payment", date: d.date || todayStr(),
         label: `Payment Received — ${d.mode || "Cash"}${ref}`, amount: round2(d.amount),
-        mode: d.mode, remarks: d.remarks, receiptNo: getReceiptNo(d.id),
+        mode: d.mode, remarks: d.remarks, receiptNo: getReceiptNo(d.id), ref: d.utr || d.chequeNumber || "",
       });
     }
     if (Number(d.writeOffAmount) > 0) {
       creditLines.push({
         id: `${d.id}-wo`, depositId: d.id, type: "writeoff", date: d.date || todayStr(),
         label: d.writeOffRemarks ? `Discount / Write-off — ${d.writeOffRemarks}` : "Discount / Write-off",
-        amount: round2(d.writeOffAmount), remarks: d.writeOffRemarks, receiptNo: getReceiptNo(d.id),
+        amount: round2(d.writeOffAmount), remarks: d.writeOffRemarks, receiptNo: getReceiptNo(d.id), ref: "",
       });
     }
   });
@@ -253,7 +254,6 @@ export default function CoachingLedger() {
 
   const [showStudentForm, setShowStudentForm] = useState(false);
   const [showDepositForm, setShowDepositForm] = useState(false);
-  const [showExpenseForm, setShowExpenseForm] = useState(false);
   const [showClassModal, setShowClassModal] = useState(false);
   const [showPromoteModal, setShowPromoteModal] = useState(null);
   const [showHistoryModal, setShowHistoryModal] = useState(null);
@@ -261,8 +261,11 @@ export default function CoachingLedger() {
   const [showBatchChangeModal, setShowBatchChangeModal] = useState(null);
   const [showChargeModal, setShowChargeModal] = useState(null); // { student } or { student: null } for picker
   const [showStatementModal, setShowStatementModal] = useState(null);
+  const [showExpenseForm, setShowExpenseForm] = useState(false);
   const [editingStudent, setEditingStudent] = useState(null);
   const [receiptData, setReceiptData] = useState(null);
+  const [expenseReceiptData, setExpenseReceiptData] = useState(null);
+  const [chargeReceiptData, setChargeReceiptData] = useState(null); // { line, student }
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -303,8 +306,6 @@ export default function CoachingLedger() {
     const unsubExpenses = onSnapshot(collection(db, "expenses"), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
       setExpenses(data);
-    }, (err) => {
-      console.error("Failed to load expenses:", err);
     });
 
     const unsubFee = onSnapshot(doc(db, "settings", "feeStructure"), (docSnap) => {
@@ -410,7 +411,7 @@ export default function CoachingLedger() {
   const outstandingRows = visibleStudents.flatMap(st =>
     ledgers[st.id].chargeLines.filter(l => l.outstanding > 0).map(l => ({
       studentId: st.id, name: st.name, cls: st.class, phone: st.phone,
-      type: l.type, month: l.month, label: l.label,
+      type: l.type, month: l.month, label: l.label, chargeId: l.chargeId, remarks: l.remarks,
       expected: l.amount, paid: l.paid, outstanding: l.outstanding,
       isCurrent: l.month === curMonth, status: st.status || "active",
     }))
@@ -418,67 +419,53 @@ export default function CoachingLedger() {
 
   const totalOutstanding = round2(Object.values(studentDuesMap).reduce((a, v) => a + v, 0));
 
-  // Center-wide statement — every ledger line (tuition, additional charges,
-  // payments, write-offs) from every student, merged into one master feed.
-  const studentTransactions = visibleStudents.flatMap(st =>
-    (ledgers[st.id]?.timeline || []).map(l => ({
-      ...l,
-      studentId: st.id, studentName: st.name, studentClass: st.class, studentStatus: st.status || "active",
-    }))
-  );
+  // Cash vs. Online split — "Cash" is its own bucket; UPI / Bank Transfer /
+  // Cheque are all treated as "Online" for the balance tracker & tiles.
+  function paymentModeOf(x) { return x.mode || "Cash"; }
+  const cashCollected = round2(visibleDeposits.filter(d => paymentModeOf(d) === "Cash").reduce((a, d) => a + Number(d.amount || 0), 0));
+  const onlineCollected = round2(visibleDeposits.filter(d => paymentModeOf(d) !== "Cash").reduce((a, d) => a + Number(d.amount || 0), 0));
+  const cashExpensesTotal = round2(visibleExpenses.filter(e => paymentModeOf(e) === "Cash").reduce((a, e) => a + Number(e.amount || 0), 0));
+  const onlineExpensesTotal = round2(visibleExpenses.filter(e => paymentModeOf(e) !== "Cash").reduce((a, e) => a + Number(e.amount || 0), 0));
+  const totalExpenses = round2(cashExpensesTotal + onlineExpensesTotal);
+  const totalCashBalance = round2(cashCollected - cashExpensesTotal);
+  const totalOnlineBalance = round2(onlineCollected - onlineExpensesTotal);
 
-  // Center expenses folded into the master feed as explicit debit lines —
-  // these aren't tied to any student, so studentName/studentClass are
-  // repurposed to show the expense category & payment mode in the statement.
+  // Expense rows shaped like ledger timeline lines, so they merge cleanly
+  // into the center-wide statement feed alongside tuition/charges/payments.
   const expenseTransactions = visibleExpenses.map(e => ({
-    id: `expense-${e.id}`, expenseId: e.id, kind: "debit", type: "expense",
-    date: e.date || todayStr(), amount: round2(Number(e.amount) || 0),
-    label: `${e.category}${e.paidTo ? " — " + e.paidTo : ""}${e.remarks ? " (" + e.remarks + ")" : ""}`,
-    studentId: null, studentName: "Center Expense", studentClass: e.category, studentStatus: "active",
-    mode: e.paymentMode, isExpense: true,
+    id: `${e.id}-exp`, chargeId: e.expenseId || `EXP-${shortId(e.id)}`, type: "expense", kind: "debit",
+    date: e.date || todayStr(), month: null, label: e.category ? `Expense — ${e.category}` : "Expense",
+    remarks: e.remarks || "", amount: round2(e.amount), ref: e.refNumber || "",
+    studentId: null, studentName: "Center Expense", studentClass: "—", studentStatus: "active",
   }));
 
-  const allTransactions = [...studentTransactions, ...expenseTransactions]
-    .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  // Center-wide statement — every ledger line (tuition, additional charges,
+  // payments, write-offs) from every student plus every expense, merged
+  // into one master feed.
+  const allTransactions = [
+    ...visibleStudents.flatMap(st =>
+      (ledgers[st.id]?.timeline || []).map(l => ({
+        ...l,
+        studentId: st.id, studentName: st.name, studentClass: st.class, studentStatus: st.status || "active",
+      }))
+    ),
+    ...expenseTransactions,
+  ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
 
   const centerTotals = {
     charged: round2(Object.values(ledgers).reduce((a, l) => a + l.totalCharged, 0)),
     collected: round2(visibleDeposits.reduce((a, d) => a + Number(d.amount || 0), 0)),
     writtenOff: round2(visibleDeposits.reduce((a, d) => a + Number(d.writeOffAmount || 0), 0)),
     outstanding: totalOutstanding,
-    expenses: round2(visibleExpenses.reduce((a, e) => a + Number(e.amount || 0), 0)),
+    expenses: totalExpenses,
+    cashBalance: totalCashBalance,
+    onlineBalance: totalOnlineBalance,
   };
 
   function depositMonthOf(d) { return d.date ? d.date.slice(0, 7) : null; }
   const thisMonthCollected = visibleDeposits.filter(d => depositMonthOf(d) === curMonth).reduce((a, d) => a + Number(d.amount || 0), 0);
   const thisMonthWriteOffs = visibleDeposits.filter(d => depositMonthOf(d) === curMonth).reduce((a, d) => a + Number(d.writeOffAmount || 0), 0);
   const thisMonthExpected = visibleStudents.reduce((a, st) => a + ledgers[st.id].chargeLines.filter(l => l.month === curMonth).reduce((s, l) => s + l.amount, 0), 0);
-
-  // ---- Center Expenses: totals, monthly figure, category breakdown ----
-  function expenseMonthOf(e) { return e.date ? e.date.slice(0, 7) : null; }
-  const totalExpenses = round2(visibleExpenses.reduce((a, e) => a + Number(e.amount || 0), 0));
-  const thisMonthExpenses = round2(visibleExpenses.filter(e => expenseMonthOf(e) === curMonth).reduce((a, e) => a + Number(e.amount || 0), 0));
-  const expensesByCategory = EXPENSE_CATEGORIES.map(cat => ({
-    category: cat,
-    total: round2(visibleExpenses.filter(e => e.category === cat).reduce((a, e) => a + Number(e.amount || 0), 0)),
-  })).filter(c => c.total > 0);
-  const netCashflow = round2(centerTotals.collected - totalExpenses);
-
-  // ---- Top 5 Dues Leaderboard ----
-  const topDuesStudents = visibleStudents
-    .filter(s => (s.status || "active") === "active" && (studentDuesMap[s.id] || 0) > 0)
-    .map(s => ({ ...s, due: studentDuesMap[s.id] || 0 }))
-    .sort((a, b) => b.due - a.due)
-    .slice(0, 5);
-
-  // ---- Cash vs Online Collections — current month ----
-  const monthDeposits = visibleDeposits.filter(d => depositMonthOf(d) === curMonth);
-  const cashCollectedThisMonth = round2(monthDeposits.filter(d => (d.mode || "Cash") === "Cash").reduce((a, d) => a + Number(d.amount || 0), 0));
-  const onlineCollectedThisMonth = round2(monthDeposits.filter(d => ONLINE_MODES.includes(d.mode)).reduce((a, d) => a + Number(d.amount || 0), 0));
-  const cashOnlineSplit = {
-    cash: cashCollectedThisMonth, online: onlineCollectedThisMonth,
-    total: round2(cashCollectedThisMonth + onlineCollectedThisMonth),
-  };
 
   const start = addMonths(curMonth, -5);
   const trendMonths = monthsBetween(start, curMonth);
@@ -624,7 +611,8 @@ export default function CoachingLedger() {
 
   async function addCharge(data) {
     const id = uid();
-    await setDoc(doc(db, "charges", id), { ...data, id, deleted: false, createdAt: todayStr() });
+    const chargeId = `CHG-${shortId(id)}`;
+    await setDoc(doc(db, "charges", id), { ...data, id, chargeId, deleted: false, createdAt: todayStr() });
     setShowChargeModal(null);
   }
   async function softDeleteCharge(id) {
@@ -645,13 +633,16 @@ export default function CoachingLedger() {
 
   async function addExpense(data) {
     const id = uid();
-    await setDoc(doc(db, "expenses", id), { ...data, id, deleted: false, createdAt: todayStr() });
+    const expenseId = `EXP-${shortId(id)}`;
+    const newExp = { ...data, id, expenseId, deleted: false, createdAt: todayStr() };
+    await setDoc(doc(db, "expenses", id), newExp);
     setShowExpenseForm(false);
+    setExpenseReceiptData(newExp);
   }
   async function softDeleteExpense(id) {
     const e = expenses.find(x => x.id === id);
     if (!e) return;
-    if (!window.confirm("Move this expense to Trash? It can be restored later.")) return;
+    if (!window.confirm("Remove this expense? It can be restored later from Trash.")) return;
     await setDoc(doc(db, "expenses", id), { ...e, deleted: true, deletedAt: todayStr() });
   }
   async function restoreExpense(id) {
@@ -660,7 +651,7 @@ export default function CoachingLedger() {
     await setDoc(doc(db, "expenses", id), { ...e, deleted: false, deletedAt: null });
   }
   async function permanentlyDeleteExpense(id) {
-    if (!window.confirm("Permanently delete this expense record? This cannot be undone.")) return;
+    if (!window.confirm("Permanently delete this expense? This cannot be undone.")) return;
     await deleteDoc(doc(db, "expenses", id));
   }
 
@@ -692,8 +683,8 @@ export default function CoachingLedger() {
     { id: "students", label: "Students Register", icon: Users },
     { id: "structure", label: "Fee Matrix", icon: Wallet },
     { id: "deposits", label: "Deposits Log", icon: Receipt },
+    { id: "expenses", label: "Expenses Log", icon: CreditCard },
     { id: "charges", label: "Additional Charges", icon: ClipboardList },
-    { id: "expenses", label: "Expenses Log", icon: TrendingDown },
     { id: "dues", label: "Pending Dues", icon: AlertCircle },
     { id: "statement", label: "Center Statement", icon: FileText },
     { id: "trash", label: "Trash / Restore", icon: Archive },
@@ -750,9 +741,9 @@ export default function CoachingLedger() {
             thisMonthExpected={thisMonthExpected} totalOutstanding={totalOutstanding} trend={trend} classStrength={classStrength}
             recentDeposits={recentDeposits} studentById={studentById} curMonth={curMonth} classes={classes}
             studentDues={studentDuesMap} forecastForMonth={forecastForMonth}
+            totalCashBalance={totalCashBalance} totalOnlineBalance={totalOnlineBalance}
+            cashExpensesTotal={cashExpensesTotal} onlineExpensesTotal={onlineExpensesTotal}
             onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
-            topDuesStudents={topDuesStudents} cashOnlineSplit={cashOnlineSplit}
-            onSendDuesNotice={(s) => sendWhatsAppDuesNotice(s, studentDuesMap[s.id] || 0)}
           />
         )}
         {tab === "class_hub" && (
@@ -781,39 +772,49 @@ export default function CoachingLedger() {
         {tab === "structure" && <StructureTab feeStructure={feeStructure} setFeeStructure={saveFeeStructure} classes={classes} />}
         {tab === "deposits" && (
           <DepositsTab
-            deposits={visibleDeposits} students={visibleStudents} studentDues={studentDuesMap}
+            deposits={visibleDeposits} students={visibleStudents} classes={classes} studentDues={studentDuesMap}
             onAdd={() => setShowDepositForm(true)} onRemove={softDeleteDeposit}
             onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
           />
         )}
-        {tab === "charges" && (
-          <ChargesTab
-            charges={visibleCharges} students={visibleStudents}
-            onAdd={() => setShowChargeModal({ student: null })} onRemove={softDeleteCharge}
-          />
-        )}
         {tab === "expenses" && (
           <ExpensesTab
-            expenses={visibleExpenses} totalExpenses={totalExpenses} thisMonthExpenses={thisMonthExpenses}
-            expensesByCategory={expensesByCategory} curMonth={curMonth}
+            expenses={visibleExpenses}
             onAdd={() => setShowExpenseForm(true)} onRemove={softDeleteExpense}
+            onOpenReceipt={(exp) => setExpenseReceiptData(exp)}
           />
         )}
-        {tab === "dues" && <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} students={visibleStudents} studentDues={studentDuesMap} />}
+        {tab === "charges" && (
+          <ChargesTab
+            charges={visibleCharges} students={visibleStudents} classes={classes}
+            onAdd={() => setShowChargeModal({ student: null })} onRemove={softDeleteCharge}
+            onOpenReceipt={(c) => setChargeReceiptData({
+              line: { chargeId: c.chargeId || `CHG-${shortId(c.id)}`, type: "extra_charge", date: c.date, month: c.month, label: c.remarks ? `Additional Charge — ${c.remarks}` : "Additional Charge", amount: c.amount, remarks: c.remarks || "" },
+              student: studentById[c.studentId],
+            })}
+          />
+        )}
+        {tab === "dues" && <DuesTab rows={outstandingRows} totalOutstanding={totalOutstanding} students={visibleStudents} studentDues={studentDuesMap} classes={classes} />}
         {tab === "statement" && (
           <CenterStatementTab
             transactions={allTransactions} totals={centerTotals} students={visibleStudents} classes={classes}
-            netCashflow={netCashflow}
             onViewReceipt={(depositId) => {
               const dep = visibleDeposits.find(d => d.id === depositId);
               if (dep) setReceiptData({ deposit: dep, student: studentById[dep.studentId] });
+            }}
+            onViewCharge={(t) => setChargeReceiptData({
+              line: { chargeId: t.chargeId, type: t.type, date: t.date, month: t.month, label: t.label, amount: t.amount, remarks: t.remarks },
+              student: studentById[t.studentId],
+            })}
+            onViewExpense={(t) => {
+              const exp = visibleExpenses.find(e => (e.expenseId || `EXP-${shortId(e.id)}`) === t.chargeId);
+              if (exp) setExpenseReceiptData(exp);
             }}
           />
         )}
         {tab === "trash" && (
           <TrashTab
-            trashedStudents={trashedStudents} trashedDeposits={trashedDeposits} trashedCharges={trashedCharges}
-            trashedExpenses={trashedExpenses}
+            trashedStudents={trashedStudents} trashedDeposits={trashedDeposits} trashedCharges={trashedCharges} trashedExpenses={trashedExpenses}
             studentById={studentById}
             onRestoreStudent={restoreStudent} onDeleteStudent={permanentlyDeleteStudent}
             onRestoreDeposit={restoreDeposit} onDeleteDeposit={permanentlyDeleteDeposit}
@@ -844,10 +845,7 @@ export default function CoachingLedger() {
       )}
       {showHistoryModal && <AcademicHistoryModal student={showHistoryModal} onClose={() => setShowHistoryModal(null)} />}
       {showChargeModal && (
-        <AddChargeModal students={visibleStudents} initialStudent={showChargeModal.student} curMonth={curMonth} onClose={() => setShowChargeModal(null)} onSave={addCharge} />
-      )}
-      {showExpenseForm && (
-        <AddExpenseModal onClose={() => setShowExpenseForm(false)} onSave={addExpense} />
+        <AddChargeModal students={visibleStudents} charges={visibleCharges} initialStudent={showChargeModal.student} curMonth={curMonth} onClose={() => setShowChargeModal(null)} onSave={addCharge} />
       )}
       {showStatementModal && (
         <StudentStatementModal
@@ -858,10 +856,20 @@ export default function CoachingLedger() {
             const dep = visibleDeposits.find(d => d.id === depositId);
             if (dep) setReceiptData({ deposit: dep, student: showStatementModal });
           }}
+          onViewCharge={(line) => setChargeReceiptData({ line, student: showStatementModal })}
         />
       )}
       {receiptData && (
         <ReceiptModal deposit={receiptData.deposit} student={receiptData.student} totalRemainingDue={studentDuesMap[receiptData.student?.id] || 0} onClose={() => setReceiptData(null)} />
+      )}
+      {showExpenseForm && (
+        <ExpenseFormModal onClose={() => setShowExpenseForm(false)} onSave={addExpense} />
+      )}
+      {expenseReceiptData && (
+        <ExpenseReceiptModal expense={expenseReceiptData} onClose={() => setExpenseReceiptData(null)} />
+      )}
+      {chargeReceiptData && (
+        <ChargeReceiptModal line={chargeReceiptData.line} student={chargeReceiptData.student} onClose={() => setChargeReceiptData(null)} />
       )}
     </div>
   );
@@ -923,16 +931,23 @@ function FeeForecastCard({ curMonth, forecastForMonth }) {
   );
 }
 
-function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMonthExpected, totalOutstanding, trend, classStrength, recentDeposits, studentById, curMonth, classes, studentDues, forecastForMonth, onOpenReceipt, topDuesStudents, cashOnlineSplit, onSendDuesNotice }) {
+function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMonthExpected, totalOutstanding, trend, classStrength, recentDeposits, studentById, curMonth, classes, studentDues, forecastForMonth, totalCashBalance, totalOnlineBalance, cashExpensesTotal, onlineExpensesTotal, onOpenReceipt }) {
   const collectionRate = thisMonthExpected > 0 ? Math.round((thisMonthCollected / thisMonthExpected) * 100) : 0;
   return (
     <div>
       <SectionHeader eyebrow={monthLabel(curMonth)} title="Summary" />
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-4 gap-4 mb-4">
         <StatCard label="Active Students" value={students.length} sub={`${classes.filter(c => students.some(s => s.class === c)).length} active classes`} />
         <StatCard label="Collected this month" value={fmtINR(thisMonthCollected)} sub={`of ${fmtINR(thisMonthExpected)} expected`} tone="good" />
         <StatCard label="Collection rate" value={`${collectionRate}%`} tone={collectionRate >= 80 ? "good" : collectionRate >= 50 ? "warn" : "bad"} />
         <StatCard label="Total Dues Balance" value={fmtINR(totalOutstanding)} sub={thisMonthWriteOffs > 0 ? `${fmtINR(thisMonthWriteOffs)} written off this month` : "includes carried-over dues"} tone={totalOutstanding > 0 ? "bad" : "good"} />
+      </div>
+
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        <StatCard label="Total Cash Balance" value={fmtINR(totalCashBalance)} sub="Cash collected minus cash expenses" tone={totalCashBalance >= 0 ? "good" : "bad"} />
+        <StatCard label="Total Online Balance" value={fmtINR(totalOnlineBalance)} sub="UPI / Bank / Cheque minus online expenses" tone={totalOnlineBalance >= 0 ? "good" : "bad"} />
+        <StatCard label="Total Cash Expenses" value={fmtINR(cashExpensesTotal)} tone="bad" />
+        <StatCard label="Total Online Expenses" value={fmtINR(onlineExpensesTotal)} tone="bad" />
       </div>
 
       <div className="grid grid-cols-3 gap-5 mb-6">
@@ -995,68 +1010,6 @@ function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMo
           )}
         </Card>
       </div>
-
-      <div className="grid grid-cols-2 gap-5 mb-6">
-        <Card className="p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <AlertCircle size={17} className="text-[#A63D2F]" />
-            <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold">Top 5 Dues Leaderboard</div>
-          </div>
-          {topDuesStudents.length === 0 ? (
-            <div className="text-sm text-[#9C8F6E]">No outstanding dues among active students — all clear!</div>
-          ) : (
-            <div className="space-y-2">
-              {topDuesStudents.map((s, i) => (
-                <div key={s.id} className="flex items-center justify-between p-2.5 rounded-sm border ledger-row" style={{ borderColor: "#E4DCC5" }}>
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="text-xs font-bold text-[#B8862B] w-4 shrink-0">#{i + 1}</span>
-                    <div className="min-w-0">
-                      <div className="font-medium text-sm truncate">{s.name}</div>
-                      <div className="text-[10px] text-[#9C8F6E]">Class {s.class}</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="font-bold text-[#A63D2F] text-sm">{fmtINR(s.due)}</span>
-                    <button onClick={() => onSendDuesNotice(s)} className="p-1.5 rounded-sm text-white bg-[#25D366] hover:bg-[#1DA851]" title="Send WhatsApp Dues Notice">
-                      <Send size={12} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
-
-        <Card className="p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <Wallet size={17} className="text-[#3F6B52]" />
-            <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold">Cash vs Online Collections</div>
-          </div>
-          <div className="text-[11px] text-[#9C8F6E] mb-3">{monthLabel(curMonth)} · Online = UPI + Bank Transfer + Cheque</div>
-          {cashOnlineSplit.total === 0 ? (
-            <div className="text-sm text-[#9C8F6E]">No collections recorded this month yet.</div>
-          ) : (
-            <>
-              <div className="flex h-4 rounded-sm overflow-hidden mb-3 border" style={{ borderColor: "#D8CFB8" }}>
-                <div style={{ width: `${(cashOnlineSplit.cash / cashOnlineSplit.total) * 100}%`, background: "#B8862B" }} title="Cash" />
-                <div style={{ width: `${(cashOnlineSplit.online / cashOnlineSplit.total) * 100}%`, background: "#3F6B52" }} title="Online" />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="p-2.5 rounded bg-[#FBEFE3] border" style={{ borderColor: "#B8862B" }}>
-                  <div className="flex items-center gap-1.5 text-[10px] uppercase font-mono text-[#8A6420]"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#B8862B" }} /> Cash</div>
-                  <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-bold text-[#8A6420]">{fmtINR(cashOnlineSplit.cash)}</div>
-                  <div className="text-[10px] text-[#9C8F6E]">{cashOnlineSplit.total ? Math.round((cashOnlineSplit.cash / cashOnlineSplit.total) * 100) : 0}% of total</div>
-                </div>
-                <div className="p-2.5 rounded bg-[#EAF1EA] border" style={{ borderColor: "#3F6B52" }}>
-                  <div className="flex items-center gap-1.5 text-[10px] uppercase font-mono text-[#2E5240]"><span className="w-2 h-2 rounded-full inline-block" style={{ background: "#3F6B52" }} /> Online</div>
-                  <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-bold text-[#2E5240]">{fmtINR(cashOnlineSplit.online)}</div>
-                  <div className="text-[10px] text-[#9C8F6E]">{cashOnlineSplit.total ? Math.round((cashOnlineSplit.online / cashOnlineSplit.total) * 100) : 0}% of total</div>
-                </div>
-              </div>
-            </>
-          )}
-        </Card>
-      </div>
     </div>
   );
 }
@@ -1090,11 +1043,14 @@ function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, 
 function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, batchesForMonth, curMonth, onManageClasses, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge }) {
   const [selectedClass, setSelectedClass] = useState("ALL");
   const [viewMode, setViewMode] = useState("class");
+  const [search, setSearch] = useState("");
 
   const filteredStudents = useMemo(() => {
-    if (selectedClass === "ALL") return students;
-    return students.filter(s => s.class === selectedClass);
-  }, [students, selectedClass]);
+    let list = selectedClass === "ALL" ? students : students.filter(s => s.class === selectedClass);
+    const q = search.trim().toLowerCase();
+    if (q) list = list.filter(s => (s.name || "").toLowerCase().includes(q) || (s.phone || "").toLowerCase().includes(q));
+    return list;
+  }, [students, selectedClass, search]);
 
   const sendWhatsAppReminder = (phone, name, label, amount) => {
     if (!phone) { alert("No phone number recorded for this student."); return; }
@@ -1123,6 +1079,10 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
         </div>
         {viewMode === "class" && (
           <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className="border rounded-sm pl-7 pr-3 py-1.5 text-xs bg-white w-48" style={{ borderColor: "#D8CFB8" }} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name or phone…" />
+            </div>
             <span className="text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Filter Class:</span>
             <select value={selectedClass} onChange={e => setSelectedClass(e.target.value)} className="border rounded-sm px-3 py-1.5 text-xs bg-white" style={{ borderColor: "#D8CFB8" }}>
               <option value="ALL">All Classes ({students.length})</option>
@@ -1135,7 +1095,7 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
       {viewMode === "class" ? (
         <Card>
           {filteredStudents.length === 0 ? (
-            <div className="p-8 text-center text-sm text-[#9C8F6E]">No students found for class "{selectedClass}".</div>
+            <div className="p-8 text-center text-sm text-[#9C8F6E]">No students match{search ? ` "${search}"` : ""}{selectedClass !== "ALL" ? ` in Class ${selectedClass}` : ""}.</div>
           ) : (
             <table className="w-full text-sm">
               <thead>
@@ -1182,7 +1142,7 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                  {["Student", "Class", "Line Item", "Expected", "Paid", "Pending Balance", "WhatsApp Reminder"].map(h => (
+                  {["Charge ID", "Student", "Class", "Line Item", "Expected", "Paid", "Pending Balance", "WhatsApp Reminder"].map(h => (
                     <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                   ))}
                 </tr>
@@ -1190,6 +1150,7 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
               <tbody>
                 {outstandingRows.map((r, i) => (
                   <tr key={i} className="ledger-row">
+                    <td className="px-4 py-2.5 text-[10px] font-mono text-[#9C8F6E]">{r.chargeId}</td>
                     <td className="px-4 py-2.5 font-medium">{r.name}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{r.cls}</td>
                     <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
@@ -1216,6 +1177,18 @@ function ClassAndDuesHubTab({ students, classes, studentDues, outstandingRows, b
 }
 
 function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth, onAdd, onEdit, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge, onRemove }) {
+  const [search, setSearch] = useState("");
+  const [expanded, setExpanded] = useState({});
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return students;
+    return students.filter(s => {
+      const haystack = [s.name, s.fatherName, s.phone, s.guardianPhone, s.address].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [students, search]);
+
   return (
     <div>
       <SectionHeader eyebrow="Register" title="Students Directory" action={
@@ -1223,42 +1196,73 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
           <Plus size={15} /> Add student
         </button>
       } />
+
+      <Card className="p-3.5 mb-4">
+        <div className="relative max-w-sm">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+          <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, father's name, phone, guardian phone, or address…" />
+        </div>
+      </Card>
+
       <Card>
-        {students.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No students registered yet.</div>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{students.length === 0 ? "No students registered yet." : "No students match this search."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Name", "Class", "Subjects (this month)", "Total Due", "Status", "Actions"].map(h => (
+                {["", "Name", "Class", "Subjects (this month)", "Total Due", "Status", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {students.map(s => {
+              {filtered.map(s => {
                 const dueAmount = studentDues[s.id] || 0;
                 const status = s.status || "active";
                 const badgeText = status === "active" ? "Active" : status === "dropped" ? "Dropped Out" : (s.resultStatus || "On Break");
                 const badgeTone = status === "active" ? "paid" : status === "dropped" ? "overdue" : "break";
+                const isOpen = !!expanded[s.id];
+                const hasDetails = s.fatherName || s.guardianPhone || s.address;
                 return (
-                  <tr key={s.id} className="ledger-row">
-                    <td className="px-4 py-2.5 font-medium">
-                      <div>{s.name}</div>
-                      {s.phone && <div className="text-[10px] text-[#9C8F6E]">{s.phone}</div>}
-                    </td>
-                    <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
-                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{batchesForMonth(s, curMonth).join(", ") || "—"}</td>
-                    <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: dueAmount > 0 ? "#A63D2F" : "#3F6B52" }}>{fmtINR(dueAmount)}</td>
-                    <td className="px-4 py-2.5 text-xs"><Stamp text={badgeText} tone={badgeTone} /></td>
-                    <td className="px-4 py-2.5 text-right">
-                      <div className="flex flex-wrap gap-2 justify-end">
-                        <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} onStatement={onStatement} onAddCharge={onAddCharge} compact />
-                        <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline">Edit</button>
-                        <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
-                      </div>
-                    </td>
-                  </tr>
+                  <React.Fragment key={s.id}>
+                    <tr className="ledger-row">
+                      <td className="pl-3 py-2.5">
+                        {hasDetails && (
+                          <button onClick={() => setExpanded(prev => ({ ...prev, [s.id]: !prev[s.id] }))} className="text-[#9C8F6E] hover:text-[#12312B] text-xs w-4">
+                            {isOpen ? "▾" : "▸"}
+                          </button>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 font-medium">
+                        <div>{s.name}</div>
+                        {s.phone && <div className="text-[10px] text-[#9C8F6E]">{s.phone}</div>}
+                      </td>
+                      <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
+                      <td className="px-4 py-2.5 text-xs text-[#6E6650]">{batchesForMonth(s, curMonth).join(", ") || "—"}</td>
+                      <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: dueAmount > 0 ? "#A63D2F" : "#3F6B52" }}>{fmtINR(dueAmount)}</td>
+                      <td className="px-4 py-2.5 text-xs"><Stamp text={badgeText} tone={badgeTone} /></td>
+                      <td className="px-4 py-2.5 text-right">
+                        <div className="flex flex-wrap gap-2 justify-end">
+                          <LifecycleActions s={s} onExit={onExit} onPromote={onPromote} onBatchChange={onBatchChange} onViewHistory={onViewHistory} onUndo={onUndo} onStatement={onStatement} onAddCharge={onAddCharge} compact />
+                          <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline">Edit</button>
+                          <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                        </div>
+                      </td>
+                    </tr>
+                    {isOpen && hasDetails && (
+                      <tr>
+                        <td></td>
+                        <td colSpan={6} className="px-4 pb-3 pt-0">
+                          <div className="grid grid-cols-3 gap-3 p-3 rounded bg-[#FAF6EC] border text-xs" style={{ borderColor: "#D8CFB8" }}>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Father's Name</span>{s.fatherName || "—"}</div>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Guardian Phone</span>{s.guardianPhone || "—"}</div>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Address</span>{s.address || "—"}</div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
                 );
               })}
             </tbody>
@@ -1310,9 +1314,30 @@ function StructureTab({ feeStructure, setFeeStructure, classes }) {
   );
 }
 
-function DepositsTab({ deposits, students, studentDues, onAdd, onRemove, onOpenReceipt }) {
-  const sorted = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+function DepositsTab({ deposits, students, classes, studentDues, onAdd, onRemove, onOpenReceipt }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [modeFilter, setModeFilter] = useState("all");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [receiptSearch, setReceiptSearch] = useState("");
+
   const byId = Object.fromEntries(students.map(s => [s.id, s]));
+
+  const sorted = [...deposits].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const filtered = sorted.filter(d => {
+    const st = byId[d.studentId];
+    const q = search.trim().toLowerCase();
+    if (q && !(st && st.name.toLowerCase().includes(q))) return false;
+    if (classFilter !== "all" && !(st && String(st.class) === classFilter)) return false;
+    if (modeFilter !== "all" && d.mode !== modeFilter) return false;
+    if (fromDate && d.date < fromDate) return false;
+    if (toDate && d.date > toDate) return false;
+    if (receiptSearch.trim() && !getReceiptNo(d.id).toLowerCase().includes(receiptSearch.trim().toLowerCase())) return false;
+    return true;
+  });
+  const isFiltered = search || classFilter !== "all" || modeFilter !== "all" || fromDate || toDate || receiptSearch;
+
   return (
     <div>
       <SectionHeader eyebrow="Fee Deposits" title="Deposits Log" action={
@@ -1320,24 +1345,67 @@ function DepositsTab({ deposits, students, studentDues, onAdd, onRemove, onOpenR
           <Plus size={15} /> Record deposit
         </button>
       } />
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[150px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Student Name</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>Class {c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Mode</div>
+            <select className={inputCls} style={inputStyle} value={modeFilter} onChange={e => setModeFilter(e.target.value)}>
+              <option value="all">All Modes</option>
+              {PAYMENT_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">From</div>
+            <input type="date" className={inputCls} style={inputStyle} value={fromDate} onChange={e => setFromDate(e.target.value)} />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">To</div>
+            <input type="date" className={inputCls} style={inputStyle} value={toDate} onChange={e => setToDate(e.target.value)} />
+          </div>
+          <div className="min-w-[130px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Receipt No.</div>
+            <input className={inputCls} style={inputStyle} value={receiptSearch} onChange={e => setReceiptSearch(e.target.value)} placeholder="e.g. A1B2C3" />
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setModeFilter("all"); setFromDate(""); setToDate(""); setReceiptSearch(""); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
       <Card>
-        {sorted.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No fee deposits recorded yet.</div>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{sorted.length === 0 ? "No fee deposits recorded yet." : "No deposits match these filters."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date", "Student", "Class", "Amount Paid", "Write-off", "Mode", "Reference", "Remarks", "Actions"].map(h => (
+                {["Receipt No", "Date", "Student", "Class", "Amount Paid", "Write-off", "Mode", "Reference", "Remarks", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {sorted.map(d => {
+              {filtered.map(d => {
                 const st = byId[d.studentId];
                 const ref = d.utr || d.chequeNumber || "—";
                 return (
                   <tr key={d.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-[10px] font-mono text-[#9C8F6E]">#{getReceiptNo(d.id)}</td>
                     <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{d.date}</td>
                     <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{st ? st.class : "—"}</td>
@@ -1362,9 +1430,23 @@ function DepositsTab({ deposits, students, studentDues, onAdd, onRemove, onOpenR
   );
 }
 
-function ChargesTab({ charges, students, onAdd, onRemove }) {
-  const sorted = [...charges].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+function ChargesTab({ charges, students, classes, onAdd, onRemove, onOpenReceipt }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [monthFilter, setMonthFilter] = useState("");
+
   const byId = Object.fromEntries(students.map(s => [s.id, s]));
+  const sorted = [...charges].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const filtered = sorted.filter(c => {
+    const st = byId[c.studentId];
+    const q = search.trim().toLowerCase();
+    if (q && !(st && st.name.toLowerCase().includes(q))) return false;
+    if (classFilter !== "all" && !(st && String(st.class) === classFilter)) return false;
+    if (monthFilter && c.month !== monthFilter) return false;
+    return true;
+  });
+  const isFiltered = search || classFilter !== "all" || monthFilter;
+
   return (
     <div>
       <SectionHeader eyebrow="Ad-hoc Billing" title="Additional Charges" action={
@@ -1373,30 +1455,63 @@ function ChargesTab({ charges, students, onAdd, onRemove }) {
         </button>
       } />
       <div className="text-sm text-[#6E6650] mb-4">Every extra charge — exam fee, material cost, late fee, anything outside the regular tuition — logged here with who, when, how much, and why. It automatically adds to that student's balance and shows up in Dues.</div>
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[150px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Student Name</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>Class {c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Month</div>
+            <input type="month" className={inputCls} style={inputStyle} value={monthFilter} onChange={e => setMonthFilter(e.target.value)} />
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setMonthFilter(""); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
       <Card>
-        {sorted.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No additional charges logged yet.</div>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{sorted.length === 0 ? "No additional charges logged yet." : "No charges match these filters."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date Added", "Student", "Class", "For Month", "Amount", "Remarks", "Actions"].map(h => (
+                {["Charge ID", "Date Added", "Student", "Class", "For Month", "Amount", "Remarks", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {sorted.map(c => {
+              {filtered.map(c => {
                 const st = byId[c.studentId];
                 return (
                   <tr key={c.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-[10px] font-mono">
+                      <button onClick={() => onOpenReceipt(c)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{c.chargeId || `CHG-${shortId(c.id)}`}</button>
+                    </td>
                     <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{c.date}</td>
                     <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{st ? st.class : "—"}</td>
                     <td className="px-4 py-2.5 text-xs">{monthLabel(c.month)}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#B8862B]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(c.amount)}</td>
                     <td className="px-4 py-2.5 text-xs text-[#6E6650]">{c.remarks || "—"}</td>
-                    <td className="px-4 py-2.5 text-right"><button onClick={() => onRemove(c.id)} className="text-xs text-[#A63D2F] underline">Delete</button></td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onOpenReceipt(c)} className="flex items-center gap-1 text-xs text-[#12312B] underline mr-3 inline-flex"><Printer size={12} /> Receipt</button>
+                      <button onClick={() => onRemove(c.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
+                    </td>
                   </tr>
                 );
               })}
@@ -1408,72 +1523,98 @@ function ChargesTab({ charges, students, onAdd, onRemove }) {
   );
 }
 
-function ExpensesTab({ expenses, totalExpenses, thisMonthExpenses, expensesByCategory, curMonth, onAdd, onRemove }) {
+// ============================================================================
+// EXPENSES — a dedicated log of money going OUT of the center (rent, salary,
+// materials, etc). Each expense gets a unique EXP-XXXXXX id and a printable
+// receipt, mirroring how deposits and charges work. Feeds the Cash/Online
+// balance tiles on the Dashboard and the master Center Statement.
+// ============================================================================
+function ExpensesTab({ expenses, onAdd, onRemove, onOpenReceipt }) {
+  const [search, setSearch] = useState("");
+  const [modeFilter, setModeFilter] = useState("all");
+  const [monthFilter, setMonthFilter] = useState("");
+
   const sorted = [...expenses].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-  const maxCat = Math.max(1, ...expensesByCategory.map(c => c.total));
+  const filtered = sorted.filter(e => {
+    const q = search.trim().toLowerCase();
+    if (q) {
+      const haystack = [e.category, e.expenseId, e.remarks].filter(Boolean).join(" ").toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    if (modeFilter !== "all" && (e.mode || "Cash") !== modeFilter) return false;
+    if (monthFilter && (e.date || "").slice(0, 7) !== monthFilter) return false;
+    return true;
+  });
+  const isFiltered = search || modeFilter !== "all" || monthFilter;
+  const totalFiltered = round2(filtered.reduce((a, e) => a + Number(e.amount || 0), 0));
+
   return (
     <div>
-      <SectionHeader eyebrow="Center Overheads" title="Expenses Log" action={
+      <SectionHeader eyebrow="Money Out" title="Expenses Log" action={
         <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
           <Plus size={15} /> Add Expense
         </button>
       } />
-      <div className="text-sm text-[#6E6650] mb-4">Rent, salaries, utilities, marketing, and every other rupee spent running the center — logged here so you can see true outflow against fee collections.</div>
+      <div className="text-sm text-[#6E6650] mb-4">Every expense the center pays out — rent, salaries, materials, maintenance, anything — logged here with its own Expense ID and a printable receipt. Feeds directly into the Cash / Online balance tiles on the Dashboard.</div>
 
-      <div className="grid grid-cols-3 gap-4 mb-5">
-        <Card className="p-4">
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-2">Total Expenses</div>
-          <div style={{ fontFamily: "'Zilla Slab', serif", color: "#A63D2F" }} className="text-3xl font-bold">{fmtINR(totalExpenses)}</div>
-          <div className="text-xs text-[#9C8F6E] mt-1">All-time, across every category</div>
-        </Card>
-        <Card className="p-4">
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-2">Expenses This Month</div>
-          <div style={{ fontFamily: "'Zilla Slab', serif", color: "#B8862B" }} className="text-3xl font-bold">{fmtINR(thisMonthExpenses)}</div>
-          <div className="text-xs text-[#9C8F6E] mt-1">{monthLabel(curMonth)}</div>
-        </Card>
-        <Card className="p-4">
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-2">Breakdown by Category</div>
-          {expensesByCategory.length === 0 ? (
-            <div className="text-xs text-[#9C8F6E] mt-2">No expenses logged yet.</div>
-          ) : (
-            <div className="space-y-1.5 mt-1.5">
-              {expensesByCategory.map(c => (
-                <div key={c.category} className="flex items-center gap-2">
-                  <span className="text-[10px] w-24 truncate text-[#6E6650]">{c.category}</span>
-                  <div className="flex-1 bg-[#F0EAD6] rounded-sm h-2.5 overflow-hidden">
-                    <div style={{ width: `${(c.total / maxCat) * 100}%`, background: "#A63D2F" }} className="h-full" />
-                  </div>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="text-[10px] w-14 text-right">{fmtINR(c.total)}</span>
-                </div>
-              ))}
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[180px] flex-1">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Category, Expense ID, or remarks…" />
             </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Payment Mode</div>
+            <select className={inputCls} style={inputStyle} value={modeFilter} onChange={e => setModeFilter(e.target.value)}>
+              <option value="all">All Modes</option>
+              {PAYMENT_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Month</div>
+            <input type="month" className={inputCls} style={inputStyle} value={monthFilter} onChange={e => setMonthFilter(e.target.value)} />
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setModeFilter("all"); setMonthFilter(""); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
           )}
-        </Card>
-      </div>
+        </div>
+      </Card>
+
+      {isFiltered && (
+        <div className="text-xs text-[#6E6650] mb-3">Showing {filtered.length} of {expenses.length} expenses · Total: <strong className="text-[#A63D2F]">{fmtINR(totalFiltered)}</strong></div>
+      )}
 
       <Card>
-        {sorted.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No expenses logged yet.</div>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{sorted.length === 0 ? "No expenses logged yet." : "No expenses match these filters."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date", "Category", "Amount", "Payment Mode", "Paid To", "Reference", "Remarks", "Actions"].map(h => (
+                {["Expense ID", "Date", "Category", "Amount", "Mode", "Reference / UTR", "Remarks", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {sorted.map(e => (
+              {filtered.map(e => (
                 <tr key={e.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-[10px] font-mono">
+                    <button onClick={() => onOpenReceipt(e)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{e.expenseId || `EXP-${shortId(e.id)}`}</button>
+                  </td>
                   <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{e.date}</td>
-                  <td className="px-4 py-2.5 font-medium">{e.category}</td>
+                  <td className="px-4 py-2.5 font-medium">{e.category || "—"}</td>
                   <td className="px-4 py-2.5 font-semibold text-[#A63D2F]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(e.amount)}</td>
-                  <td className="px-4 py-2.5 text-xs">{e.paymentMode}</td>
-                  <td className="px-4 py-2.5 text-xs text-[#6E6650]">{e.paidTo || "—"}</td>
-                  <td className="px-4 py-2.5 text-xs text-[#6E6650] font-mono">{e.referenceNumber || "—"}</td>
+                  <td className="px-4 py-2.5 text-xs">{e.mode || "Cash"}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{e.refNumber || "—"}</td>
                   <td className="px-4 py-2.5 text-xs text-[#6E6650]">{e.remarks || "—"}</td>
-                  <td className="px-4 py-2.5 text-right"><button onClick={() => onRemove(e.id)} className="text-xs text-[#A63D2F] underline">Delete</button></td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onOpenReceipt(e)} className="flex items-center gap-1 text-xs text-[#12312B] underline mr-3 inline-flex"><Printer size={12} /> Receipt</button>
+                    <button onClick={() => onRemove(e.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -1484,7 +1625,29 @@ function ExpensesTab({ expenses, totalExpenses, thisMonthExpenses, expensesByCat
   );
 }
 
-function DuesTab({ rows, totalOutstanding, students, studentDues }) {
+const DUE_TYPE_OPTIONS = [
+  { value: "opening", label: "Carried Forward" },
+  { value: "monthly_fee", label: "Current Month Tuition" },
+  { value: "extra_charge", label: "Additional Charge" },
+];
+
+function DuesTab({ rows, totalOutstanding, students, studentDues, classes }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+
+  const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return rows.filter(r => {
+      if (q && !r.name.toLowerCase().includes(q)) return false;
+      if (classFilter !== "all" && String(r.cls) !== classFilter) return false;
+      if (typeFilter !== "all" && r.type !== typeFilter) return false;
+      return true;
+    });
+  }, [rows, search, classFilter, typeFilter]);
+
+  const isFiltered = search || classFilter !== "all" || typeFilter !== "all";
+
   return (
     <div>
       <SectionHeader eyebrow="Outstanding Dues" title="Pending Dues Ledger" />
@@ -1515,21 +1678,51 @@ function DuesTab({ rows, totalOutstanding, students, studentDues }) {
         </div>
       </Card>
 
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[160px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search Student</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>Class {c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Due Type</div>
+            <select className={inputCls} style={inputStyle} value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
+              <option value="all">All Types</option>
+              {DUE_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setTypeFilter("all"); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
       <Card>
-        {rows.length === 0 ? (
-          <div className="p-8 text-center text-sm text-[#9C8F6E]">No dues pending — active or carried forward.</div>
+        {filteredRows.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{rows.length === 0 ? "No dues pending — active or carried forward." : "No dues match these filters."}</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Student", "Class", "Line Item", "Expected", "Paid", "Outstanding", "Status"].map(h => (
+                {["Charge ID", "Student", "Class", "Line Item", "Expected", "Paid", "Outstanding", "Status"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => (
+              {filteredRows.map((r, i) => (
                 <tr key={i} className="ledger-row">
+                  <td className="px-4 py-2.5 text-[10px] font-mono text-[#9C8F6E]">{r.chargeId}</td>
                   <td className="px-4 py-2.5 font-medium">{r.name}</td>
                   <td className="px-4 py-2.5 font-semibold text-[#12312B]">{r.cls}</td>
                   <td className="px-4 py-2.5 text-xs">{r.label}</td>
@@ -1560,47 +1753,23 @@ const TXN_TYPE_META = {
   extra_charge: { label: "Additional Charge", tone: "due" },
   payment: { label: "Payment Received", tone: "paid" },
   writeoff: { label: "Write-off / Discount", tone: "break" },
-  expense: { label: "Center Expense", tone: "overdue" },
+  expense: { label: "Expense", tone: "overdue" },
 };
 
-const MODE_FILTER_OPTIONS = [
-  { value: "all", label: "All Modes" },
-  { value: "cash", label: "Cash Only" },
-  { value: "online", label: "Online / Bank Only" },
-  { value: "Cash", label: "Cash" },
-  { value: "UPI", label: "UPI" },
-  { value: "Bank Transfer", label: "Bank Transfer" },
-  { value: "Cheque", label: "Cheque" },
-];
-
-function transactionMatchesModeFilter(t, modeFilter) {
-  if (modeFilter === "all") return true;
-  const m = t.mode; // only payment (credit) and expense (debit) lines carry a payment mode
-  if (!m) return false;
-  if (modeFilter === "cash") return m === "Cash";
-  if (modeFilter === "online") return ONLINE_MODES.includes(m);
-  return m === modeFilter;
-}
-
-function CenterStatementTab({ transactions, totals, students, classes, onViewReceipt, netCashflow }) {
+function CenterStatementTab({ transactions, totals, students, classes, onViewReceipt, onViewCharge, onViewExpense }) {
   const statementRef = useRef();
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [classFilter, setClassFilter] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
-  const [modeFilter, setModeFilter] = useState("all");
-  const [includeExpenses, setIncludeExpenses] = useState(true);
 
-  const scoped = includeExpenses ? transactions : transactions.filter(t => !t.isExpense);
-
-  const filtered = scoped.filter(t => {
+  const filtered = transactions.filter(t => {
     if (search && !t.studentName.toLowerCase().includes(search.trim().toLowerCase())) return false;
     if (typeFilter !== "all" && t.type !== typeFilter) return false;
-    if (classFilter !== "all" && !t.isExpense && String(t.studentClass) !== classFilter) return false;
+    if (classFilter !== "all" && String(t.studentClass) !== classFilter) return false;
     if (fromDate && t.date < fromDate) return false;
     if (toDate && t.date > toDate) return false;
-    if (!transactionMatchesModeFilter(t, modeFilter)) return false;
     return true;
   });
 
@@ -1610,7 +1779,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
   };
 
   const generatedOn = todayStr();
-  const isFiltered = search || typeFilter !== "all" || classFilter !== "all" || fromDate || toDate || modeFilter !== "all" || !includeExpenses;
+  const isFiltered = search || typeFilter !== "all" || classFilter !== "all" || fromDate || toDate;
 
   const handlePrint = () => {
     const printContent = statementRef.current.innerHTML;
@@ -1665,14 +1834,18 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
         </Card>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 mb-5">
-        <Card className="p-3.5" style={{ borderLeft: "3px solid #A63D2F" }}>
-          <div className="text-[10px] uppercase text-[#A63D2F] font-mono">Total Center Expenses</div>
-          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#A63D2F]">{fmtINR(totals.expenses)}</div>
+      <div className="grid grid-cols-3 gap-3 mb-5">
+        <Card className="p-3.5" style={{ borderLeft: "3px solid #3F6B52" }}>
+          <div className="text-[10px] uppercase text-[#3F6B52] font-mono flex items-center gap-1"><Banknote size={11} /> Cash Balance</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#3F6B52]">{fmtINR(totals.cashBalance)}</div>
         </Card>
-        <Card className="p-3.5" style={{ borderLeft: `3px solid ${netCashflow >= 0 ? "#3F6B52" : "#A63D2F"}` }}>
-          <div className="text-[10px] uppercase font-mono" style={{ color: netCashflow >= 0 ? "#3F6B52" : "#A63D2F" }}>Net Cashflow (Collected − Expenses)</div>
-          <div style={{ fontFamily: "'Zilla Slab', serif", color: netCashflow >= 0 ? "#3F6B52" : "#A63D2F" }} className="text-xl font-bold">{fmtINR(netCashflow)}</div>
+        <Card className="p-3.5" style={{ borderLeft: "3px solid #4A7B9D" }}>
+          <div className="text-[10px] uppercase text-[#2B526C] font-mono flex items-center gap-1"><Landmark size={11} /> Online Balance</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#2B526C]">{fmtINR(totals.onlineBalance)}</div>
+        </Card>
+        <Card className="p-3.5" style={{ borderLeft: "3px solid #B8862B" }}>
+          <div className="text-[10px] uppercase text-[#8A6420] font-mono">Total Expenses</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#8A6420]">{fmtINR(totals.expenses)}</div>
         </Card>
       </div>
 
@@ -1693,12 +1866,6 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
             </select>
           </div>
           <div>
-            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Payment Mode</div>
-            <select className={inputCls} style={inputStyle} value={modeFilter} onChange={e => setModeFilter(e.target.value)}>
-              {MODE_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
-          <div>
             <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
             <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
               <option value="all">All Classes</option>
@@ -1713,17 +1880,10 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
             <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">To</div>
             <input type="date" className={inputCls} style={inputStyle} value={toDate} onChange={e => setToDate(e.target.value)} />
           </div>
-          <label className="flex items-center gap-1.5 text-xs font-medium pb-2.5 cursor-pointer select-none">
-            <input type="checkbox" checked={includeExpenses} onChange={e => setIncludeExpenses(e.target.checked)} />
-            Include Center Expenses
-          </label>
           {isFiltered && (
-            <button onClick={() => { setSearch(""); setTypeFilter("all"); setClassFilter("all"); setFromDate(""); setToDate(""); setModeFilter("all"); setIncludeExpenses(true); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+            <button onClick={() => { setSearch(""); setTypeFilter("all"); setClassFilter("all"); setFromDate(""); setToDate(""); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
           )}
         </div>
-        {modeFilter !== "all" && (
-          <div className="text-[10px] text-[#9C8F6E] mt-2">Payment-mode filters only apply to real cash movements (payments received & expenses paid) — tuition accrual and write-off lines carry no payment mode and are hidden while a specific mode is selected.</div>
-        )}
       </Card>
 
       <Card>
@@ -1738,7 +1898,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                  {["Date", "Student", "Class / Mode", "Description", "Type", "Receipt No", "Debit", "Credit"].map(h => (
+                  {["Charge ID", "Date", "Charges Month", "Student", "Class", "Description", "Remarks", "Type", "Receipt No", "Reference / UTR", "Debit", "Credit"].map(h => (
                     <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                   ))}
                 </tr>
@@ -1747,15 +1907,25 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
                 {filtered.map((t, i) => {
                   const meta = TXN_TYPE_META[t.type] || { label: t.type, tone: "due" };
                   const hasReceipt = t.kind === "credit" && (t.type === "payment" || t.type === "writeoff");
+                  const isChargeLine = t.kind === "debit" && (t.type === "opening" || t.type === "monthly_fee" || t.type === "extra_charge") && onViewCharge;
+                  const isExpenseLine = t.type === "expense" && onViewExpense;
                   return (
-                    <tr key={t.id + "-" + i} className={"ledger-row" + (t.isExpense ? " bg-[#F7E7E3]" : "")}>
-                      <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{t.date}</td>
-                      <td className="px-4 py-2.5 font-medium">
-                        {t.studentName}
-                        {!t.isExpense && t.studentStatus !== "active" && <span className="ml-1.5 text-[10px] text-[#4A7B9D]">({t.studentStatus === "dropped" ? "dropped" : "on break"})</span>}
+                    <tr key={t.id + "-" + i} className="ledger-row">
+                      <td className="px-4 py-2.5 text-[10px] font-mono">
+                        {isChargeLine ? (
+                          <button onClick={() => onViewCharge(t)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{t.chargeId || "—"}</button>
+                        ) : isExpenseLine ? (
+                          <button onClick={() => onViewExpense(t)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{t.chargeId || "—"}</button>
+                        ) : (
+                          <span className="text-[#9C8F6E]">{t.chargeId || "—"}</span>
+                        )}
                       </td>
-                      <td className="px-4 py-2.5 font-semibold text-[#12312B]">{t.isExpense ? (t.mode || "—") : t.studentClass}</td>
+                      <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{t.date}</td>
+                      <td className="px-4 py-2.5 text-xs font-mono">{t.month ? monthLabel(t.month) : "—"}</td>
+                      <td className="px-4 py-2.5 font-medium">{t.studentName}{t.studentStatus !== "active" && <span className="ml-1.5 text-[10px] text-[#4A7B9D]">({t.studentStatus === "dropped" ? "dropped" : "on break"})</span>}</td>
+                      <td className="px-4 py-2.5 font-semibold text-[#12312B]">{t.studentClass}</td>
                       <td className="px-4 py-2.5 text-xs">{t.label}</td>
+                      <td className="px-4 py-2.5 text-xs text-[#6E6650]">{t.remarks || "—"}</td>
                       <td className="px-4 py-2.5"><Stamp text={meta.label} tone={meta.tone} /></td>
                       <td className="px-4 py-2.5 font-mono">
                         {hasReceipt ? (
@@ -1766,6 +1936,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
                           <span className="text-[#D8CFB8]">—</span>
                         )}
                       </td>
+                      <td className="px-4 py-2.5 text-xs text-[#6E6650]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{t.ref || "—"}</td>
                       <td className="px-4 py-2.5 font-mono text-[#A63D2F]">{t.kind === "debit" ? fmtINR(t.amount) : ""}</td>
                       <td className="px-4 py-2.5 font-mono text-[#3F6B52]">{t.kind === "credit" ? fmtINR(t.amount) : ""}</td>
                     </tr>
@@ -1774,7 +1945,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
               </tbody>
               <tfoot>
                 <tr style={{ borderTop: "1.5px solid #26231D" }}>
-                  <td colSpan={6} className="px-4 py-2.5 text-right text-xs font-semibold text-[#6E6650]">Filtered Totals:</td>
+                  <td colSpan={10} className="px-4 py-2.5 text-right text-xs font-semibold text-[#6E6650]">Filtered Totals:</td>
                   <td className="px-4 py-2.5 font-mono font-bold text-[#A63D2F]">{fmtINR(filteredTotals.debit)}</td>
                   <td className="px-4 py-2.5 font-mono font-bold text-[#3F6B52]">{fmtINR(filteredTotals.credit)}</td>
                 </tr>
@@ -1883,7 +2054,7 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
               {trashedExpenses.map(e => (
                 <tr key={e.id} className="ledger-row">
                   <td className="px-4 py-2.5 text-xs font-mono">{e.date}</td>
-                  <td className="px-4 py-2.5 font-medium">{e.category}</td>
+                  <td className="px-4 py-2.5 font-medium">{e.category || "—"}</td>
                   <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#A63D2F]">{fmtINR(e.amount)}</td>
                   <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {e.deletedAt || ""}</td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">
@@ -1945,6 +2116,9 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
   const [cls, setCls] = useState(initial?.class || classes[0] || "10");
   const [batches, setBatches] = useState(initial?.batches || []);
   const [phone, setPhone] = useState(initial?.phone || "");
+  const [fatherName, setFatherName] = useState(initial?.fatherName || "");
+  const [guardianPhone, setGuardianPhone] = useState(initial?.guardianPhone || "");
+  const [address, setAddress] = useState(initial?.address || "");
   const [admissionMonth, setAdmissionMonth] = useState(initial?.admissionMonth || currentMonthKey());
   const [monthlyDiscount, setMonthlyDiscount] = useState(initial?.monthlyDiscount || 0);
   const [previousDues, setPreviousDues] = useState(initial?.previousDues || 0);
@@ -1960,14 +2134,18 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
     if (initial?.batchHistory && initial.batchHistory.length) baseHistory[0] = { ...baseHistory[0], batches };
     onSave({
       ...initial, id: initial?.id, name: name.trim(), class: cls, batches, batchHistory: baseHistory,
-      phone: phone.trim(), admissionMonth, monthlyDiscount: Number(monthlyDiscount) || 0,
+      phone: phone.trim(), fatherName: fatherName.trim(), guardianPhone: guardianPhone.trim(), address: address.trim(),
+      admissionMonth, monthlyDiscount: Number(monthlyDiscount) || 0,
       previousDues: Number(previousDues) || 0, status,
     });
   }
 
   return (
     <Modal title={initial ? "Edit Student Details" : "Add New Student"} onClose={onClose}>
-      <Field label="Full Name"><input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Rahul Sharma" /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Full Name"><input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Rahul Sharma" /></Field>
+        <Field label="Father's Name"><input className={inputCls} style={inputStyle} value={fatherName} onChange={e => setFatherName(e.target.value)} placeholder="e.g. Suresh Sharma" /></Field>
+      </div>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Class">
           <select className={inputCls} style={inputStyle} value={cls} onChange={e => setCls(e.target.value)}>
@@ -1978,8 +2156,10 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
       </div>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Phone / WhatsApp Number"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit phone number" /></Field>
-        <Field label="Monthly Concession / Discount (₹)"><input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} placeholder="0" /></Field>
+        <Field label="Guardian Phone Number"><input className={inputCls} style={inputStyle} value={guardianPhone} onChange={e => setGuardianPhone(e.target.value)} placeholder="Alternate contact (optional)" /></Field>
       </div>
+      <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="House / street / area / city" /></Field>
+      <Field label="Monthly Concession / Discount (₹)"><input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} placeholder="0" /></Field>
       <Field label="Opening Balance / Legacy Carried Dues (₹)">
         <input type="number" className={inputCls} style={inputStyle} value={previousDues} onChange={e => setPreviousDues(e.target.value)} placeholder="0" />
         <div className="text-[10px] text-[#9C8F6E] mt-1">Only for a one-time starting balance (e.g. migrating from a paper register). For anything ongoing, use "Add Charge" instead — it keeps a dated log.</div>
@@ -2168,12 +2348,31 @@ function AcademicHistoryModal({ student, onClose }) {
   );
 }
 
-function AddChargeModal({ students, initialStudent, curMonth, onClose, onSave }) {
+function AddChargeModal({ students, charges, initialStudent, curMonth, onClose, onSave }) {
   const [studentId, setStudentId] = useState(initialStudent?.id || students[0]?.id || "");
+  const [studentSearch, setStudentSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [month, setMonth] = useState(curMonth);
   const [amount, setAmount] = useState("");
   const [remarks, setRemarks] = useState("");
   const [date, setDate] = useState(todayStr());
+
+  const student = students.find(s => s.id === studentId);
+  const classOptions = useMemo(() => Array.from(new Set(students.map(s => s.class))).sort(), [students]);
+  const filteredStudents = useMemo(() => {
+    const q = studentSearch.trim().toLowerCase();
+    return students.filter(s => {
+      if (classFilter !== "all" && String(s.class) !== classFilter) return false;
+      if (q && !((s.name || "").toLowerCase().includes(q) || (s.phone || "").toLowerCase().includes(q))) return false;
+      return true;
+    });
+  }, [students, studentSearch, classFilter]);
+
+  const recentChargesForStudent = useMemo(() => {
+    if (!studentId || !charges) return [];
+    return charges.filter(c => c.studentId === studentId).sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 5);
+  }, [charges, studentId]);
 
   function submit() {
     if (!studentId || !amount) return;
@@ -2183,11 +2382,53 @@ function AddChargeModal({ students, initialStudent, curMonth, onClose, onSave })
   return (
     <Modal title="Add Additional Charge" onClose={onClose}>
       <div className="text-xs text-[#6E6650] mb-3">Use this for anything outside regular tuition — exam fee, study material, late fee, damaged equipment, etc. It's logged permanently with a date and remark, and adds straight to the student's balance.</div>
+
       <Field label="Student">
-        <select className={inputCls} style={inputStyle} value={studentId} onChange={e => setStudentId(e.target.value)}>
-          {students.map(s => <option key={s.id} value={s.id}>{s.name} — Class {s.class}</option>)}
-        </select>
+        <div className="relative">
+          <div className="flex items-center border rounded-sm bg-white px-3 py-2 cursor-pointer" style={inputStyle} onClick={() => setPickerOpen(o => !o)}>
+            <Search size={13} className="text-[#9C8F6E] mr-2 shrink-0" />
+            <span className="text-sm flex-1 truncate">{student ? `${student.name} — Class ${student.class}${student.phone ? " · " + student.phone : ""}` : "Search by name, class, or phone…"}</span>
+          </div>
+          {pickerOpen && (
+            <div className="absolute z-10 mt-1 w-full bg-white border rounded-sm shadow-lg max-h-72 overflow-y-auto" style={{ borderColor: "#D8CFB8" }}>
+              <div className="p-2 sticky top-0 bg-white border-b flex gap-2" style={{ borderColor: "#EEE7D2" }}>
+                <input autoFocus className={inputCls} style={inputStyle} value={studentSearch} onChange={e => setStudentSearch(e.target.value)} placeholder="Type name or phone…" />
+                <select className={inputCls} style={{ ...inputStyle, width: "auto" }} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+                  <option value="all">All Classes</option>
+                  {classOptions.map(c => <option key={c} value={c}>Class {c}</option>)}
+                </select>
+              </div>
+              {filteredStudents.length === 0 ? (
+                <div className="p-3 text-xs text-[#9C8F6E] text-center">No students match.</div>
+              ) : (
+                filteredStudents.map(s => (
+                  <button key={s.id} type="button" onClick={() => { setStudentId(s.id); setPickerOpen(false); setStudentSearch(""); }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#F5F0E1] flex items-center justify-between"
+                    style={{ background: s.id === studentId ? "#F5F0E1" : "white" }}>
+                    <span>{s.name} <span className="text-xs text-[#9C8F6E]">— Class {s.class}</span></span>
+                    <span className="text-xs text-[#9C8F6E] font-mono">{s.phone || ""}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </div>
       </Field>
+
+      {student && recentChargesForStudent.length > 0 && (
+        <div className="mb-3 p-2.5 rounded-sm border bg-white text-xs" style={{ borderColor: "#D8CFB8" }}>
+          <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1.5">Existing charges for {student.name}</div>
+          <div className="space-y-1">
+            {recentChargesForStudent.map(c => (
+              <div key={c.id} className="flex items-center justify-between">
+                <span className="text-[#6E6650]">{c.chargeId || `CHG-${shortId(c.id)}`} · {c.date} · {c.remarks || monthLabel(c.month)}</span>
+                <span className="font-mono font-semibold text-[#B8862B]">{fmtINR(c.amount)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         <Field label="For Month"><input type="month" className={inputCls} style={inputStyle} value={month} onChange={e => setMonth(e.target.value)} /></Field>
         <Field label="Date Added"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
@@ -2201,74 +2442,6 @@ function AddChargeModal({ students, initialStudent, curMonth, onClose, onSave })
   );
 }
 
-function AddExpenseModal({ onClose, onSave }) {
-  const [date, setDate] = useState(todayStr());
-  const [amount, setAmount] = useState("");
-  const [category, setCategory] = useState(EXPENSE_CATEGORIES[0]);
-  const [paymentMode, setPaymentMode] = useState("Cash");
-  const [referenceNumber, setReferenceNumber] = useState("");
-  const [paidTo, setPaidTo] = useState("");
-  const [remarks, setRemarks] = useState("");
-  const [touched, setTouched] = useState(false);
-
-  const isValid = date && Number(amount) > 0 && category && paymentMode;
-
-  function submit() {
-    setTouched(true);
-    if (!isValid) return;
-    onSave({
-      date, amount: Number(amount), category, paymentMode,
-      referenceNumber: paymentMode !== "Cash" ? referenceNumber.trim() : "",
-      paidTo: paidTo.trim(), remarks: remarks.trim(),
-    });
-  }
-
-  return (
-    <Modal title="Add Center Expense" onClose={onClose}>
-      <div className="text-xs text-[#6E6650] mb-3">Rent, salaries, utilities, marketing, maintenance — anything spent running the center. Logged separately from student billing so you can track true outflow.</div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
-        <Field label="Amount (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" /></Field>
-      </div>
-
-      <Field label="Category">
-        <select className={inputCls} style={inputStyle} value={category} onChange={e => setCategory(e.target.value)}>
-          {EXPENSE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-      </Field>
-
-      <Field label="Payment Mode">
-        <div className="flex gap-2 flex-wrap">
-          {PAYMENT_MODES.map(m => (
-            <button key={m} type="button" onClick={() => setPaymentMode(m)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
-              style={{ background: paymentMode === m ? "#12312B" : "white", color: paymentMode === m ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
-              {m}
-            </button>
-          ))}
-        </div>
-      </Field>
-
-      {paymentMode !== "Cash" && (
-        <Field label="UTR / Reference Number (optional)"><input className={inputCls} style={inputStyle} value={referenceNumber} onChange={e => setReferenceNumber(e.target.value)} placeholder="e.g. 402913827461" /></Field>
-      )}
-
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Paid To (optional)"><input className={inputCls} style={inputStyle} value={paidTo} onChange={e => setPaidTo(e.target.value)} placeholder="e.g. Landlord, Vendor name" /></Field>
-        <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any note" /></Field>
-      </div>
-
-      {touched && !isValid && (
-        <div className="text-xs text-[#A63D2F] mb-2">Please fill in a valid date, an amount greater than 0, a category, and a payment mode.</div>
-      )}
-
-      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        Add Expense
-      </button>
-    </Modal>
-  );
-}
-
 // ============================================================================
 // STUDENT STATEMENT — a bank-style "account statement" of every transaction
 // (tuition accrual, ad-hoc charges, deposits, write-offs) for one student,
@@ -2276,7 +2449,7 @@ function AddExpenseModal({ onClose, onSave }) {
 // Payment rows show a Receipt No that links straight to that deposit's
 // official receipt (via onViewReceipt), so nothing has to be looked up by hand.
 // ============================================================================
-function StudentStatementModal({ student, ledger, onClose, onViewReceipt }) {
+function StudentStatementModal({ student, ledger, onClose, onViewReceipt, onViewCharge }) {
   const statementRef = useRef();
   if (!ledger) return null;
 
@@ -2350,7 +2523,7 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt }) {
           <table className="w-full text-xs">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Date", "Description", "Receipt No", "Debit", "Credit", "Balance"].map(h => (
+                {["Charge ID", "Date", "Charges Month", "Description", "Remarks", "Receipt No", "Debit", "Credit", "Balance"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-3 py-2 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
@@ -2358,11 +2531,20 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt }) {
             <tbody>
               {ledger.timeline.map((l, i) => (
                 <tr key={i} className="ledger-row">
+                  <td className="px-3 py-2 font-mono">
+                    {l.kind === "debit" && onViewCharge && l.chargeId ? (
+                      <button onClick={() => onViewCharge(l)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{l.chargeId}</button>
+                    ) : (
+                      <span className="text-[#9C8F6E]">{l.chargeId || "—"}</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 font-mono">{l.date}</td>
+                  <td className="px-3 py-2 font-mono">{l.month ? monthLabel(l.month) : "—"}</td>
                   <td className="px-3 py-2">
                     {l.label}
                     {l.kind === "debit" && l.outstanding > 0 && <span className="ml-2"><Stamp text="Unpaid" tone="overdue" /></span>}
                   </td>
+                  <td className="px-3 py-2 text-[#6E6650]">{l.remarks || "—"}</td>
                   <td className="px-3 py-2 font-mono">
                     {l.kind === "credit" && (l.type === "payment" || l.type === "writeoff") ? (
                       onViewReceipt ? (
@@ -2403,7 +2585,14 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt }) {
 
 function DepositFormModal({ students, studentDues, onClose, onSave }) {
   const [studentId, setStudentId] = useState(students[0]?.id || "");
+  const [studentSearch, setStudentSearch] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const student = students.find(s => s.id === studentId);
+  const filteredStudents = useMemo(() => {
+    const q = studentSearch.trim().toLowerCase();
+    if (!q) return students;
+    return students.filter(s => (s.name || "").toLowerCase().includes(q) || String(s.class || "").toLowerCase().includes(q) || (s.phone || "").toLowerCase().includes(q));
+  }, [students, studentSearch]);
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayStr());
   const [mode, setMode] = useState("Cash");
@@ -2431,9 +2620,31 @@ function DepositFormModal({ students, studentDues, onClose, onSave }) {
   return (
     <Modal title="Record Payment / Receipt" onClose={onClose}>
       <Field label="Select Student">
-        <select className={inputCls} style={inputStyle} value={studentId} onChange={e => setStudentId(e.target.value)}>
-          {students.map(s => <option key={s.id} value={s.id}>{s.name} — Class {s.class} ({s.status || "active"})</option>)}
-        </select>
+        <div className="relative">
+          <div className="flex items-center border rounded-sm bg-white px-3 py-2 cursor-pointer" style={inputStyle} onClick={() => setPickerOpen(o => !o)}>
+            <Search size={13} className="text-[#9C8F6E] mr-2 shrink-0" />
+            <span className="text-sm flex-1 truncate">{student ? `${student.name} — Class ${student.class}${student.phone ? " · " + student.phone : ""}` : "Search by name, class, or phone…"}</span>
+          </div>
+          {pickerOpen && (
+            <div className="absolute z-10 mt-1 w-full bg-white border rounded-sm shadow-lg max-h-64 overflow-y-auto" style={{ borderColor: "#D8CFB8" }}>
+              <div className="p-2 sticky top-0 bg-white border-b" style={{ borderColor: "#EEE7D2" }}>
+                <input autoFocus className={inputCls} style={inputStyle} value={studentSearch} onChange={e => setStudentSearch(e.target.value)} placeholder="Type name, class, or phone…" />
+              </div>
+              {filteredStudents.length === 0 ? (
+                <div className="p-3 text-xs text-[#9C8F6E] text-center">No students match.</div>
+              ) : (
+                filteredStudents.map(s => (
+                  <button key={s.id} type="button" onClick={() => { setStudentId(s.id); setPickerOpen(false); setStudentSearch(""); }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#F5F0E1] flex items-center justify-between"
+                    style={{ background: s.id === studentId ? "#F5F0E1" : "white" }}>
+                    <span>{s.name} <span className="text-xs text-[#9C8F6E]">— Class {s.class}</span></span>
+                    <span className="text-xs text-[#9C8F6E] font-mono">{s.phone || ""}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </div>
       </Field>
       <div className="text-xs text-[#6E6650] mb-3">
         Current outstanding balance: <strong className={currentBalance > 0 ? "text-[#A63D2F]" : "text-[#3F6B52]"}>{fmtINR(currentBalance)}</strong>
@@ -2485,6 +2696,69 @@ function DepositFormModal({ students, studentDues, onClose, onSave }) {
 
       <button onClick={submit} disabled={!studentId || (!amount && !writeOffAmount)} className="w-full mt-1 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
         Record & Generate Receipt
+      </button>
+    </Modal>
+  );
+}
+
+// ============================================================================
+// EXPENSE FORM — captures a single outgoing payment (rent, salary, materials,
+// etc). Mirrors the Deposit form's payment-mode + reference/UTR pattern so
+// the two logs feel consistent, then hands off to addExpense() which stamps
+// a unique EXP-XXXXXX id and opens the printable receipt.
+// ============================================================================
+function ExpenseFormModal({ onClose, onSave }) {
+  const [category, setCategory] = useState("");
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [mode, setMode] = useState("Cash");
+  const [refNumber, setRefNumber] = useState("");
+  const [remarks, setRemarks] = useState("");
+
+  function submit() {
+    if (!category.trim() || !amount) return;
+    onSave({
+      category: category.trim(), amount: Number(amount) || 0, date, mode,
+      refNumber: mode !== "Cash" ? refNumber.trim() : "",
+      remarks: remarks.trim(),
+    });
+  }
+
+  return (
+    <Modal title="Add Expense" onClose={onClose}>
+      <div className="text-xs text-[#6E6650] mb-3">Log any money paid out by the center — rent, salaries, materials, maintenance, marketing, anything. It gets its own Expense ID and a printable receipt, and feeds the Cash / Online balance tiles on the Dashboard.</div>
+
+      <Field label="Category / Title">
+        <input list="expense-categories" className={inputCls} style={inputStyle} value={category} onChange={e => setCategory(e.target.value)} placeholder="e.g. Rent, Staff Salary, Stationery" />
+        <datalist id="expense-categories">
+          {EXPENSE_CATEGORIES.map(c => <option key={c} value={c} />)}
+        </datalist>
+      </Field>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Amount (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" /></Field>
+        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+      </div>
+
+      <Field label="Payment Mode">
+        <div className="flex gap-2 flex-wrap">
+          {PAYMENT_MODES.map(m => (
+            <button key={m} type="button" onClick={() => setMode(m)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+              style={{ background: mode === m ? "#12312B" : "white", color: mode === m ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {mode !== "Cash" && (
+        <Field label="Reference Number / UTR"><input className={inputCls} style={inputStyle} value={refNumber} onChange={e => setRefNumber(e.target.value)} placeholder="e.g. 402913827461 or cheque no." /></Field>
+      )}
+
+      <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any note for this expense" /></Field>
+
+      <button onClick={submit} disabled={!category.trim() || !amount} className="w-full mt-1 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Add Expense & Generate Receipt
       </button>
     </Modal>
   );
@@ -2614,6 +2888,139 @@ function ReceiptModal({ deposit, student, totalRemainingDue, onClose }) {
         <button onClick={handlePrint} className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Receipt</button>
         <button onClick={() => sendWhatsAppReceipt(deposit, student, totalRemainingDue)} className="flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#25D366] hover:bg-[#1DA851]"><Send size={15} /> Send to WhatsApp</button>
       </div>
+    </Modal>
+  );
+}
+
+// ============================================================================
+// EXPENSE RECEIPT — a dedicated printable receipt for a single expense, in
+// the same visual language as the fee Receipt/Statement so every printed
+// document from this app reads as one consistent record system.
+// ============================================================================
+function ExpenseReceiptModal({ expense, onClose }) {
+  const receiptRef = useRef();
+  const expenseId = expense.expenseId || `EXP-${shortId(expense.id)}`;
+
+  const handlePrint = () => {
+    const printContent = receiptRef.current.innerHTML;
+    const win = window.open("", "", "width=600,height=700");
+    win.document.write(`
+      <html>
+        <head>
+          <title>Expense Receipt - ${expenseId}</title>
+          <style>
+            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
+            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
+            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
+            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+            .bold { font-weight: bold; }
+            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+          </style>
+        </head>
+        <body><div class="receipt-box">${printContent}</div></body>
+      </html>
+    `);
+    win.document.close(); win.focus(); win.print(); win.close();
+  };
+
+  return (
+    <Modal title="Expense Receipt" onClose={onClose}>
+      <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
+        <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
+          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Expense Receipt</p>
+        </div>
+        <div className="space-y-2 text-xs">
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Expense ID: <strong className="text-[#12312B]">{expenseId}</strong></span>
+            <span>Date: <strong className="text-[#12312B]">{expense.date}</strong></span>
+          </div>
+          <div className="flex justify-between text-[#6E6650]"><span>Category:</span><strong className="text-[#12312B]">{expense.category || "—"}</strong></div>
+          <div className="flex justify-between text-[#6E6650]"><span>Payment Mode:</span><strong className="text-[#12312B]">{expense.mode || "Cash"}</strong></div>
+          {expense.refNumber && <div className="flex justify-between text-[#6E6650]"><span>Reference / UTR:</span><strong className="text-[#12312B]">{expense.refNumber}</strong></div>}
+          {expense.remarks && <div className="flex justify-between text-[#6E6650]"><span>Remarks:</span><strong className="text-[#12312B]">{expense.remarks}</strong></div>}
+
+          <div className="pt-3 mt-3 border-t-2 border-[#12312B]">
+            <div className="flex justify-between items-center text-sm mb-1">
+              <span className="font-bold">Amount Paid:</span>
+              <span className="font-bold text-[#A63D2F] text-lg" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(expense.amount)}</span>
+            </div>
+          </div>
+        </div>
+        <div className="text-center pt-3 mt-3 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
+          Status: EXPENSE RECORDED ✅ · Computer Generated Receipt
+        </div>
+      </div>
+      <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Receipt</button>
+    </Modal>
+  );
+}
+
+// ============================================================================
+// CHARGE RECEIPT — a printable receipt for any single debit line on a
+// student's ledger (opening balance, a month's tuition, or an ad-hoc
+// additional charge). Works straight off the ledger-line shape shared by
+// the Additional Charges log, the Student Statement, and the Center
+// Statement, so one receipt design covers all three entry points.
+// ============================================================================
+function ChargeReceiptModal({ line, student, onClose }) {
+  const receiptRef = useRef();
+  if (!line) return null;
+
+  const typeLabel = { opening: "Opening Balance (Carried Forward)", monthly_fee: "Tuition Fee", extra_charge: "Additional Charge" }[line.type] || "Charge";
+
+  const handlePrint = () => {
+    const printContent = receiptRef.current.innerHTML;
+    const win = window.open("", "", "width=600,height=700");
+    win.document.write(`
+      <html>
+        <head>
+          <title>Charge Receipt - ${line.chargeId || ""}</title>
+          <style>
+            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
+            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
+            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
+            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+            .bold { font-weight: bold; }
+            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+          </style>
+        </head>
+        <body><div class="receipt-box">${printContent}</div></body>
+      </html>
+    `);
+    win.document.close(); win.focus(); win.print(); win.close();
+  };
+
+  return (
+    <Modal title="Charge Receipt" onClose={onClose}>
+      <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
+        <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
+          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Charge Receipt — {typeLabel}</p>
+        </div>
+        <div className="space-y-2 text-xs">
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Charge ID: <strong className="text-[#12312B]">{line.chargeId}</strong></span>
+            <span>Date: <strong className="text-[#12312B]">{line.date}</strong></span>
+          </div>
+          <div className="flex justify-between text-[#6E6650]"><span>Student Name:</span><strong className="text-[#12312B]">{student ? student.name : "N/A"}</strong></div>
+          <div className="flex justify-between text-[#6E6650]"><span>Class:</span><strong className="text-[#12312B]">{student ? `Class ${student.class}` : "N/A"}</strong></div>
+          {line.month && <div className="flex justify-between text-[#6E6650]"><span>For Month:</span><strong className="text-[#12312B]">{monthLabel(line.month)}</strong></div>}
+          <div className="flex justify-between text-[#6E6650]"><span>Description:</span><strong className="text-[#12312B]">{line.label}</strong></div>
+          {line.remarks && <div className="flex justify-between text-[#6E6650]"><span>Remarks:</span><strong className="text-[#12312B]">{line.remarks}</strong></div>}
+
+          <div className="pt-3 mt-3 border-t-2 border-[#12312B]">
+            <div className="flex justify-between items-center text-sm mb-1">
+              <span className="font-bold">Charge Amount:</span>
+              <span className="font-bold text-[#B8862B] text-lg" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(line.amount)}</span>
+            </div>
+          </div>
+        </div>
+        <div className="text-center pt-3 mt-3 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
+          Computer Generated Receipt
+        </div>
+      </div>
+      <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Receipt</button>
     </Modal>
   );
 }
