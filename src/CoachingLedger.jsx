@@ -96,8 +96,41 @@ import {
 //  12. Student form gained a "Joining Date" field (type="date", optional).
 //      If left blank, it's auto-filled with today's date at save time
 //      (see submit() in StudentFormModal). Stored as `joiningDate` on the
-//      student record and shown (DD-MM-YYYY) in the Students Register
-//      expanded row and on the printed Joining Form.
+//      student record and shown in the Students Register expanded row and
+//      on the printed Joining Form.
+//
+// Changes made in this third update pass:
+//  13. Add Student → "Joining Date" field now visibly defaults to TODAY'S
+//      date the moment the form opens (not just silently at save time as
+//      before) — office staff see it pre-filled and can change it to
+//      backdate a student if needed; if they don't touch it, today's date
+//      is what gets saved (see the joiningDate useState in
+//      StudentFormModal).
+//  14. Student Statement → Description column no longer shows the small
+//      "Unpaid" stamp next to an outstanding charge line. The Debit /
+//      Credit / running Balance columns already show exactly what's owed,
+//      so the stamp was redundant clutter (see StudentStatementModal).
+//  15. Every date shown anywhere in the app now displays as "D Month
+//      YYYY" (e.g. "17 August 2026") instead of "DD-MM-YYYY" — this is a
+//      one-line change to the shared fmtDate() helper, so it applies
+//      everywhere at once: Students Register, Student/Center/Banking
+//      Statements, all receipts & slips, the Joining Form, Trash tab,
+//      credit/interest logs, everywhere. Storage format (YYYY-MM-DD),
+//      <input type="date"/"month">, filtering, and sorting are completely
+//      untouched — only the last-mile display formatter changed.
+//  16. Printable Statement (Student Statement, Center Statement, Banking
+//      Statement) — the "Print / Export" button used to clone the on-
+//      screen preview's HTML into a bare popup window that never loaded
+//      the app's Tailwind styling or fonts, so everything printed as
+//      unstyled black text with no layout, colors, or letterhead — even
+//      though the on-screen preview looked correct. Each of these three
+//      print windows now loads the same Google Fonts import and the
+//      Tailwind CDN the live app effectively relies on, plus a proper A4
+//      @page rule, a bordered letterhead document wrapper matching the
+//      Joining Form's professional look, and print-safe table rules (no
+//      row splitting across pages, repeating header). The on-screen
+//      preview markup itself is unchanged — only what the popup window
+//      loads before printing it changed.
 // ============================================================================
 
 // Admin Access Password
@@ -108,6 +141,8 @@ const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Zilla
 const DEFAULT_CLASSES = ["Nursery", "LKG", "UKG", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
 const DEFAULT_SUBJECTS = ["Mathematics", "Physics", "Chemistry", "Science", "Hindi", "English", "Social Studies", "Computer"];
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// Full month names, used only by fmtDate() for the "D Month YYYY" display format.
+const FULL_MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const PAYMENT_MODES = ["Cash", "UPI", "Bank Transfer", "Cheque"];
 const EXPENSE_CATEGORIES = ["Rent", "Electricity", "Staff Salary", "Stationery", "Maintenance", "Marketing", "Internet / Phone", "Furniture", "Miscellaneous"];
 
@@ -173,16 +208,19 @@ function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toS
 function todayStr() { return new Date().toISOString().slice(0, 10); }
 function nowStamp() { return new Date().toISOString(); }
 // Converts a stored YYYY-MM-DD (or full ISO datetime) string into the
-// DD-MM-YYYY format used for DISPLAY everywhere in the UI. Storage, form
-// inputs (type="date"/"month"), filters, and every string comparison in
-// this file keep using the original YYYY-MM-DD value untouched — only
-// what actually gets printed on screen / receipts / statements is routed
-// through this. Never store the output of this function.
+// "D Month YYYY" format (e.g. "17 August 2026") used for DISPLAY
+// everywhere in the UI. Storage, form inputs (type="date"/"month"),
+// filters, and every string comparison in this file keep using the
+// original YYYY-MM-DD value untouched — only what actually gets printed
+// on screen / receipts / statements is routed through this. Never store
+// the output of this function.
 function fmtDate(d) {
   if (!d) return d;
   const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return d;
-  return `${m[3]}-${m[2]}-${m[1]}`;
+  const monthIdx = Number(m[2]) - 1;
+  const monthName = FULL_MONTH_NAMES[monthIdx] || m[2];
+  return `${Number(m[3])} ${monthName} ${m[1]}`;
 }
 // Combines a transaction's chosen `date` (YYYY-MM-DD, what the user picked
 // on the form) with the actual time it was recorded (`createdAt`, a full
@@ -2587,27 +2625,35 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
 
   const handlePrint = () => {
     const printContent = statementRef.current.innerHTML;
-    const win = window.open("", "", "width=950,height=900");
+    const win = window.open("", "", "width=1100,height=900");
+    // Loads the same Tailwind utility classes + Google Fonts the live app
+    // uses, so the printed page renders exactly like the on-screen preview
+    // instead of the plain unstyled text a bare popup window would produce.
+    // Landscape A4, since this statement's table has many columns.
     win.document.write(`
       <html>
         <head>
           <title>Center Statement - Coaching Classes</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 24px; color: #12312B; }
-            .stmt-header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 12px; margin-bottom: 16px; }
-            table { width: 100%; border-collapse: collapse; font-size: 11px; }
-            th { text-align: left; text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; color: #6E6650; border-bottom: 1.5px solid #26231D; padding: 6px 8px; }
-            td { padding: 6px 8px; border-bottom: 1px solid #EEE7D2; }
-            .num { font-family: monospace; }
-            .debit { color: #A63D2F; }
-            .credit { color: #3F6B52; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 16px; text-align: center; font-size: 10px; color: #6E6650; }
+            ${FONT_IMPORT}
+            @page { size: A4 landscape; margin: 12mm; }
+            * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            body { font-family: 'Inter', sans-serif; color: #12312B; background: #fff; margin: 0; }
+            .stmt-doc { border: 1.5px solid #B8862B; border-radius: 4px; padding: 18px; }
+            .stmt-doc::before { content: ""; display: block; height: 3px; background: #12312B; margin: -18px -18px 14px -18px; }
+            table { page-break-inside: auto; }
+            tr { page-break-inside: avoid; page-break-after: auto; }
+            thead { display: table-header-group; }
+            tfoot { display: table-footer-group; }
           </style>
         </head>
-        <body>${printContent}</body>
+        <body>
+          <div class="stmt-doc">${printContent}</div>
+        </body>
       </html>
     `);
-    win.document.close(); win.focus(); win.print(); win.close();
+    win.document.close(); win.focus(); setTimeout(() => { win.print(); win.close(); }, 300);
   };
 
   return (
@@ -2795,27 +2841,35 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
 
   const handlePrint = () => {
     const printContent = statementRef.current.innerHTML;
-    const win = window.open("", "", "width=950,height=900");
+    const win = window.open("", "", "width=1100,height=900");
+    // Loads the same Tailwind utility classes + Google Fonts the live app
+    // uses, so the printed page renders exactly like the on-screen preview
+    // instead of the plain unstyled text a bare popup window would produce.
+    // Landscape A4, since this statement's table has many columns.
     win.document.write(`
       <html>
         <head>
           <title>Banking Statement - Coaching Classes</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 24px; color: #12312B; }
-            .stmt-header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 12px; margin-bottom: 16px; }
-            table { width: 100%; border-collapse: collapse; font-size: 11px; }
-            th { text-align: left; text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; color: #6E6650; border-bottom: 1.5px solid #26231D; padding: 6px 8px; }
-            td { padding: 6px 8px; border-bottom: 1px solid #EEE7D2; }
-            .num { font-family: monospace; }
-            .debit { color: #A63D2F; }
-            .credit { color: #3F6B52; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 16px; text-align: center; font-size: 10px; color: #6E6650; }
+            ${FONT_IMPORT}
+            @page { size: A4 landscape; margin: 12mm; }
+            * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            body { font-family: 'Inter', sans-serif; color: #12312B; background: #fff; margin: 0; }
+            .stmt-doc { border: 1.5px solid #B8862B; border-radius: 4px; padding: 18px; }
+            .stmt-doc::before { content: ""; display: block; height: 3px; background: #12312B; margin: -18px -18px 14px -18px; }
+            table { page-break-inside: auto; }
+            tr { page-break-inside: avoid; page-break-after: auto; }
+            thead { display: table-header-group; }
+            tfoot { display: table-footer-group; }
           </style>
         </head>
-        <body>${printContent}</body>
+        <body>
+          <div class="stmt-doc">${printContent}</div>
+        </body>
       </html>
     `);
-    win.document.close(); win.focus(); win.print(); win.close();
+    win.document.close(); win.focus(); setTimeout(() => { win.print(); win.close(); }, 300);
   };
 
   return (
@@ -3401,10 +3455,11 @@ function StudentFormModal({ classes, subjectsList, streams, initial, onClose, on
   const [currentSchool, setCurrentSchool] = useState(initial?.currentSchool || "");
   const [aadharNumber, setAadharNumber] = useState(initial?.aadharNumber || "");
   const [admissionMonth, setAdmissionMonth] = useState(initial?.admissionMonth || currentMonthKey());
-  // Joining Date — filled manually if the office wants a specific date;
-  // if left blank, saveStudent() below falls back to today's date
-  // automatically at save time so every student always has one on record.
-  const [joiningDate, setJoiningDate] = useState(initial?.joiningDate || "");
+  // Joining Date — visibly defaults to TODAY'S date the moment the form
+  // opens (for a new student), so office staff see it pre-filled instead
+  // of blank. It stays editable — pick a different date to backdate a
+  // student — and whatever's in the field at save time is what's stored.
+  const [joiningDate, setJoiningDate] = useState(initial?.joiningDate || todayStr());
   const [monthlyDiscount, setMonthlyDiscount] = useState(initial?.monthlyDiscount || 0);
   const [previousDues, setPreviousDues] = useState(initial?.previousDues || 0);
   const [status] = useState(initial?.status || "active");
@@ -3491,7 +3546,7 @@ function StudentFormModal({ classes, subjectsList, streams, initial, onClose, on
         <Field label="Fee Start Month"><input type="month" className={inputCls} style={inputStyle} value={admissionMonth} onChange={e => setAdmissionMonth(e.target.value)} /></Field>
         <Field label="Joining Date">
           <input type="date" className={inputCls} style={inputStyle} value={joiningDate} onChange={e => setJoiningDate(e.target.value)} />
-          <div className="text-[10px] text-[#9C8F6E] mt-1">Leave blank to auto-fill with today's date on save.</div>
+          <div className="text-[10px] text-[#9C8F6E] mt-1">Defaults to today's date — change it to backdate a student.</div>
         </Field>
       </div>
       <Field label="Stream (optional)">
@@ -3852,29 +3907,33 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt, onView
   const handlePrintStatement = () => {
     const printContent = statementRef.current.innerHTML;
     const win = window.open("", "", "width=850,height=900");
+    // Loads the same Tailwind utility classes + Google Fonts the live app
+    // uses, so the printed page renders exactly like the on-screen preview
+    // instead of the plain unstyled text a bare popup window would produce.
     win.document.write(`
       <html>
         <head>
           <title>Account Statement - ${student.name}</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 24px; color: #12312B; }
-            .stmt-header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 12px; margin-bottom: 16px; }
-            .stmt-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; font-size: 12px; margin-bottom: 16px; }
-            .stmt-meta div { display: flex; justify-content: space-between; border-bottom: 1px dotted #D8CFB8; padding: 3px 0; }
-            table { width: 100%; border-collapse: collapse; font-size: 11px; }
-            th { text-align: left; text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; color: #6E6650; border-bottom: 1.5px solid #26231D; padding: 6px 8px; }
-            td { padding: 6px 8px; border-bottom: 1px solid #EEE7D2; }
-            .num { font-family: monospace; }
-            .debit { color: #A63D2F; }
-            .credit { color: #3F6B52; }
-            .summary { display: flex; justify-content: space-between; margin: 14px 0; font-size: 12px; font-weight: bold; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 16px; text-align: center; font-size: 10px; color: #6E6650; }
+            ${FONT_IMPORT}
+            @page { size: A4; margin: 14mm; }
+            * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            body { font-family: 'Inter', sans-serif; color: #12312B; background: #fff; margin: 0; }
+            .stmt-doc { border: 1.5px solid #B8862B; border-radius: 4px; padding: 22px; }
+            .stmt-doc::before { content: ""; display: block; height: 3px; background: #12312B; margin: -22px -22px 18px -22px; }
+            table { page-break-inside: auto; }
+            tr { page-break-inside: avoid; page-break-after: auto; }
+            thead { display: table-header-group; }
+            tfoot { display: table-footer-group; }
           </style>
         </head>
-        <body>${printContent}</body>
+        <body>
+          <div class="stmt-doc">${printContent}</div>
+        </body>
       </html>
     `);
-    win.document.close(); win.focus(); win.print(); win.close();
+    win.document.close(); win.focus(); setTimeout(() => { win.print(); win.close(); }, 300);
   };
 
   return (
@@ -3947,10 +4006,7 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt, onView
                   </td>
                   <td className="px-3 py-2 font-mono">{fmtDate(l.date)}</td>
                   <td className="px-3 py-2 font-mono">{l.month ? monthLabel(l.month) : "—"}</td>
-                  <td className="px-3 py-2">
-                    {l.label}
-                    {l.kind === "debit" && l.outstanding > 0 && <span className="ml-2"><Stamp text="Unpaid" tone="overdue" /></span>}
-                  </td>
+                  <td className="px-3 py-2">{l.label}</td>
                   <td className="px-3 py-2 text-[#6E6650]">{l.remarks || "—"}</td>
                   <td className="px-3 py-2 font-mono text-[#A63D2F]">{l.kind === "debit" ? fmtINR(l.amount) : ""}</td>
                   <td className="px-3 py-2 font-mono text-[#3F6B52]">{l.kind === "credit" ? fmtINR(l.amount) : ""}</td>
