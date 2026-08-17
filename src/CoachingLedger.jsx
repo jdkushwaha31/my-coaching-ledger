@@ -12,6 +12,46 @@ import {
   ClipboardList, Percent, FileText, Search, Banknote, Landmark, CreditCard
 } from "lucide-react";
 
+// ============================================================================
+// UPDATE NOTES — read this before touching anything below.
+//
+// IMPORTANT: every existing feature in this file (student lifecycle,
+// deposits, charges, write-offs, Banking ledger, Credit/Loan ledger,
+// receipts, statements, joining form, promote/exit/undo, trash/restore,
+// etc.) is intact and unchanged in behavior except where explicitly noted
+// below. Nothing was removed. If you (a future Claude, or anyone editing
+// this file) are asked to add more on top of this, keep that same rule:
+// add / fix, never silently drop something that already worked.
+//
+// Changes made in this update pass:
+//   1. Fee & Class Structure → "Manage Streams" was floating in the
+//      SectionHeader action slot, misaligned from the "Fee Matrix Pricing"
+//      / "Class & Subject List" sub-tab pill row underneath it. It's now a
+//      third button inside that same bordered pill row, right after
+//      "Class & Subject List", styled to match (see StructureTab).
+//   2. Dashboard "Net Liquidity" (Cash Balance / Online Balance) used a
+//      simplified formula — deposits minus expenses only — which silently
+//      ignored Cash⇄Bank transfers, Credit/Loan entries, and Interest
+//      payments. It now reuses the exact same running-balance figures
+//      (bankingCashBalance / bankingBankBalance) the Banking tab computes,
+//      so the two screens always agree to the rupee (see the "Dashboard
+//      Net Liquidity" note near the Banking Ledger block, and the
+//      totalCashBalance / totalOnlineBalance assignment).
+//   3. Dashboard was reorganized into clearly labeled sections (Overview →
+//      Financial Health → Trends & Activity) and gained a new "Top
+//      Outstanding Dues" panel for a quick at-a-glance view of who owes
+//      the most, without needing to open the Dues tab (see DashboardTab).
+//   4. Center Statement: the Student ID under each row was a clickable
+//      button that also toggled the mini "student info" panel open. It's
+//      now plain, non-clickable text — the info panel still opens, just
+//      via a separate small ▸/▾ toggle next to the ID instead of the ID
+//      itself being clickable. Search now also matches on mobile number,
+//      not just name / Student ID (see CenterStatementTab).
+//   5. Banking Statement: Student ID was already shown on every row; search
+//      now also matches mobile number in addition to Student ID / name /
+//      description / remarks (see BankingTab).
+// ============================================================================
+
 // Admin Access Password
 const APP_PASSWORD = "958906"; 
 
@@ -505,8 +545,6 @@ export default function CoachingLedger() {
   const cashExpensesTotal = round2(visibleExpenses.filter(e => paymentModeOf(e) === "Cash").reduce((a, e) => a + Number(e.amount || 0), 0));
   const onlineExpensesTotal = round2(visibleExpenses.filter(e => paymentModeOf(e) !== "Cash").reduce((a, e) => a + Number(e.amount || 0), 0));
   const totalExpenses = round2(cashExpensesTotal + onlineExpensesTotal);
-  const totalCashBalance = round2(cashCollected - cashExpensesTotal);
-  const totalOnlineBalance = round2(onlineCollected - onlineExpensesTotal);
 
   // Center-wide statement — every ledger line (tuition, additional charges,
   // payments, write-offs) from every student, merged into one master feed.
@@ -639,6 +677,15 @@ export default function CoachingLedger() {
 
   const bankingCashBalance = runningCash;
   const bankingBankBalance = runningBank;
+
+  // Dashboard "Net Liquidity" balances — FIX: previously computed as just
+  // (deposits collected − expenses), which silently ignored money moved by
+  // Cash⇄Bank transfers, Credit/Loan entries, and Interest payments, so the
+  // Dashboard could show a different (wrong) number than the Banking tab.
+  // Now sourced from the exact same running balance the Banking Statement
+  // uses, so both screens always agree.
+  const totalCashBalance = bankingCashBalance;
+  const totalOnlineBalance = bankingBankBalance;
 
   const bankingTotals = {
     cashBalance: bankingCashBalance,
@@ -1060,6 +1107,7 @@ export default function CoachingLedger() {
             totalCashBalance={totalCashBalance} totalOnlineBalance={totalOnlineBalance}
             cashExpensesTotal={cashExpensesTotal} onlineExpensesTotal={onlineExpensesTotal} totalExpenses={totalExpenses}
             onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
+            onStatement={(s) => setShowStatementModal(s)}
           />
         )}
         {tab === "students" && (
@@ -1334,12 +1382,41 @@ function FeeForecastCard({ curMonth, forecastForMonth }) {
   );
 }
 
-function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMonthExpected, totalOutstanding, trend, classStrength, recentDeposits, studentById, curMonth, classes, studentDues, forecastForMonth, totalCashBalance, totalOnlineBalance, cashExpensesTotal, onlineExpensesTotal, totalExpenses, onOpenReceipt }) {
+// Small uppercase divider label used to break the Dashboard into clearly
+// named sections (Overview / Financial Health / Trends & Activity /
+// Outstanding Dues) — purely visual grouping, changes nothing functional.
+function DashSectionLabel({ children }) {
+  return (
+    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", letterSpacing: "0.12em" }} className="uppercase text-[#9C8F6E] mb-2.5 mt-7 first:mt-0">
+      {children}
+    </div>
+  );
+}
+
+function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMonthExpected, totalOutstanding, trend, classStrength, recentDeposits, studentById, curMonth, classes, studentDues, forecastForMonth, totalCashBalance, totalOnlineBalance, cashExpensesTotal, onlineExpensesTotal, totalExpenses, onOpenReceipt, onStatement }) {
   const collectionRate = thisMonthExpected > 0 ? Math.round((thisMonthCollected / thisMonthExpected) * 100) : 0;
+  // Net Liquidity = Cash Balance + Online/Bank Balance, both now sourced
+  // straight from the Banking ledger's running totals (see the "Dashboard
+  // Net Liquidity" fix note where totalCashBalance / totalOnlineBalance are
+  // computed), so this figure always matches the Banking tab exactly.
   const netLiquidity = round2(totalCashBalance + totalOnlineBalance);
+
+  // NEW: Top Outstanding Dues — quick at-a-glance list of whoever owes the
+  // most right now, without leaving the Dashboard to open the Dues tab.
+  // Built from studentDues (id → balance) + studentById, both already
+  // available to this component; purely additive, touches no other data.
+  const topDues = Object.entries(studentDues || {})
+    .map(([id, bal]) => ({ student: studentById[id], balance: round2(bal) }))
+    .filter(x => x.student && x.balance > 0)
+    .sort((a, b) => b.balance - a.balance)
+    .slice(0, 6);
+
   return (
     <div>
       <SectionHeader eyebrow={monthLabel(curMonth)} title="Summary" />
+
+      {/* ===== OVERVIEW ===== */}
+      <DashSectionLabel>Overview</DashSectionLabel>
       <div className="grid grid-cols-4 gap-4 mb-4">
         <StatCard label="Active Students" value={students.length} sub={`${classes.filter(c => students.some(s => s.class === c)).length} active classes`} />
         <StatCard label="Collected this month" value={fmtINR(thisMonthCollected)} sub={`of ${fmtINR(thisMonthExpected)} expected`} tone="good" />
@@ -1347,7 +1424,9 @@ function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMo
         <StatCard label="Total Dues Balance" value={fmtINR(totalOutstanding)} sub={thisMonthWriteOffs > 0 ? `${fmtINR(thisMonthWriteOffs)} written off this month` : "includes carried-over dues"} tone={totalOutstanding > 0 ? "bad" : "good"} />
       </div>
 
-      <div className="grid grid-cols-2 gap-4 mb-6">
+      {/* ===== FINANCIAL HEALTH ===== */}
+      <DashSectionLabel>Financial Health — Cash &amp; Bank</DashSectionLabel>
+      <div className="grid grid-cols-2 gap-4 mb-4">
         <FinancialSummaryCard
           title="Net Liquidity"
           icon={Landmark}
@@ -1369,7 +1448,10 @@ function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMo
           ]}
         />
       </div>
+      <div className="text-[11px] text-[#9C8F6E] mb-2 flex items-center gap-1.5"><Landmark size={11} /> These balances include every deposit, expense, Cash⇄Bank transfer, and Credit/Loan movement — always in sync with the Banking tab.</div>
 
+      {/* ===== TRENDS & ACTIVITY ===== */}
+      <DashSectionLabel>Trends &amp; Activity</DashSectionLabel>
       <div className="grid grid-cols-3 gap-5 mb-6">
         <Card className="col-span-2 p-5">
           <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold mb-3">Collections — last 6 months</div>
@@ -1430,6 +1512,37 @@ function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMo
           )}
         </Card>
       </div>
+
+      {/* ===== OUTSTANDING DUES (NEW) ===== */}
+      <DashSectionLabel>Outstanding Dues</DashSectionLabel>
+      <Card className="p-5 mb-2">
+        <div className="flex items-center justify-between mb-3">
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-semibold">Top Outstanding Dues</div>
+          <span className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono">Highest balance first</span>
+        </div>
+        {topDues.length === 0 ? (
+          <div className="text-sm text-[#9C8F6E]">No outstanding dues — everyone is fully paid up. 🎉</div>
+        ) : (
+          <div className="space-y-0">
+            {topDues.map(({ student: st, balance }) => (
+              <div key={st.id} className="flex items-center justify-between py-2 text-sm ledger-row px-2 -mx-2" style={{ borderBottom: "1px solid #EEE7D2" }}>
+                <div>
+                  <span className="font-medium">{st.name}</span>
+                  <span className="text-[#9C8F6E] ml-2 text-xs font-mono">{st.studentId || "—"} · {st.class}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace" }} className="font-semibold text-[#A63D2F]">{fmtINR(balance)}</span>
+                  {onStatement && (
+                    <button onClick={() => onStatement(st)} className="p-1 text-[#12312B] hover:bg-[#E4DCC5] rounded" title="Open Student Statement">
+                      <FileText size={14} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
@@ -1645,17 +1758,20 @@ function StructureTab({ feeStructure, setFeeStructure, classes, subjectsList, on
 
   return (
     <div>
-      <SectionHeader eyebrow="Academic Setup" title="Fee & Class Structure" action={
-        <button onClick={() => setShowStreamManager(true)} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm border" style={{ borderColor: "#12312B", color: "#12312B" }}>
-          <Tag size={15} /> Manage Streams
-        </button>
-      } />
+      <SectionHeader eyebrow="Academic Setup" title="Fee & Class Structure" />
+      {/* All three controls now live in one aligned pill row: the two
+          sub-tab toggles plus "Manage Streams" as a third segment right
+          after "Class & Subject List", instead of floating separately in
+          the header action slot (previous layout looked misaligned). */}
       <div className="flex border rounded-sm overflow-hidden mb-5 w-fit" style={{ borderColor: "#12312B" }}>
         <button onClick={() => setSubTab("fees")} className="px-4 py-2 text-xs font-semibold" style={{ background: subTab === "fees" ? "#12312B" : "white", color: subTab === "fees" ? "#F4EFDE" : "#12312B" }}>
           Fee Matrix Pricing
         </button>
         <button onClick={() => setSubTab("classes")} className="px-4 py-2 text-xs font-semibold" style={{ background: subTab === "classes" ? "#12312B" : "white", color: subTab === "classes" ? "#F4EFDE" : "#12312B" }}>
           Class & Subject List
+        </button>
+        <button onClick={() => setShowStreamManager(true)} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5" style={{ background: "white", color: "#12312B", borderLeft: "1px solid #12312B" }}>
+          <Tag size={13} /> Manage Streams
         </button>
       </div>
 
@@ -2346,7 +2462,10 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
     if (search) {
       const q = search.trim().toLowerCase();
       const st = studentById[t.studentId];
-      const haystack = [t.studentName, st?.studentId].filter(Boolean).join(" ").toLowerCase();
+      // Search now matches Name, Student ID, AND mobile number (both the
+      // student's own phone and guardian phone), so front-desk staff can
+      // look a student up by whichever detail they have on hand.
+      const haystack = [t.studentName, st?.studentId, st?.phone, st?.guardianPhone].filter(Boolean).join(" ").toLowerCase();
       if (!haystack.includes(q)) return false;
     }
     if (typeFilter !== "all" && t.type !== typeFilter) return false;
@@ -2425,7 +2544,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
             <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search Student</div>
             <div className="relative">
               <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
-              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Name or Student ID…" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Name, Student ID, or Mobile Number…" />
             </div>
           </div>
           <div>
@@ -2500,13 +2619,19 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
                         <td className="px-4 py-2.5 font-medium">
                           <div>{t.studentName}{t.studentStatus !== "active" && <span className="ml-1.5 text-[10px] text-[#4A7B9D]">({t.studentStatus === "dropped" ? "dropped" : "on break"})</span>}</div>
                           {st?.studentId && (
-                            <button
-                              onClick={() => setExpandedRow(prev => ({ ...prev, [rowKey]: !prev[rowKey] }))}
-                              className="text-[10px] font-mono text-[#9C8F6E] underline hover:text-[#12312B] inline-flex items-center gap-0.5"
-                              title="Click to view student info"
-                            >
-                              {st.studentId} {isOpen ? "▾" : "▸"}
-                            </button>
+                            /* Student ID is plain, non-clickable text now (previously it was
+                               itself the clickable toggle). The info-expand action still
+                               exists, just on its own small ▸/▾ button beside the ID. */
+                            <div className="text-[10px] font-mono text-[#9C8F6E] inline-flex items-center gap-1">
+                              <span>{st.studentId}</span>
+                              <button
+                                onClick={() => setExpandedRow(prev => ({ ...prev, [rowKey]: !prev[rowKey] }))}
+                                className="hover:text-[#12312B]"
+                                title="View student info"
+                              >
+                                {isOpen ? "▾" : "▸"}
+                              </button>
+                            </div>
                           )}
                         </td>
                         <td className="px-4 py-2.5 font-semibold text-[#12312B]">{t.studentClass}</td>
@@ -2578,7 +2703,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
     if (search) {
       const q = search.trim().toLowerCase();
       const st = t.studentId ? studentById[t.studentId] : null;
-      const haystack = [t.label, t.refId, t.remarks, st?.studentId, st?.name].filter(Boolean).join(" ").toLowerCase();
+      const haystack = [t.label, t.refId, t.remarks, st?.studentId, st?.name, st?.phone, st?.guardianPhone].filter(Boolean).join(" ").toLowerCase();
       if (!haystack.includes(q)) return false;
     }
     if (typeFilter !== "all" && t.type !== typeFilter) return false;
@@ -2683,7 +2808,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
             <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
             <div className="relative">
               <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
-              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Description, Student ID, or remarks…" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Description, Student ID, Mobile Number, or remarks…" />
             </div>
           </div>
           <div>
