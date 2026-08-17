@@ -174,6 +174,26 @@ import {
 //      subject-less student now correctly accrues ₹0 tuition instead of
 //      the 1-subject rate. Students with 1+ subjects are billed exactly
 //      as before.
+//
+// Changes made in this fifth update pass:
+//  21. NAVIGATION — the six sidebar tabs Students Register, Pending Dues,
+//      Deposits Log, Charges, Center Statement, and Fee & Class Structure
+//      are now one sidebar entry, "Student Management" (id
+//      "students-management"), with an internal bordered pill row of six
+//      sub-tabs in that exact left-to-right order — same pattern already
+//      used by Fee & Class Structure's own 3-way pill row and Banking's
+//      4-way pill row. This is purely a navigation regroup: StudentsTab,
+//      DuesTab, DepositsTab, ChargesTab, CenterStatementTab, and
+//      StructureTab are all reused completely unchanged, wired with the
+//      exact same props (search boxes, filters, Add Student / Add Charge
+//      / Record Deposit / Print-Export buttons, receipts, modals,
+//      add/edit/delete/restore actions) they had as standalone tabs — none
+//      of that behavior changed. See StudentManagementTab and
+//      STUDENT_MANAGEMENT_SUB_TABS. Fee & Class Structure's own internal
+//      3-way pill row (Fee Matrix Pricing / Class & Subject List / Manage
+//      Streams) is untouched and still lives one level down, inside the
+//      new "Fee & Class Structure" sub-tab. Expenses Log and Banking are
+//      unaffected and remain separate sidebar tabs, exactly as before.
 // ============================================================================
 
 // Admin Access Password
@@ -1271,13 +1291,14 @@ export default function CoachingLedger() {
 
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutGrid },
-    { id: "students", label: "Students Register", icon: Users },
-    { id: "structure", label: "Fee & Class Structure", icon: Wallet },
-    { id: "deposits", label: "Deposits Log", icon: Receipt },
+    // Students Register, Pending Dues, Deposits Log, Charges, Center
+    // Statement, and Fee & Class Structure used to be six separate sidebar
+    // entries. They're now one "Student Management" tab with an internal
+    // pill row of six sub-tabs (see StudentManagementTab /
+    // STUDENT_MANAGEMENT_SUB_TABS) — same merge pattern already used for
+    // Banking's four sub-tabs.
+    { id: "students-management", label: "Student Management", icon: Users },
     { id: "expenses", label: "Expenses Log", icon: CreditCard },
-    { id: "charges", label: "Charges", icon: ClipboardList },
-    { id: "dues", label: "Pending Dues", icon: AlertCircle },
-    { id: "statement", label: "Center Statement", icon: FileText },
     { id: "banking", label: "Banking", icon: Landmark },
     { id: "notes", label: "Notes", icon: BookOpen },
     { id: "trash", label: "Trash / Restore", icon: Archive },
@@ -1354,32 +1375,50 @@ export default function CoachingLedger() {
             onStatement={(s) => setShowStatementModal(s)}
           />
         )}
-        {tab === "students" && (
-          <StudentsTab
-            students={visibleStudents} studentDues={studentDuesMap} studentDuesRaw={studentDuesRawMap} classes={classes} streams={streams}
-            batchesForMonth={batchesForMonth} curMonth={curMonth}
-            onAdd={() => { setEditingStudent(null); setShowStudentForm(true); }}
-            onEdit={(s) => { setEditingStudent(s); setShowStudentForm(true); }}
-            onExit={(s) => setShowExitModal(s)} onPromote={(s) => setShowPromoteModal(s)}
-            onViewHistory={(s) => setShowHistoryModal(s)} onBatchChange={(s) => setShowBatchChangeModal(s)}
-            onUndo={undoExit} onStatement={(s) => setShowStatementModal(s)}
-            onAddCharge={(s) => setShowChargeModal({ student: s })}
-            onJoiningForm={(s) => setShowJoiningForm(s)}
-            onRemove={softDeleteStudent}
-          />
-        )}
-        {tab === "structure" && (
-          <StructureTab
-            feeStructure={feeStructure} setFeeStructure={saveFeeStructure} classes={classes}
-            subjectsList={subjectsList} onSaveClasses={saveClasses} onSaveSubjects={saveSubjects}
-            streams={streams} onSaveStreams={saveStreams}
-          />
-        )}
-        {tab === "deposits" && (
-          <DepositsTab
-            deposits={visibleDeposits} students={visibleStudents} classes={classes} studentDues={studentDuesMap}
-            onAdd={() => setShowDepositForm(true)} onRemove={softDeleteDeposit}
-            onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
+        {tab === "students-management" && (
+          <StudentManagementTab
+            studentsTabProps={{
+              students: visibleStudents, studentDues: studentDuesMap, studentDuesRaw: studentDuesRawMap, classes, streams,
+              batchesForMonth, curMonth,
+              onAdd: () => { setEditingStudent(null); setShowStudentForm(true); },
+              onEdit: (s) => { setEditingStudent(s); setShowStudentForm(true); },
+              onExit: (s) => setShowExitModal(s), onPromote: (s) => setShowPromoteModal(s),
+              onViewHistory: (s) => setShowHistoryModal(s), onBatchChange: (s) => setShowBatchChangeModal(s),
+              onUndo: undoExit, onStatement: (s) => setShowStatementModal(s),
+              onAddCharge: (s) => setShowChargeModal({ student: s }),
+              onJoiningForm: (s) => setShowJoiningForm(s),
+              onRemove: softDeleteStudent,
+            }}
+            duesTabProps={{
+              students: visibleStudents, ledgers, totalOutstanding, classes,
+              onStatement: (s) => setShowStatementModal(s),
+            }}
+            depositsTabProps={{
+              deposits: visibleDeposits, students: visibleStudents, classes, studentDues: studentDuesMap,
+              onAdd: () => setShowDepositForm(true), onRemove: softDeleteDeposit,
+              onOpenReceipt: (dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] }),
+            }}
+            chargesTabProps={{
+              chargeLines: allChargeLines, students: visibleStudents, classes,
+              onAdd: () => setShowChargeModal({ student: null }), onRemove: softDeleteCharge,
+              onOpenReceipt: (line) => setChargeReceiptData({ line, student: studentById[line.studentId] }),
+            }}
+            statementTabProps={{
+              transactions: allTransactions, totals: centerTotals, students: visibleStudents, classes,
+              onViewReceipt: (depositId) => {
+                const dep = visibleDeposits.find(d => d.id === depositId);
+                if (dep) setReceiptData({ deposit: dep, student: studentById[dep.studentId] });
+              },
+              onViewCharge: (t) => setChargeReceiptData({
+                line: { chargeId: t.chargeId, type: t.type, date: t.date, month: t.month, label: t.label, amount: t.amount, remarks: t.remarks },
+                student: studentById[t.studentId],
+              }),
+            }}
+            structureTabProps={{
+              feeStructure, setFeeStructure: saveFeeStructure, classes,
+              subjectsList, onSaveClasses: saveClasses, onSaveSubjects: saveSubjects,
+              streams, onSaveStreams: saveStreams,
+            }}
           />
         )}
         {tab === "expenses" && (
@@ -1387,32 +1426,6 @@ export default function CoachingLedger() {
             expenses={visibleExpenses}
             onAdd={() => setShowExpenseForm(true)} onRemove={softDeleteExpense}
             onOpenReceipt={(exp) => setExpenseReceiptData(exp)}
-          />
-        )}
-        {tab === "charges" && (
-          <ChargesTab
-            chargeLines={allChargeLines} students={visibleStudents} classes={classes}
-            onAdd={() => setShowChargeModal({ student: null })} onRemove={softDeleteCharge}
-            onOpenReceipt={(line) => setChargeReceiptData({ line, student: studentById[line.studentId] })}
-          />
-        )}
-        {tab === "dues" && (
-          <DuesTab
-            students={visibleStudents} ledgers={ledgers} totalOutstanding={totalOutstanding} classes={classes}
-            onStatement={(s) => setShowStatementModal(s)}
-          />
-        )}
-        {tab === "statement" && (
-          <CenterStatementTab
-            transactions={allTransactions} totals={centerTotals} students={visibleStudents} classes={classes}
-            onViewReceipt={(depositId) => {
-              const dep = visibleDeposits.find(d => d.id === depositId);
-              if (dep) setReceiptData({ deposit: dep, student: studentById[dep.studentId] });
-            }}
-            onViewCharge={(t) => setChargeReceiptData({
-              line: { chargeId: t.chargeId, type: t.type, date: t.date, month: t.month, label: t.label, amount: t.amount, remarks: t.remarks },
-              student: studentById[t.studentId],
-            })}
           />
         )}
         {tab === "banking" && (
@@ -1827,6 +1840,63 @@ function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, 
       {onJoiningForm && <button onClick={() => onJoiningForm(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><FileText size={11} /> Joining Form</button>}
       <button onClick={() => onViewHistory(s)} className="text-[#12312B] underline inline-flex items-center gap-0.5 text-xs"><History size={11} /> Log</button>
     </>
+  );
+}
+
+// ============================================================================
+// STUDENT MANAGEMENT TAB — merges what used to be six separate sidebar
+// tabs (Students Register, Pending Dues, Deposits Log, Charges, Center
+// Statement, Fee & Class Structure) into one "Student Management" sidebar
+// entry with an internal pill row of six sub-tabs, in that exact
+// left-to-right order. This is purely navigational regrouping: every one
+// of the six original components (StudentsTab, DuesTab, DepositsTab,
+// ChargesTab, CenterStatementTab, StructureTab) is reused completely
+// as-is below, with the exact same props it was given before the merge —
+// same filters, search boxes, print/export buttons, add/edit/delete
+// actions, receipts, and modals as before. Same sub-tab pill-row pattern
+// already used by StructureTab (3 sub-tabs) and BankingTab (4 sub-tabs).
+// ============================================================================
+const STUDENT_MANAGEMENT_SUB_TABS = [
+  { id: "students", label: "Students Register", icon: Users },
+  { id: "dues", label: "Pending Dues", icon: AlertCircle },
+  { id: "deposits", label: "Deposits Log", icon: Receipt },
+  { id: "charges", label: "Charges", icon: ClipboardList },
+  { id: "statement", label: "Center Statement", icon: FileText },
+  { id: "structure", label: "Fee & Class Structure", icon: Wallet },
+];
+
+function StudentManagementTab({ studentsTabProps, duesTabProps, depositsTabProps, chargesTabProps, statementTabProps, structureTabProps }) {
+  const [subTab, setSubTab] = useState("students");
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Student Lifecycle" title="Student Management" />
+      <div className="text-sm text-[#6E6650] mb-4">Roster, dues, payments in, ad-hoc charges, the master transaction record, and fee setup — the full student lifecycle in one place.</div>
+
+      {/* Same bordered pill-row pattern as StructureTab / BankingTab —
+          only one sub-tab's panel renders at a time; nothing below was
+          removed, just regrouped under one sidebar entry. */}
+      <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
+        {STUDENT_MANAGEMENT_SUB_TABS.map((st, i) => {
+          const Icon = st.icon;
+          const active = subTab === st.id;
+          return (
+            <button key={st.id} onClick={() => setSubTab(st.id)}
+              className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+              style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+              <Icon size={13} /> {st.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {subTab === "students" && <StudentsTab {...studentsTabProps} />}
+      {subTab === "dues" && <DuesTab {...duesTabProps} />}
+      {subTab === "deposits" && <DepositsTab {...depositsTabProps} />}
+      {subTab === "charges" && <ChargesTab {...chargesTabProps} />}
+      {subTab === "statement" && <CenterStatementTab {...statementTabProps} />}
+      {subTab === "structure" && <StructureTab {...structureTabProps} />}
+    </div>
   );
 }
 
