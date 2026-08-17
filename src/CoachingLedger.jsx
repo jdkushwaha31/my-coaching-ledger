@@ -80,6 +80,24 @@ function fmtINR(n) {
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
 function todayStr() { return new Date().toISOString().slice(0, 10); }
+// Human-readable, unique Student ID — separate from the internal Firestore
+// doc `id` (which stays exactly as-is so nothing already saved ever breaks).
+// Format: STU<year><4-digit sequence>, e.g. STU20260007. Sequence is derived
+// from the highest existing number for the current year across ALL students
+// (including trashed ones, so a restored/undeleted student never collides),
+// so it keeps counting up correctly even if students are removed.
+function generateStudentId(allStudents) {
+  const year = new Date().getFullYear();
+  const prefix = `STU${year}`;
+  let max = 0;
+  (allStudents || []).forEach(s => {
+    if (s && s.studentId && s.studentId.startsWith(prefix)) {
+      const n = parseInt(s.studentId.slice(prefix.length), 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  });
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
 // Single source of truth for receipt numbering, so the Deposit Receipt,
 // the WhatsApp receipt message, and the Student Statement always show
 // the exact same receipt number for a given deposit.
@@ -656,10 +674,16 @@ export default function CoachingLedger() {
   // ---- Student lifecycle actions ----
   async function saveStudent(data) {
     const id = data.id || uid();
+    // Every student gets a permanent, human-readable Student ID. If this is
+    // an existing record that already has one (or the form already computed
+    // one), it's preserved as-is; only a genuinely missing one is generated
+    // — this also quietly backfills any older student saved before this
+    // feature existed, the first time that record is edited.
+    const studentId = data.studentId || generateStudentId(students);
     // Advance Payment is captured on the Student form but is a transaction,
     // not a student field — split it off before writing the student record.
     const { advancePayment, advancePaymentMode, advancePaymentRef, ...studentData } = data;
-    const savedStudent = { ...studentData, id, deleted: false };
+    const savedStudent = { ...studentData, id, studentId, deleted: false };
     await setDoc(doc(db, "students", id), savedStudent);
     setShowStudentForm(false);
     setEditingStudent(null);
@@ -1131,7 +1155,7 @@ export default function CoachingLedger() {
       </main>
 
       {showStudentForm && (
-        <StudentFormModal classes={classes} subjectsList={subjectsList} initial={editingStudent}
+        <StudentFormModal classes={classes} subjectsList={subjectsList} initial={editingStudent} students={visibleStudents}
           onClose={() => { setShowStudentForm(false); setEditingStudent(null); }} onSave={saveStudent} />
       )}
       {showDepositForm && (
@@ -1422,6 +1446,9 @@ function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, 
 function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth, onAdd, onEdit, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge, onJoiningForm, onRemove }) {
   const [search, setSearch] = useState("");
   const [streamFilter, setStreamFilter] = useState("all");
+  const [classFilter, setClassFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [genderFilter, setGenderFilter] = useState("all");
   const [expanded, setExpanded] = useState({});
 
   const streamsInUse = useMemo(() => {
@@ -1434,11 +1461,16 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
     const q = search.trim().toLowerCase();
     return students.filter(s => {
       if (streamFilter !== "all" && (s.stream || "") !== streamFilter) return false;
+      if (classFilter !== "all" && String(s.class) !== classFilter) return false;
+      if (statusFilter !== "all" && (s.status || "active") !== statusFilter) return false;
+      if (genderFilter !== "all" && (s.gender || "") !== genderFilter) return false;
       if (!q) return true;
-      const haystack = [s.name, s.fatherName, s.phone, s.guardianPhone, s.address, s.aadharNumber].filter(Boolean).join(" ").toLowerCase();
+      const haystack = [s.name, s.studentId, s.fatherName, s.phone, s.guardianPhone, s.address, s.aadharNumber, ...(s.batches || [])].filter(Boolean).join(" ").toLowerCase();
       return haystack.includes(q);
     });
-  }, [students, search, streamFilter]);
+  }, [students, search, streamFilter, classFilter, statusFilter, genderFilter]);
+
+  const isFiltered = search || streamFilter !== "all" || classFilter !== "all" || statusFilter !== "all" || genderFilter !== "all";
 
   return (
     <div>
@@ -1453,7 +1485,14 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
           <div className="relative flex-1 min-w-[260px]">
             <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" style={{ marginTop: "9px" }} />
-            <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, father's name, phone, guardian phone, Aadhar, or address…" />
+            <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, Student ID, subject, father's name, phone, guardian phone, Aadhar, or address…" />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
           </div>
           <div>
             <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Stream</div>
@@ -1462,10 +1501,28 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
               {streamsInUse.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
-          {(search || streamFilter !== "all") && (
-            <button onClick={() => { setSearch(""); setStreamFilter("all"); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Student Status</div>
+            <select className={inputCls} style={inputStyle} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+              <option value="all">All Statuses</option>
+              <option value="active">Active</option>
+              <option value="on_break">On Break / Gap</option>
+              <option value="dropped">Dropped Out</option>
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Gender</div>
+            <select className={inputCls} style={inputStyle} value={genderFilter} onChange={e => setGenderFilter(e.target.value)}>
+              <option value="all">All</option>
+              <option value="Male">Male</option>
+              <option value="Female">Female</option>
+            </select>
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setStreamFilter("all"); setClassFilter("all"); setStatusFilter("all"); setGenderFilter("all"); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
           )}
         </div>
+        <div className="text-[10px] text-[#9C8F6E] mt-2.5 font-mono">{filtered.length} of {students.length} student{students.length === 1 ? "" : "s"} shown</div>
       </Card>
 
       <Card>
@@ -1475,23 +1532,24 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["", "Name", "Class", "Subjects (this month)", "Total Due", "Status", "Actions"].map(h => (
+                {["#", "", "Name", "Class", "Subjects (this month)", "Total Due", "Status", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {filtered.map(s => {
+              {filtered.map((s, idx) => {
                 const dueAmount = studentDues[s.id] || 0;
                 const status = s.status || "active";
                 const badgeText = status === "active" ? "Active" : status === "dropped" ? "Dropped Out" : (s.resultStatus || "On Break");
                 const badgeTone = status === "active" ? "paid" : status === "dropped" ? "overdue" : "break";
                 const isOpen = !!expanded[s.id];
-                const hasDetails = s.fatherName || s.guardianPhone || s.address || s.dob || s.currentSchool || s.aadharNumber || s.stream;
+                const hasDetails = s.fatherName || s.guardianPhone || s.address || s.dob || s.currentSchool || s.aadharNumber || s.stream || s.gender || s.studentId;
                 return (
                   <React.Fragment key={s.id}>
                     <tr className="ledger-row">
-                      <td className="pl-3 py-2.5">
+                      <td className="pl-4 py-2.5 text-xs text-[#9C8F6E] font-mono">{idx + 1}</td>
+                      <td className="pl-1 py-2.5">
                         {hasDetails && (
                           <button onClick={() => setExpanded(prev => ({ ...prev, [s.id]: !prev[s.id] }))} className="text-[#9C8F6E] hover:text-[#12312B] text-xs w-4">
                             {isOpen ? "▾" : "▸"}
@@ -1500,7 +1558,10 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
                       </td>
                       <td className="px-4 py-2.5 font-medium">
                         <div>{s.name}</div>
-                        {s.phone && <div className="text-[10px] text-[#9C8F6E]">{s.phone}</div>}
+                        <div className="text-[10px] text-[#9C8F6E] flex gap-1.5">
+                          {s.studentId && <span className="font-mono">{s.studentId}</span>}
+                          {s.phone && <span>{s.studentId ? "· " : ""}{s.phone}</span>}
+                        </div>
                       </td>
                       <td className="px-4 py-2.5 font-semibold text-[#12312B]">
                         {s.class}
@@ -1520,8 +1581,11 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
                     {isOpen && hasDetails && (
                       <tr>
                         <td></td>
+                        <td></td>
                         <td colSpan={6} className="px-4 pb-3 pt-0">
                           <div className="grid grid-cols-3 gap-3 p-3 rounded bg-[#FAF6EC] border text-xs" style={{ borderColor: "#D8CFB8" }}>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Student ID</span>{s.studentId || "—"}</div>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Gender</span>{s.gender || "—"}</div>
                             <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Father's Name</span>{s.fatherName || "—"}</div>
                             <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Guardian Phone</span>{s.guardianPhone || "—"}</div>
                             <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Address</span>{s.address || "—"}</div>
@@ -2055,7 +2119,7 @@ function DuesTab({ students, ledgers, totalOutstanding, classes, onStatement }) 
       if (classFilter !== "all" && String(s.class) !== classFilter) return false;
       if (statusFilter !== "all" && row.status !== statusFilter) return false;
       if (q) {
-        const haystack = [s.name, s.phone, s.guardianPhone, s.aadharNumber].filter(Boolean).join(" ").toLowerCase();
+        const haystack = [s.name, s.studentId, s.phone, s.guardianPhone, s.aadharNumber].filter(Boolean).join(" ").toLowerCase();
         if (!haystack.includes(q)) return false;
       }
       return true;
@@ -2078,10 +2142,10 @@ function DuesTab({ students, ledgers, totalOutstanding, classes, onStatement }) 
       <Card className="p-3.5 mb-4">
         <div className="flex flex-wrap items-end gap-3">
           <div className="flex-1 min-w-[200px]">
-            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search — Name, Mobile, or Aadhar</div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search — Name, Student ID, Mobile, or Aadhar</div>
             <div className="relative">
               <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
-              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name, mobile number, or Aadhar…" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name, Student ID, mobile number, or Aadhar…" />
             </div>
           </div>
           <div>
@@ -2134,8 +2198,8 @@ function DuesTab({ students, ledgers, totalOutstanding, classes, onStatement }) 
                   <tr key={s.id} className="ledger-row">
                     <td className="px-4 py-2.5 font-medium">
                       <div>{s.name}</div>
-                      {(s.phone || s.aadharNumber) && (
-                        <div className="text-[10px] text-[#9C8F6E]">{[s.phone, s.aadharNumber].filter(Boolean).join(" · ")}</div>
+                      {(s.studentId || s.phone || s.aadharNumber) && (
+                        <div className="text-[10px] text-[#9C8F6E]">{[s.studentId, s.phone, s.aadharNumber].filter(Boolean).join(" · ")}</div>
                       )}
                     </td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
@@ -2934,9 +2998,10 @@ function Field({ label, children }) {
 const inputCls = "w-full border rounded-sm px-3 py-2 text-sm bg-white";
 const inputStyle = { borderColor: "#D8CFB8" };
 
-function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
+function StudentFormModal({ classes, subjectsList, initial, onClose, onSave, students }) {
   const [name, setName] = useState(initial?.name || "");
   const [cls, setCls] = useState(initial?.class || classes[0] || "10");
+  const [gender, setGender] = useState(initial?.gender || "");
   const [stream, setStream] = useState(initial?.stream || "");
   const [batches, setBatches] = useState(initial?.batches || []);
   const [phone, setPhone] = useState(initial?.phone || "");
@@ -2950,6 +3015,26 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
   const [monthlyDiscount, setMonthlyDiscount] = useState(initial?.monthlyDiscount || 0);
   const [previousDues, setPreviousDues] = useState(initial?.previousDues || 0);
   const [status] = useState(initial?.status || "active");
+
+  // Student ID — shown read-only on the form. For an existing student it's
+  // whatever was already assigned (never changes). For a new student it's
+  // computed here purely for display, using the same rule saveStudent()
+  // uses, so what the user sees on the form is exactly what gets saved.
+  const displayStudentId = initial?.studentId || useMemo(() => generateStudentId(students), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Duplicate Aadhar detector — checks the live student list as the user
+  // types and flags an existing match with a pop-up. It never blocks
+  // saving; it just surfaces the possible duplicate so a human can decide
+  // whether to continue (e.g. genuine case) or fix the number.
+  const [dupStudent, setDupStudent] = useState(null);
+  const [dismissedDupId, setDismissedDupId] = useState(null);
+  useEffect(() => {
+    const digits = aadharNumber.replace(/\D/g, "");
+    if (digits.length < 4) { setDupStudent(null); return; }
+    const match = (students || []).find(s => s.id !== initial?.id && (s.aadharNumber || "").replace(/\D/g, "") === digits);
+    setDupStudent(match || null);
+  }, [aadharNumber, students, initial]);
+  const showDupPopup = !!dupStudent && dupStudent.id !== dismissedDupId;
 
   // Advance Payment — a one-time transaction captured right on the
   // registration/edit form. It is never stored as a field on the student
@@ -2970,7 +3055,8 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
     const baseHistory = initial?.batchHistory && initial.batchHistory.length ? [...initial.batchHistory] : [{ fromMonth: admissionMonth, batches }];
     if (initial?.batchHistory && initial.batchHistory.length) baseHistory[0] = { ...baseHistory[0], batches };
     onSave({
-      ...initial, id: initial?.id, name: name.trim(), class: cls, stream, batches, batchHistory: baseHistory,
+      ...initial, id: initial?.id, studentId: initial?.studentId || displayStudentId,
+      name: name.trim(), class: cls, gender, stream, batches, batchHistory: baseHistory,
       phone: phone.trim(), fatherName: fatherName.trim(), guardianPhone: guardianPhone.trim(), address: address.trim(),
       dob: dob || "", currentSchool: currentSchool.trim(), aadharNumber: aadharNumber.trim(),
       admissionMonth, monthlyDiscount: Number(monthlyDiscount) || 0,
@@ -2983,6 +3069,10 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
 
   return (
     <Modal title={initial ? "Edit Student Details" : "Add New Student"} onClose={onClose}>
+      <div className="p-2.5 border rounded-sm mb-3 flex items-center justify-between bg-[#FAF6EC]" style={{ borderColor: "#D8CFB8" }}>
+        <span className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono">Student ID</span>
+        <span className="text-sm font-bold text-[#12312B]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{displayStudentId}{!initial && " (auto-assigned on save)"}</span>
+      </div>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Full Name"><input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Rahul Sharma" /></Field>
         <Field label="Father's Name"><input className={inputCls} style={inputStyle} value={fatherName} onChange={e => setFatherName(e.target.value)} placeholder="e.g. Suresh Sharma" /></Field>
@@ -2993,8 +3083,15 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
             {classes.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         </Field>
-        <Field label="Fee Start Month"><input type="month" className={inputCls} style={inputStyle} value={admissionMonth} onChange={e => setAdmissionMonth(e.target.value)} /></Field>
+        <Field label="Gender">
+          <select className={inputCls} style={inputStyle} value={gender} onChange={e => setGender(e.target.value)}>
+            <option value="">— Select —</option>
+            <option value="Male">Male</option>
+            <option value="Female">Female</option>
+          </select>
+        </Field>
       </div>
+      <Field label="Fee Start Month"><input type="month" className={inputCls} style={inputStyle} value={admissionMonth} onChange={e => setAdmissionMonth(e.target.value)} /></Field>
       <Field label="Stream (optional)">
         <select className={inputCls} style={inputStyle} value={stream} onChange={e => setStream(e.target.value)}>
           <option value="">— Not Applicable —</option>
@@ -3009,7 +3106,14 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
         <Field label="Date of Birth"><input type="date" className={inputCls} style={inputStyle} value={dob} onChange={e => setDob(e.target.value)} /></Field>
         <Field label="Current School / Institution"><input className={inputCls} style={inputStyle} value={currentSchool} onChange={e => setCurrentSchool(e.target.value)} placeholder="e.g. Delhi Public School" /></Field>
       </div>
-      <Field label="Aadhar Number"><input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} placeholder="12-digit Aadhar number" maxLength={14} /></Field>
+      <Field label="Aadhar Number">
+        <input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} placeholder="12-digit Aadhar number" maxLength={14} />
+        {dupStudent && (
+          <div className="text-[10px] text-[#A63D2F] mt-1 font-medium">
+            ⚠ Matches existing record: {dupStudent.name}{dupStudent.studentId ? ` (${dupStudent.studentId})` : ""} — {dupStudent.class}{dupStudent.phone ? ` · ${dupStudent.phone}` : ""}
+          </div>
+        )}
+      </Field>
       <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="House / street / area / city" /></Field>
       <Field label="Monthly Concession / Discount (₹)"><input type="number" className={inputCls} style={inputStyle} value={monthlyDiscount} onChange={e => setMonthlyDiscount(e.target.value)} placeholder="0" /></Field>
       <Field label="Opening Balance / Legacy Carried Dues (₹)">
@@ -3053,6 +3157,22 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
       <button onClick={submit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
         {initial ? "Save Changes" : "Register Student"}
       </button>
+
+      {showDupPopup && (
+        <Modal title="⚠ Possible Duplicate Registration" onClose={() => setDismissedDupId(dupStudent.id)}>
+          <div className="text-sm mb-3 text-[#4A4636]">This Aadhar Number is already registered against an existing student:</div>
+          <div className="p-3 rounded-sm border bg-[#FAF6EC] text-sm mb-4 space-y-0.5" style={{ borderColor: "#D8CFB8" }}>
+            <div className="font-semibold text-[#12312B]">{dupStudent.name} {dupStudent.studentId ? <span className="font-mono text-xs text-[#9C8F6E]">({dupStudent.studentId})</span> : null}</div>
+            <div className="text-xs text-[#6E6650]">Class {dupStudent.class}{dupStudent.stream ? ` · ${dupStudent.stream}` : ""}</div>
+            <div className="text-xs text-[#6E6650]">{dupStudent.phone || "No phone on record"}</div>
+            <div className="text-xs text-[#6E6650]">Status: <span className="capitalize">{(dupStudent.status || "active").replace("_", " ")}</span></div>
+          </div>
+          <div className="text-[11px] text-[#9C8F6E] mb-3">This is just a check — nothing is blocked. Confirm whether this is a genuine new admission (e.g. a sibling sharing a guardian's Aadhar) or a duplicate entry, then decide whether to continue, edit the number, or cancel.</div>
+          <button onClick={() => setDismissedDupId(dupStudent.id)} className="w-full py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+            Okay, I'll Review This
+          </button>
+        </Modal>
+      )}
     </Modal>
   );
 }
@@ -3356,7 +3476,7 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt, onView
   };
 
   return (
-    <WideModal title={`Statement — ${student.name}`} onClose={onClose}>
+    <WideModal title={`Statement — ${student.name}${student.studentId ? ` (${student.studentId})` : ""}`} onClose={onClose}>
       <div ref={statementRef}>
         {/* Letterhead — mirrors the official receipt so the statement reads as one professional record system */}
         <div className="text-center pb-3 mb-4 border-b-2 border-dashed border-[#12312B]">
@@ -3367,6 +3487,7 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt, onView
         {/* Student / account details */}
         <div className="grid grid-cols-2 gap-x-6 gap-y-1 mb-4 text-xs">
           <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Student Name:</span><strong className="text-[#12312B]">{student.name}</strong></div>
+          <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Student ID:</span><strong className="text-[#12312B]">{student.studentId || "—"}</strong></div>
           <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Statement Date:</span><strong className="text-[#12312B]">{generatedOn}</strong></div>
           <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Class:</span><strong className="text-[#12312B]">{student.class}</strong></div>
           <div className="flex justify-between border-b border-dotted pb-1" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Phone:</span><strong className="text-[#12312B]">{student.phone || "—"}</strong></div>
@@ -4329,7 +4450,9 @@ function JoiningFormModal({ student, deposits, onClose }) {
 
         <div className="section-title">Student Details</div>
         <div className="grid">
+          <div className="row"><span className="label">Student ID</span><span className="value">{student.studentId || "—"}</span></div>
           <div className="row"><span className="label">Full Name</span><span className="value">{student.name || "—"}</span></div>
+          <div className="row"><span className="label">Gender</span><span className="value">{student.gender || "—"}</span></div>
           <div className="row"><span className="label">Father's Name</span><span className="value">{student.fatherName || "—"}</span></div>
           <div className="row"><span className="label">Date of Birth</span><span className="value">{student.dob || "—"}</span></div>
           <div className="row"><span className="label">Aadhar Number</span><span className="value">{student.aadharNumber || "—"}</span></div>
