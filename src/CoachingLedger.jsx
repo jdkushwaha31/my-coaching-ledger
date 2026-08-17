@@ -23,6 +23,27 @@ const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct"
 const PAYMENT_MODES = ["Cash", "UPI", "Bank Transfer", "Cheque"];
 const EXPENSE_CATEGORIES = ["Rent", "Electricity", "Staff Salary", "Stationery", "Maintenance", "Marketing", "Internet / Phone", "Furniture", "Miscellaneous"];
 
+// Streams / academic tracks — shown on the Student form and used as a
+// filter in the Students Directory. Kept as a flat list (not tied to
+// class) since the same stream label can apply across senior classes,
+// diplomas, and degree-level admissions.
+const STREAMS = [
+  "PCM", "PCB", "PCM+B", "PCB+M", "Commerce", "Arts", "Engineering",
+  "Graduate", "Under Graduate", "Post Graduate", "Other",
+];
+
+// Reference types used whenever a bank-side transaction needs a paper
+// trail — Cash ⇄ Bank transfers and the Credit / Loan ledger both reuse
+// this same set so the UI and stored field names stay consistent.
+const REFERENCE_TYPES = ["None", "UTR Number", "Cheque Number", "Reference Number"];
+
+// Who the other side of a Credit / Loan entry is.
+const CREDIT_PARTY_TYPES = ["Person", "Company", "Bank", "Other"];
+// How the money actually moved for a Credit / Loan entry or an Interest
+// Payment against one — Cash stays in the Cash Balance, Online covers
+// UPI / Bank Transfer / NEFT / IMPS and stays in the Bank Balance.
+const CREDIT_MODES = ["Cash", "Online"];
+
 // Exit reasons — used whenever a student leaves an active billing cycle.
 const EXIT_REASONS = [
   { value: "Passed", label: "Passed — completed this class", status: "on_break" },
@@ -252,6 +273,8 @@ export default function CoachingLedger() {
   const [charges, setCharges] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [bankTransactions, setBankTransactions] = useState([]);
+  const [creditTransactions, setCreditTransactions] = useState([]);
+  const [interestPayments, setInterestPayments] = useState([]);
 
   const [showStudentForm, setShowStudentForm] = useState(false);
   const [showDepositForm, setShowDepositForm] = useState(false);
@@ -264,11 +287,15 @@ export default function CoachingLedger() {
   const [showJoiningForm, setShowJoiningForm] = useState(null);
   const [showExpenseForm, setShowExpenseForm] = useState(false);
   const [showBankTxnForm, setShowBankTxnForm] = useState(false);
+  const [showCreditForm, setShowCreditForm] = useState(false);
+  const [showPayInterestModal, setShowPayInterestModal] = useState(null); // credit transaction
   const [editingStudent, setEditingStudent] = useState(null);
   const [receiptData, setReceiptData] = useState(null);
   const [expenseReceiptData, setExpenseReceiptData] = useState(null);
   const [chargeReceiptData, setChargeReceiptData] = useState(null); // { line, student }
   const [bankTxnReceiptData, setBankTxnReceiptData] = useState(null);
+  const [creditReceiptData, setCreditReceiptData] = useState(null);
+  const [interestReceiptData, setInterestReceiptData] = useState(null); // { payment, creditTxn }
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -316,6 +343,16 @@ export default function CoachingLedger() {
       setBankTransactions(data);
     });
 
+    const unsubCreditTxns = onSnapshot(collection(db, "creditTransactions"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setCreditTransactions(data);
+    });
+
+    const unsubInterestPayments = onSnapshot(collection(db, "interestPayments"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setInterestPayments(data);
+    });
+
     const unsubFee = onSnapshot(doc(db, "settings", "feeStructure"), (docSnap) => {
       if (docSnap.exists()) {
         setFeeStructure(docSnap.data().matrix || {});
@@ -343,7 +380,8 @@ export default function CoachingLedger() {
     });
 
     return () => {
-      unsubStudents(); unsubDeposits(); unsubCharges(); unsubExpenses(); unsubBankTxns(); unsubFee(); unsubClasses(); unsubSubjects();
+      unsubStudents(); unsubDeposits(); unsubCharges(); unsubExpenses(); unsubBankTxns();
+      unsubCreditTxns(); unsubInterestPayments(); unsubFee(); unsubClasses(); unsubSubjects();
     };
   }, [isAuthenticated]);
 
@@ -469,9 +507,24 @@ export default function CoachingLedger() {
   // ============================================================================
   const visibleBankTxns = bankTransactions.filter(t => !t.deleted);
   const trashedBankTxns = bankTransactions.filter(t => t.deleted);
+  const visibleCreditTxns = creditTransactions.filter(c => !c.deleted);
+  const trashedCreditTxns = creditTransactions.filter(c => c.deleted);
+  const visibleInterestPayments = interestPayments.filter(p => !p.deleted);
+  const trashedInterestPayments = interestPayments.filter(p => p.deleted);
+  const creditTxnById = Object.fromEntries(creditTransactions.map(c => [c.id, c]));
 
   const totalWithdrawals = round2(visibleBankTxns.filter(t => t.type === "withdrawal").reduce((a, t) => a + Number(t.amount || 0), 0));
   const totalBankDeposits = round2(visibleBankTxns.filter(t => t.type === "deposit").reduce((a, t) => a + Number(t.amount || 0), 0));
+
+  const totalCreditTaken = round2(visibleCreditTxns.filter(c => c.direction === "taken").reduce((a, c) => a + Number(c.amount || 0), 0));
+  const totalCreditGiven = round2(visibleCreditTxns.filter(c => c.direction === "given").reduce((a, c) => a + Number(c.amount || 0), 0));
+  const totalInterestPaid = round2(visibleInterestPayments.reduce((a, p) => a + Number(p.amount || 0), 0));
+  // Interest paid so far against each individual credit entry — used to
+  // show a running "Interest Paid" figure on each row of the Credit Ledger.
+  const interestPaidByCreditId = {};
+  visibleInterestPayments.forEach(p => {
+    interestPaidByCreditId[p.creditTxnId] = round2((interestPaidByCreditId[p.creditTxnId] || 0) + Number(p.amount || 0));
+  });
 
   const bankingDepositLines = visibleDeposits.filter(d => Number(d.amount) > 0).map(d => {
     const st = studentById[d.studentId];
@@ -507,10 +560,37 @@ export default function CoachingLedger() {
     bankDelta: t.type === "withdrawal" ? -round2(t.amount) : round2(t.amount),
   }));
 
+  // Credit / Loan lines — "taken" (borrowed) brings money IN, "given"
+  // (lent) sends money OUT, landing in Cash or Bank depending on mode.
+  const bankingCreditLines = visibleCreditTxns.map(c => {
+    const isCash = (c.mode || "Cash") === "Cash";
+    const isTaken = c.direction === "taken";
+    return {
+      id: `${c.id}-credit`, refId: c.creditId, source: "credit", creditTxnId: c.id,
+      type: isTaken ? "credit_taken" : "credit_given", kind: isTaken ? "credit" : "debit", bucket: isCash ? "cash" : "bank",
+      date: c.date || todayStr(),
+      label: `${isTaken ? "Credit Taken from" : "Credit Given to"} ${c.partyName || "Unknown"}`,
+      remarks: c.remarks || "", amount: round2(c.amount), mode: c.mode || "Cash",
+    };
+  });
+
+  // Interest we pay against a Credit Taken entry — always money OUT.
+  const bankingInterestLines = visibleInterestPayments.map(p => {
+    const isCash = (p.mode || "Cash") === "Cash";
+    const creditTxn = creditTxnById[p.creditTxnId];
+    return {
+      id: `${p.id}-interest`, refId: p.paymentId, source: "interest", interestPaymentId: p.id, creditTxnId: p.creditTxnId,
+      type: "interest_payment", kind: "debit", bucket: isCash ? "cash" : "bank",
+      date: p.date || todayStr(),
+      label: `Interest Paid — ${creditTxn ? creditTxn.partyName : "Unknown"}`,
+      remarks: p.remarks || "", amount: round2(p.amount), mode: p.mode || "Cash",
+    };
+  });
+
   // Ascending pass (oldest first) to compute the running Cash / Bank balance
   // at each line — this is what makes "two balances with every transaction"
   // work correctly regardless of what order the statement is displayed in.
-  const bankingFeedAsc = [...bankingDepositLines, ...bankingExpenseLines, ...bankingTransferLines]
+  const bankingFeedAsc = [...bankingDepositLines, ...bankingExpenseLines, ...bankingTransferLines, ...bankingCreditLines, ...bankingInterestLines]
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.kind === "credit" ? -1 : 1)));
 
   let runningCash = 0, runningBank = 0;
@@ -535,6 +615,7 @@ export default function CoachingLedger() {
     totalDeposits: round2(cashCollected + onlineCollected),
     totalExpenses: totalExpenses,
     totalWithdrawals, totalBankDeposits,
+    totalCreditTaken, totalCreditGiven, totalInterestPaid,
   };
 
   function depositMonthOf(d) { return d.date ? d.date.slice(0, 7) : null; }
@@ -779,6 +860,62 @@ export default function CoachingLedger() {
     await deleteDoc(doc(db, "bankTransactions", id));
   }
 
+  // ---- Banking — Credit / Loan ledger (money we borrow from someone, or
+  // money we lend to someone). Each entry gets its own unique Credit ID
+  // and feeds the Cash Balance / Bank Balance the same way a deposit or
+  // expense does, based on whether it moved as Cash or Online. ----
+  async function addCreditTransaction(data) {
+    const id = uid();
+    const creditId = `CR-${shortId(id)}`;
+    const newTxn = { ...data, id, creditId, deleted: false, createdAt: todayStr() };
+    await setDoc(doc(db, "creditTransactions", id), newTxn);
+    setShowCreditForm(false);
+    setCreditReceiptData(newTxn);
+  }
+  async function softDeleteCreditTransaction(id) {
+    const c = creditTransactions.find(x => x.id === id);
+    if (!c) return;
+    if (!window.confirm("Remove this credit / loan entry? It can be restored later from Trash.")) return;
+    await setDoc(doc(db, "creditTransactions", id), { ...c, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreCreditTransaction(id) {
+    const c = creditTransactions.find(x => x.id === id);
+    if (!c) return;
+    await setDoc(doc(db, "creditTransactions", id), { ...c, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteCreditTransaction(id) {
+    if (!window.confirm("Permanently delete this credit / loan entry? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "creditTransactions", id));
+  }
+
+  // Interest paid against a specific Credit Taken (borrowed) entry. Gets
+  // its own unique, clickable/printable Interest Payment ID and is always
+  // money moving out (Cash or Online) from the center.
+  async function addInterestPayment(data) {
+    const id = uid();
+    const paymentId = `INT-${shortId(id)}`;
+    const newPayment = { ...data, id, paymentId, deleted: false, createdAt: todayStr() };
+    await setDoc(doc(db, "interestPayments", id), newPayment);
+    setShowPayInterestModal(null);
+    const creditTxn = creditTransactions.find(c => c.id === data.creditTxnId);
+    setInterestReceiptData({ payment: newPayment, creditTxn });
+  }
+  async function softDeleteInterestPayment(id) {
+    const p = interestPayments.find(x => x.id === id);
+    if (!p) return;
+    if (!window.confirm("Remove this interest payment? It can be restored later from Trash.")) return;
+    await setDoc(doc(db, "interestPayments", id), { ...p, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreInterestPayment(id) {
+    const p = interestPayments.find(x => x.id === id);
+    if (!p) return;
+    await setDoc(doc(db, "interestPayments", id), { ...p, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteInterestPayment(id) {
+    if (!window.confirm("Permanently delete this interest payment? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "interestPayments", id));
+  }
+
   async function saveFeeStructure(updatedMatrix) {
     setFeeStructure(updatedMatrix);
     await setDoc(doc(db, "settings", "feeStructure"), { matrix: updatedMatrix });
@@ -814,7 +951,7 @@ export default function CoachingLedger() {
     { id: "trash", label: "Trash / Restore", icon: Archive },
   ];
 
-  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length;
+  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length;
 
   return (
     <div className="min-h-screen flex" style={{ background: "#FAF6EC", fontFamily: "'Inter', sans-serif", color: "#26231D" }}>
@@ -822,6 +959,20 @@ export default function CoachingLedger() {
         .ledger-row:nth-child(even) { background: #F5F0E1; }
         input, select { font-family: 'Inter', sans-serif; }
         ::selection { background: #B8862B33; }
+
+        /* Joining Form — same class names the print stylesheet uses, so the
+           on-screen preview matches the printed A4 form instead of showing
+           up as plain unstyled text. */
+        .joining-form-doc { position: relative; }
+        .joining-form-doc .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 14px; margin-bottom: 20px; }
+        .joining-form-doc .section-title { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #8A6420; border-bottom: 1px solid #D8CFB8; padding-bottom: 5px; margin: 22px 0 12px; }
+        .joining-form-doc .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 28px; }
+        .joining-form-doc .row { font-size: 13px; padding: 8px 2px; border-bottom: 1px dotted #E4DCC5; display: flex; justify-content: space-between; gap: 14px; }
+        .joining-form-doc .label { color: #6E6650; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.02em; }
+        .joining-form-doc .value { font-weight: 600; color: #12312B; text-align: right; }
+        .joining-form-doc .footer { border-top: 1.5px solid #12312B; padding-top: 12px; margin-top: 30px; text-align: center; font-size: 10px; color: #6E6650; letter-spacing: 0.05em; }
+        .joining-form-doc .sign-row { display: flex; justify-content: space-between; margin-top: 68px; font-size: 12px; }
+        .joining-form-doc .sign-line { border-top: 1px solid #12312B; padding-top: 6px; width: 200px; text-align: center; color: #4A4636; }
       `}</style>
 
       <aside className="w-60 shrink-0 flex flex-col justify-between" style={{ background: "#12312B" }}>
@@ -933,7 +1084,11 @@ export default function CoachingLedger() {
         {tab === "banking" && (
           <BankingTab
             feed={bankingFeed} totals={bankingTotals}
+            bankTxns={visibleBankTxns} creditTxns={visibleCreditTxns} interestPayments={visibleInterestPayments}
+            interestPaidByCreditId={interestPaidByCreditId}
             onAdd={() => setShowBankTxnForm(true)}
+            onAddCredit={() => setShowCreditForm(true)}
+            onPayInterest={(creditTxn) => setShowPayInterestModal(creditTxn)}
             onViewReceipt={(depositId) => {
               const dep = visibleDeposits.find(d => d.id === depositId);
               if (dep) setReceiptData({ deposit: dep, student: studentById[dep.studentId] });
@@ -946,19 +1101,31 @@ export default function CoachingLedger() {
               const t = visibleBankTxns.find(x => x.id === bankTxnId);
               if (t) setBankTxnReceiptData(t);
             }}
+            onViewCredit={(creditTxnId) => {
+              const c = visibleCreditTxns.find(x => x.id === creditTxnId);
+              if (c) setCreditReceiptData(c);
+            }}
+            onViewInterest={(interestPaymentId) => {
+              const p = visibleInterestPayments.find(x => x.id === interestPaymentId);
+              if (p) setInterestReceiptData({ payment: p, creditTxn: creditTxnById[p.creditTxnId] });
+            }}
             onRemoveBankTxn={softDeleteBankTransaction}
+            onRemoveCredit={softDeleteCreditTransaction}
+            onRemoveInterest={softDeleteInterestPayment}
           />
         )}
         {tab === "trash" && (
           <TrashTab
             trashedStudents={trashedStudents} trashedDeposits={trashedDeposits} trashedCharges={trashedCharges} trashedExpenses={trashedExpenses}
-            trashedBankTxns={trashedBankTxns}
+            trashedBankTxns={trashedBankTxns} trashedCreditTxns={trashedCreditTxns} trashedInterestPayments={trashedInterestPayments}
             studentById={studentById}
             onRestoreStudent={restoreStudent} onDeleteStudent={permanentlyDeleteStudent}
             onRestoreDeposit={restoreDeposit} onDeleteDeposit={permanentlyDeleteDeposit}
             onRestoreCharge={restoreCharge} onDeleteCharge={permanentlyDeleteCharge}
             onRestoreExpense={restoreExpense} onDeleteExpense={permanentlyDeleteExpense}
             onRestoreBankTxn={restoreBankTransaction} onDeleteBankTxn={permanentlyDeleteBankTransaction}
+            onRestoreCredit={restoreCreditTransaction} onDeleteCredit={permanentlyDeleteCreditTransaction}
+            onRestoreInterest={restoreInterestPayment} onDeleteInterest={permanentlyDeleteInterestPayment}
           />
         )}
       </main>
@@ -980,7 +1147,7 @@ export default function CoachingLedger() {
         <BatchChangeModal student={showBatchChangeModal} subjectsList={subjectsList} curMonth={curMonth} onClose={() => setShowBatchChangeModal(null)} onSave={changeStudentBatches} />
       )}
       {showHistoryModal && <AcademicHistoryModal student={showHistoryModal} onClose={() => setShowHistoryModal(null)} />}
-      {showJoiningForm && <JoiningFormModal student={showJoiningForm} onClose={() => setShowJoiningForm(null)} />}
+      {showJoiningForm && <JoiningFormModal student={showJoiningForm} deposits={visibleDeposits} onClose={() => setShowJoiningForm(null)} />}
       {showChargeModal && (
         <AddChargeModal students={visibleStudents} charges={visibleCharges} initialStudent={showChargeModal.student} curMonth={curMonth} onClose={() => setShowChargeModal(null)} onSave={addCharge} />
       )}
@@ -1013,6 +1180,19 @@ export default function CoachingLedger() {
       )}
       {bankTxnReceiptData && (
         <BankTxnReceiptModal txn={bankTxnReceiptData} onClose={() => setBankTxnReceiptData(null)} />
+      )}
+      {showCreditForm && (
+        <CreditFormModal onClose={() => setShowCreditForm(false)} onSave={addCreditTransaction} />
+      )}
+      {creditReceiptData && (
+        <CreditReceiptModal txn={creditReceiptData} onClose={() => setCreditReceiptData(null)} />
+      )}
+      {showPayInterestModal && (
+        <PayInterestModal creditTxn={showPayInterestModal} interestPaidSoFar={interestPaidByCreditId[showPayInterestModal.id] || 0}
+          onClose={() => setShowPayInterestModal(null)} onSave={addInterestPayment} />
+      )}
+      {interestReceiptData && (
+        <InterestReceiptModal payment={interestReceiptData.payment} creditTxn={interestReceiptData.creditTxn} onClose={() => setInterestReceiptData(null)} />
       )}
     </div>
   );
@@ -1241,16 +1421,24 @@ function LifecycleActions({ s, onExit, onPromote, onBatchChange, onViewHistory, 
 
 function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth, onAdd, onEdit, onExit, onPromote, onViewHistory, onBatchChange, onUndo, onStatement, onAddCharge, onJoiningForm, onRemove }) {
   const [search, setSearch] = useState("");
+  const [streamFilter, setStreamFilter] = useState("all");
   const [expanded, setExpanded] = useState({});
+
+  const streamsInUse = useMemo(() => {
+    const set = new Set();
+    students.forEach(s => { if (s.stream) set.add(s.stream); });
+    return STREAMS.filter(s => set.has(s));
+  }, [students]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return students;
     return students.filter(s => {
-      const haystack = [s.name, s.fatherName, s.phone, s.guardianPhone, s.address].filter(Boolean).join(" ").toLowerCase();
+      if (streamFilter !== "all" && (s.stream || "") !== streamFilter) return false;
+      if (!q) return true;
+      const haystack = [s.name, s.fatherName, s.phone, s.guardianPhone, s.address, s.aadharNumber].filter(Boolean).join(" ").toLowerCase();
       return haystack.includes(q);
     });
-  }, [students, search]);
+  }, [students, search, streamFilter]);
 
   return (
     <div>
@@ -1261,9 +1449,22 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
       } />
 
       <Card className="p-3.5 mb-4">
-        <div className="relative max-w-sm">
-          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
-          <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, father's name, phone, guardian phone, or address…" />
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="relative flex-1 min-w-[260px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" style={{ marginTop: "9px" }} />
+            <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, father's name, phone, guardian phone, Aadhar, or address…" />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Stream</div>
+            <select className={inputCls} style={inputStyle} value={streamFilter} onChange={e => setStreamFilter(e.target.value)}>
+              <option value="all">All Streams</option>
+              {streamsInUse.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          {(search || streamFilter !== "all") && (
+            <button onClick={() => { setSearch(""); setStreamFilter("all"); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
         </div>
       </Card>
 
@@ -1286,7 +1487,7 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
                 const badgeText = status === "active" ? "Active" : status === "dropped" ? "Dropped Out" : (s.resultStatus || "On Break");
                 const badgeTone = status === "active" ? "paid" : status === "dropped" ? "overdue" : "break";
                 const isOpen = !!expanded[s.id];
-                const hasDetails = s.fatherName || s.guardianPhone || s.address || s.dob || s.currentSchool || s.aadharNumber;
+                const hasDetails = s.fatherName || s.guardianPhone || s.address || s.dob || s.currentSchool || s.aadharNumber || s.stream;
                 return (
                   <React.Fragment key={s.id}>
                     <tr className="ledger-row">
@@ -1301,7 +1502,10 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
                         <div>{s.name}</div>
                         {s.phone && <div className="text-[10px] text-[#9C8F6E]">{s.phone}</div>}
                       </td>
-                      <td className="px-4 py-2.5 font-semibold text-[#12312B]">{s.class}</td>
+                      <td className="px-4 py-2.5 font-semibold text-[#12312B]">
+                        {s.class}
+                        {s.stream && <div className="text-[10px] font-normal text-[#9C8F6E]">{s.stream}</div>}
+                      </td>
                       <td className="px-4 py-2.5 text-xs text-[#6E6650]">{batchesForMonth(s, curMonth).join(", ") || "—"}</td>
                       <td className="px-4 py-2.5 text-xs font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: dueAmount > 0 ? "#A63D2F" : "#3F6B52" }}>{fmtINR(dueAmount)}</td>
                       <td className="px-4 py-2.5 text-xs"><Stamp text={badgeText} tone={badgeTone} /></td>
@@ -1324,6 +1528,7 @@ function StudentsTab({ students, studentDues, classes, batchesForMonth, curMonth
                             <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Date of Birth</span>{s.dob || "—"}</div>
                             <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Current School / Institution</span>{s.currentSchool || "—"}</div>
                             <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Aadhar Number</span>{s.aadharNumber || "—"}</div>
+                            <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Stream</span>{s.stream || "—"}</div>
                           </div>
                         </td>
                       </tr>
@@ -1971,6 +2176,9 @@ const BANKING_TXN_TYPE_META = {
   expense: { label: "Expense", tone: "overdue" },
   bank_withdrawal: { label: "Bank Withdrawal (→ Cash)", tone: "break" },
   bank_deposit: { label: "Cash Deposit (→ Bank)", tone: "carried" },
+  credit_taken: { label: "Credit Taken (Borrowed)", tone: "carried" },
+  credit_given: { label: "Credit Given (Lent)", tone: "overdue" },
+  interest_payment: { label: "Interest Paid", tone: "break" },
 };
 
 function CenterStatementTab({ transactions, totals, students, classes, onViewReceipt, onViewCharge }) {
@@ -2167,12 +2375,13 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
 // side by side, so the two balances are always auditable transaction-by-
 // transaction.
 // ============================================================================
-function BankingTab({ feed, totals, onAdd, onViewReceipt, onViewExpense, onViewBankTxn, onRemoveBankTxn }) {
+function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, interestPaidByCreditId, onAdd, onAddCredit, onPayInterest, onViewReceipt, onViewExpense, onViewBankTxn, onViewCredit, onViewInterest, onRemoveBankTxn, onRemoveCredit, onRemoveInterest }) {
   const statementRef = useRef();
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [expandedCredit, setExpandedCredit] = useState({});
 
   const filtered = feed.filter(t => {
     if (search) {
@@ -2217,16 +2426,19 @@ function BankingTab({ feed, totals, onAdd, onViewReceipt, onViewExpense, onViewB
   return (
     <div>
       <SectionHeader eyebrow="Internal Ledger" title="Banking" action={
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap justify-end">
           <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
             <Plus size={15} /> Record Cash ⇄ Bank Transfer
+          </button>
+          <button onClick={onAddCredit} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#8A6420", color: "#FAF6EC" }}>
+            <Plus size={15} /> Record Credit / Loan
           </button>
           <button onClick={handlePrint} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm border" style={{ borderColor: "#12312B", color: "#12312B" }}>
             <Printer size={15} /> Print / Export
           </button>
         </div>
       } />
-      <div className="text-sm text-[#6E6650] mb-4">Every student deposit, every center expense, and every internal Cash ⇄ Bank transfer, in one auditable feed — with a running Cash Balance and Bank Balance shown on every line. Nothing here appears on the Center Statement.</div>
+      <div className="text-sm text-[#6E6650] mb-4">Every student deposit, every center expense, every internal Cash ⇄ Bank transfer, and every Credit / Loan entry, in one auditable feed — with a running Cash Balance and Bank Balance shown on every line. Nothing here appears on the Center Statement.</div>
 
       <div className="grid grid-cols-2 gap-4 mb-5">
         <Card className="p-5" style={{ borderLeft: "4px solid #3F6B52" }}>
@@ -2239,7 +2451,7 @@ function BankingTab({ feed, totals, onAdd, onViewReceipt, onViewExpense, onViewB
         </Card>
       </div>
 
-      <div className="grid grid-cols-4 gap-3 mb-5">
+      <div className="grid grid-cols-4 gap-3 mb-3">
         <Card className="p-3.5">
           <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Total Deposits Collected</div>
           <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-bold text-[#3F6B52]">{fmtINR(totals.totalDeposits)}</div>
@@ -2255,6 +2467,21 @@ function BankingTab({ feed, totals, onAdd, onViewReceipt, onViewExpense, onViewB
         <Card className="p-3.5">
           <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Deposited to Bank</div>
           <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-bold text-[#8A6420]">{fmtINR(totals.totalBankDeposits)}</div>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 mb-5">
+        <Card className="p-3.5">
+          <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Total Credit Taken (Borrowed)</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-bold text-[#8A6420]">{fmtINR(totals.totalCreditTaken)}</div>
+        </Card>
+        <Card className="p-3.5">
+          <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Total Credit Given (Lent)</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-bold text-[#A63D2F]">{fmtINR(totals.totalCreditGiven)}</div>
+        </Card>
+        <Card className="p-3.5">
+          <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Total Interest Paid</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-lg font-bold text-[#A63D2F]">{fmtINR(totals.totalInterestPaid)}</div>
         </Card>
       </div>
 
@@ -2300,7 +2527,7 @@ function BankingTab({ feed, totals, onAdd, onViewReceipt, onViewExpense, onViewB
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                  {["Reference / Txn ID", "Date", "Description", "Remarks", "Type", "Debit", "Credit", "Cash Balance", "Bank Balance", ""].map(h => (
+                  {["Reference / Txn ID", "Date", "Description", "Remarks", "Type", "Debit", "Credit", "Cash Balance", "Bank Balance"].map(h => (
                     <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                   ))}
                 </tr>
@@ -2319,6 +2546,10 @@ function BankingTab({ feed, totals, onAdd, onViewReceipt, onViewExpense, onViewB
                           </button>
                         ) : t.source === "expense" ? (
                           <button onClick={() => onViewExpense(t.expenseRowId)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{t.refId}</button>
+                        ) : t.source === "credit" ? (
+                          <button onClick={() => onViewCredit(t.creditTxnId)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open credit slip">{t.refId}</button>
+                        ) : t.source === "interest" ? (
+                          <button onClick={() => onViewInterest(t.interestPaymentId)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open interest payment slip">{t.refId}</button>
                         ) : (
                           <button onClick={() => onViewBankTxn(t.bankTxnId)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open transaction slip">{t.refId}</button>
                         )}
@@ -2331,11 +2562,6 @@ function BankingTab({ feed, totals, onAdd, onViewReceipt, onViewExpense, onViewB
                       <td className="px-4 py-2.5 font-mono text-[#3F6B52]">{creditAmt != null ? fmtINR(creditAmt) : ""}</td>
                       <td className="px-4 py-2.5 font-mono text-xs font-semibold text-[#3F6B52]">{fmtINR(t.cashBalance)}</td>
                       <td className="px-4 py-2.5 font-mono text-xs font-semibold text-[#2B526C]">{fmtINR(t.bankBalance)}</td>
-                      <td className="px-4 py-2.5 text-right">
-                        {t.source === "banktxn" && (
-                          <button onClick={() => onRemoveBankTxn(t.bankTxnId)} className="text-[10px] text-[#A63D2F] underline">Delete</button>
-                        )}
-                      </td>
                     </tr>
                   );
                 })}
@@ -2343,15 +2569,150 @@ function BankingTab({ feed, totals, onAdd, onViewReceipt, onViewExpense, onViewB
             </table>
           )}
           <div className="footer text-center pt-3 pb-4 mt-2 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
-            Computer Generated Statement · Cash Balance and Bank Balance reflect every deposit, expense, and internal transfer up to this line
+            Computer Generated Statement · Cash Balance and Bank Balance reflect every deposit, expense, internal transfer, and credit/loan entry up to this line
           </div>
         </div>
+      </Card>
+
+      {/* ===================================================================
+          CASH ⇄ BANK TRANSFER LOGS — a dedicated section just for internal
+          transfers, kept separate from the main statement above (which is
+          now read-only / no delete button). Delete lives here instead.
+      =================================================================== */}
+      <div className="mt-8 mb-3 flex items-center justify-between">
+        <div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-0.5">Internal Transfers</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-semibold text-[#1B1810]">Cash ⇄ Bank Transfer Logs</div>
+        </div>
+      </div>
+      <Card className="mb-8">
+        {(!bankTxns || bankTxns.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No Cash ⇄ Bank transfers recorded yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Txn ID", "Date", "Type", "Bank / Account", "Reference", "Remarks", "Amount", ""].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {[...bankTxns].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)).map(t => (
+                <tr key={t.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-[10px] font-mono">
+                    <button onClick={() => onViewBankTxn(t.id)} className="text-[#12312B] underline hover:text-[#3F6B52]">{t.txnId}</button>
+                  </td>
+                  <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{t.date}</td>
+                  <td className="px-4 py-2.5"><Stamp text={t.type === "withdrawal" ? "Bank → Cash" : "Cash → Bank"} tone={t.type === "withdrawal" ? "break" : "carried"} /></td>
+                  <td className="px-4 py-2.5 text-xs text-[#6E6650]">{t.bankName || t.accountNumber ? `${t.bankName || "—"}${t.accountNumber ? " · " + t.accountNumber : ""}` : "—"}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#6E6650]">{t.refType && t.refNumber ? `${t.refType}: ${t.refNumber}` : "—"}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#6E6650]">{t.remarks || "—"}</td>
+                  <td className="px-4 py-2.5 font-mono text-xs font-semibold text-[#8A6420]">{fmtINR(t.amount)}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRemoveBankTxn(t.id)} className="text-[10px] text-[#A63D2F] underline">Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {/* ===================================================================
+          CREDIT & LOAN LEDGER — money borrowed (Credit Taken) or lent
+          (Credit Given), each with a unique Credit ID, full party details,
+          and a "Pay Interest" action (for money we've borrowed) that logs
+          its own unique, clickable Interest Payment.
+      =================================================================== */}
+      <div className="mt-2 mb-3">
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-0.5">Borrowed & Lent</div>
+        <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-semibold text-[#1B1810]">Credit &amp; Loan Ledger</div>
+      </div>
+      <Card>
+        {(!creditTxns || creditTxns.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No credit / loan entries recorded yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["", "Credit ID", "Date", "Direction", "Party", "Contact", "Amount", "Interest Paid", ""].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {[...creditTxns].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0)).map(c => {
+                const isOpen = !!expandedCredit[c.id];
+                const paidSoFar = (interestPaidByCreditId && interestPaidByCreditId[c.id]) || 0;
+                const history = (interestPayments || []).filter(p => p.creditTxnId === c.id).sort((a, b) => (a.date < b.date ? 1 : -1));
+                return (
+                  <React.Fragment key={c.id}>
+                    <tr className="ledger-row">
+                      <td className="pl-3 py-2.5">
+                        {history.length > 0 && (
+                          <button onClick={() => setExpandedCredit(prev => ({ ...prev, [c.id]: !prev[c.id] }))} className="text-[#9C8F6E] hover:text-[#12312B] text-xs w-4">
+                            {isOpen ? "▾" : "▸"}
+                          </button>
+                        )}
+                      </td>
+                      <td className="px-4 py-2.5 text-[10px] font-mono">
+                        <button onClick={() => onViewCredit(c.id)} className="text-[#12312B] underline hover:text-[#3F6B52]">{c.creditId}</button>
+                      </td>
+                      <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{c.date}</td>
+                      <td className="px-4 py-2.5"><Stamp text={c.direction === "taken" ? "Credit Taken" : "Credit Given"} tone={c.direction === "taken" ? "carried" : "overdue"} /></td>
+                      <td className="px-4 py-2.5 text-xs">
+                        <div className="font-medium">{c.partyName}</div>
+                        <div className="text-[10px] text-[#9C8F6E]">{c.partyType}{c.mode ? " · " + c.mode : ""}</div>
+                      </td>
+                      <td className="px-4 py-2.5 text-xs text-[#6E6650]">{c.mobile || "—"}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs font-semibold" style={{ color: c.direction === "taken" ? "#8A6420" : "#A63D2F" }}>{fmtINR(c.amount)}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs text-[#6E6650]">{paidSoFar > 0 ? fmtINR(paidSoFar) : "—"}</td>
+                      <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                        <div className="flex flex-wrap gap-2 justify-end items-center">
+                          {c.direction === "taken" && (
+                            <button onClick={() => onPayInterest(c)} className="text-[10px] text-[#8A6420] underline font-semibold">Pay Interest</button>
+                          )}
+                          <button onClick={() => onRemoveCredit(c.id)} className="text-[10px] text-[#A63D2F] underline">Delete</button>
+                        </div>
+                      </td>
+                    </tr>
+                    {isOpen && history.length > 0 && (
+                      <tr>
+                        <td></td>
+                        <td colSpan={8} className="px-4 pb-3 pt-0">
+                          <div className="p-3 rounded bg-[#FAF6EC] border text-xs" style={{ borderColor: "#D8CFB8" }}>
+                            <div className="text-[10px] uppercase font-mono text-[#9C8F6E] mb-2">Interest Payment History</div>
+                            <div className="space-y-1.5">
+                              {history.map(p => (
+                                <div key={p.id} className="flex items-center justify-between">
+                                  <span>
+                                    <button onClick={() => onViewInterest(p.id)} className="underline text-[#12312B] font-mono mr-2">{p.paymentId}</button>
+                                    <span className="text-[#6E6650]">{p.date} · {p.mode}</span>
+                                  </span>
+                                  <span className="flex items-center gap-3">
+                                    <strong className="font-mono text-[#8A6420]">{fmtINR(p.amount)}</strong>
+                                    <button onClick={() => onRemoveInterest(p.id)} className="text-[#A63D2F] underline text-[10px]">Delete</button>
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </Card>
     </div>
   );
 }
 
-function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn }) {
+function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, trashedCreditTxns, trashedInterestPayments, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn, onRestoreCredit, onDeleteCredit, onRestoreInterest, onDeleteInterest }) {
   return (
     <div>
       <SectionHeader eyebrow="Recycle Bin" title="Trash / Restore" />
@@ -2481,6 +2842,54 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
           </table>
         )}
       </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Credit / Loan Entries</span></div>
+      <Card className="mb-6">
+        {(!trashedCreditTxns || trashedCreditTxns.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted credit / loan entries.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedCreditTxns.map(c => (
+                <tr key={c.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-xs font-mono">{c.date}</td>
+                  <td className="px-4 py-2.5 font-medium">{c.partyName} <span className="text-[10px] text-[#9C8F6E] font-mono">({c.creditId})</span></td>
+                  <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#8A6420]">{fmtINR(c.amount)}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {c.deletedAt || ""}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRestoreCredit(c.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                    <button onClick={() => onDeleteCredit(c.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Interest Payments</span></div>
+      <Card>
+        {(!trashedInterestPayments || trashedInterestPayments.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted interest payments.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedInterestPayments.map(p => (
+                <tr key={p.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-xs font-mono">{p.date}</td>
+                  <td className="px-4 py-2.5 font-medium">{p.paymentId}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#8A6420]">{fmtINR(p.amount)}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {p.deletedAt || ""}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRestoreInterest(p.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                    <button onClick={() => onDeleteInterest(p.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
     </div>
   );
 }
@@ -2528,6 +2937,7 @@ const inputStyle = { borderColor: "#D8CFB8" };
 function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
   const [name, setName] = useState(initial?.name || "");
   const [cls, setCls] = useState(initial?.class || classes[0] || "10");
+  const [stream, setStream] = useState(initial?.stream || "");
   const [batches, setBatches] = useState(initial?.batches || []);
   const [phone, setPhone] = useState(initial?.phone || "");
   const [fatherName, setFatherName] = useState(initial?.fatherName || "");
@@ -2560,7 +2970,7 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
     const baseHistory = initial?.batchHistory && initial.batchHistory.length ? [...initial.batchHistory] : [{ fromMonth: admissionMonth, batches }];
     if (initial?.batchHistory && initial.batchHistory.length) baseHistory[0] = { ...baseHistory[0], batches };
     onSave({
-      ...initial, id: initial?.id, name: name.trim(), class: cls, batches, batchHistory: baseHistory,
+      ...initial, id: initial?.id, name: name.trim(), class: cls, stream, batches, batchHistory: baseHistory,
       phone: phone.trim(), fatherName: fatherName.trim(), guardianPhone: guardianPhone.trim(), address: address.trim(),
       dob: dob || "", currentSchool: currentSchool.trim(), aadharNumber: aadharNumber.trim(),
       admissionMonth, monthlyDiscount: Number(monthlyDiscount) || 0,
@@ -2585,6 +2995,12 @@ function StudentFormModal({ classes, subjectsList, initial, onClose, onSave }) {
         </Field>
         <Field label="Fee Start Month"><input type="month" className={inputCls} style={inputStyle} value={admissionMonth} onChange={e => setAdmissionMonth(e.target.value)} /></Field>
       </div>
+      <Field label="Stream (optional)">
+        <select className={inputCls} style={inputStyle} value={stream} onChange={e => setStream(e.target.value)}>
+          <option value="">— Not Applicable —</option>
+          {STREAMS.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Phone / WhatsApp Number"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit phone number" /></Field>
         <Field label="Guardian Phone Number"><input className={inputCls} style={inputStyle} value={guardianPhone} onChange={e => setGuardianPhone(e.target.value)} placeholder="Alternate contact (optional)" /></Field>
@@ -3323,16 +3739,25 @@ function BankTxnFormModal({ onClose, onSave }) {
   const [type, setType] = useState("withdrawal");
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayStr());
+  const [bankName, setBankName] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [refType, setRefType] = useState("None");
+  const [refNumber, setRefNumber] = useState("");
   const [remarks, setRemarks] = useState("");
 
   function submit() {
     if (!amount || Number(amount) <= 0) return;
-    onSave({ type, amount: Number(amount) || 0, date, remarks: remarks.trim() });
+    onSave({
+      type, amount: Number(amount) || 0, date,
+      bankName: bankName.trim(), accountNumber: accountNumber.trim(),
+      refType: refType !== "None" ? refType : "", refNumber: refType !== "None" ? refNumber.trim() : "",
+      remarks: remarks.trim(),
+    });
   }
 
   return (
     <Modal title="Record Cash ⇄ Bank Transfer" onClose={onClose}>
-      <div className="text-xs text-[#6E6650] mb-3">Move money between physical Cash and your Bank/Online account. This does not affect student dues or center expenses — it only shifts where the center's own money is held. It gets a unique Transaction ID and only appears in the Banking Statement.</div>
+      <div className="text-xs text-[#6E6650] mb-3">Move money between physical Cash and your Bank/Online account. This does not affect student dues or center expenses — it only shifts where the center's own money is held. It gets a unique Transaction ID and only appears in the Banking tab.</div>
 
       <Field label="Transaction Type">
         <div className="grid grid-cols-1 gap-2">
@@ -3351,6 +3776,25 @@ function BankTxnFormModal({ onClose, onSave }) {
         <Field label="Amount (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" /></Field>
         <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
       </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Bank Name"><input className={inputCls} style={inputStyle} value={bankName} onChange={e => setBankName(e.target.value)} placeholder="e.g. State Bank of India" /></Field>
+        <Field label="Account Number"><input className={inputCls} style={inputStyle} value={accountNumber} onChange={e => setAccountNumber(e.target.value)} placeholder="e.g. 3849201XXXXX" /></Field>
+      </div>
+
+      <Field label="Reference Type (optional)">
+        <div className="flex gap-2 flex-wrap">
+          {REFERENCE_TYPES.map(rt => (
+            <button key={rt} type="button" onClick={() => setRefType(rt)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+              style={{ background: refType === rt ? "#12312B" : "white", color: refType === rt ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+              {rt}
+            </button>
+          ))}
+        </div>
+      </Field>
+      {refType !== "None" && (
+        <Field label={refType}><input className={inputCls} style={inputStyle} value={refNumber} onChange={e => setRefNumber(e.target.value)} placeholder={`Enter ${refType.toLowerCase()}`} /></Field>
+      )}
 
       <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any note for this transfer" /></Field>
 
@@ -3411,6 +3855,9 @@ function BankTxnReceiptModal({ txn, onClose }) {
             <span>Date: <strong className="text-[#12312B]">{txn.date}</strong></span>
           </div>
           <div className="flex justify-between text-[#6E6650]"><span>Type:</span><strong className="text-[#12312B]">{typeLabel}</strong></div>
+          {txn.bankName && <div className="flex justify-between text-[#6E6650]"><span>Bank Name:</span><strong className="text-[#12312B]">{txn.bankName}</strong></div>}
+          {txn.accountNumber && <div className="flex justify-between text-[#6E6650]"><span>Account Number:</span><strong className="text-[#12312B]">{txn.accountNumber}</strong></div>}
+          {txn.refType && txn.refNumber && <div className="flex justify-between text-[#6E6650]"><span>{txn.refType}:</span><strong className="text-[#12312B]">{txn.refNumber}</strong></div>}
           {txn.remarks && <div className="flex justify-between text-[#6E6650]"><span>Remarks:</span><strong className="text-[#12312B]">{txn.remarks}</strong></div>}
 
           <div className="pt-3 mt-3 border-t-2 border-[#12312B]">
@@ -3422,6 +3869,327 @@ function BankTxnReceiptModal({ txn, onClose }) {
         </div>
         <div className="text-center pt-3 mt-3 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
           Internal Transfer Only — Not a Student Charge, Payment, or Center Expense · Computer Generated Slip
+        </div>
+      </div>
+      <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Slip</button>
+    </Modal>
+  );
+}
+
+// ============================================================================
+// CREDIT / LOAN LEDGER — money the center borrows from someone (Credit
+// Taken) or lends to someone (Credit Given). Each entry gets a unique,
+// clickable/printable Credit ID and feeds the Cash Balance / Bank Balance
+// the same way a deposit or expense does. A "Pay Interest" action against
+// any Credit Taken entry logs a separate, also-unique Interest Payment.
+// ============================================================================
+function CreditFormModal({ onClose, onSave }) {
+  const [direction, setDirection] = useState("taken");
+  const [partyName, setPartyName] = useState("");
+  const [partyType, setPartyType] = useState("Person");
+  const [address, setAddress] = useState("");
+  const [mobile, setMobile] = useState("");
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [mode, setMode] = useState("Cash");
+  const [bankName, setBankName] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [refType, setRefType] = useState("None");
+  const [refNumber, setRefNumber] = useState("");
+  const [interestRate, setInterestRate] = useState("");
+  const [remarks, setRemarks] = useState("");
+
+  function submit() {
+    if (!partyName.trim() || !amount || Number(amount) <= 0) return;
+    onSave({
+      direction, partyName: partyName.trim(), partyType, address: address.trim(), mobile: mobile.trim(),
+      amount: Number(amount) || 0, date, mode,
+      bankName: mode === "Online" ? bankName.trim() : "", accountNumber: mode === "Online" ? accountNumber.trim() : "",
+      refType: mode === "Online" && refType !== "None" ? refType : "", refNumber: mode === "Online" && refType !== "None" ? refNumber.trim() : "",
+      interestRate: Number(interestRate) || 0, remarks: remarks.trim(),
+    });
+  }
+
+  return (
+    <Modal title="Record Credit / Loan" onClose={onClose}>
+      <div className="text-xs text-[#6E6650] mb-3">Log money borrowed from someone, or money lent out to someone. Gets its own unique Credit ID and shows up in the Banking Cash/Bank Balance and the Credit &amp; Loan Ledger below.</div>
+
+      <Field label="Direction">
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" onClick={() => setDirection("taken")} className="px-3 py-2.5 text-xs rounded-sm border font-semibold text-left flex items-center gap-2"
+            style={{ background: direction === "taken" ? "#12312B" : "white", color: direction === "taken" ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+            <ArrowUpRight size={14} className="rotate-180" /> Credit Taken (we borrow)
+          </button>
+          <button type="button" onClick={() => setDirection("given")} className="px-3 py-2.5 text-xs rounded-sm border font-semibold text-left flex items-center gap-2"
+            style={{ background: direction === "given" ? "#12312B" : "white", color: direction === "given" ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+            <ArrowUpRight size={14} /> Credit Given (we lend)
+          </button>
+        </div>
+      </Field>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label={direction === "taken" ? "Received From" : "Given To"}><input className={inputCls} style={inputStyle} value={partyName} onChange={e => setPartyName(e.target.value)} placeholder="Name of person / company / bank" /></Field>
+        <Field label="Party Type">
+          <select className={inputCls} style={inputStyle} value={partyType} onChange={e => setPartyType(e.target.value)}>
+            {CREDIT_PARTY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Mobile Number"><input className={inputCls} style={inputStyle} value={mobile} onChange={e => setMobile(e.target.value)} placeholder="10-digit mobile number" /></Field>
+        <Field label="Amount (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" /></Field>
+      </div>
+      <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="Address of the other party" /></Field>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+        <Field label="Annual Interest Rate % (optional)"><input type="number" className={inputCls} style={inputStyle} value={interestRate} onChange={e => setInterestRate(e.target.value)} placeholder="0" /></Field>
+      </div>
+
+      <Field label="Mode">
+        <div className="flex gap-2 flex-wrap">
+          {CREDIT_MODES.map(m => (
+            <button key={m} type="button" onClick={() => setMode(m)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+              style={{ background: mode === m ? "#12312B" : "white", color: mode === m ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {mode === "Online" && (
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Bank Name"><input className={inputCls} style={inputStyle} value={bankName} onChange={e => setBankName(e.target.value)} placeholder="e.g. HDFC Bank" /></Field>
+            <Field label="Account Number"><input className={inputCls} style={inputStyle} value={accountNumber} onChange={e => setAccountNumber(e.target.value)} placeholder="e.g. 5021XXXXXX" /></Field>
+          </div>
+          <Field label="Reference Type">
+            <div className="flex gap-2 flex-wrap">
+              {REFERENCE_TYPES.map(rt => (
+                <button key={rt} type="button" onClick={() => setRefType(rt)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+                  style={{ background: refType === rt ? "#12312B" : "white", color: refType === rt ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+                  {rt}
+                </button>
+              ))}
+            </div>
+          </Field>
+          {refType !== "None" && (
+            <Field label={refType}><input className={inputCls} style={inputStyle} value={refNumber} onChange={e => setRefNumber(e.target.value)} placeholder={`Enter ${refType.toLowerCase()}`} /></Field>
+          )}
+        </>
+      )}
+
+      <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any note for this entry" /></Field>
+
+      <div className="p-3 rounded bg-[#FAF6EC] border text-xs mb-1" style={{ borderColor: "#D8CFB8" }}>
+        {direction === "taken"
+          ? `${mode} Balance will increase by this amount — this is money coming in.`
+          : `${mode} Balance will decrease by this amount — this is money going out.`}
+      </div>
+
+      <button onClick={submit} disabled={!partyName.trim() || !amount || Number(amount) <= 0} className="w-full mt-1 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Record Credit &amp; Generate Slip
+      </button>
+    </Modal>
+  );
+}
+
+function CreditReceiptModal({ txn, onClose }) {
+  const receiptRef = useRef();
+  if (!txn) return null;
+  const typeLabel = txn.direction === "taken" ? "Credit Taken (Borrowed)" : "Credit Given (Lent)";
+
+  const handlePrint = () => {
+    const printContent = receiptRef.current.innerHTML;
+    const win = window.open("", "", "width=600,height=750");
+    win.document.write(`
+      <html>
+        <head>
+          <title>Credit Slip - ${txn.creditId}</title>
+          <style>
+            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
+            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
+            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
+            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+            .bold { font-weight: bold; }
+            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+          </style>
+        </head>
+        <body><div class="receipt-box">${printContent}</div></body>
+      </html>
+    `);
+    win.document.close(); win.focus(); win.print(); win.close();
+  };
+
+  return (
+    <Modal title="Credit / Loan Slip" onClose={onClose}>
+      <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
+        <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
+          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Credit / Loan Ledger Slip</p>
+        </div>
+        <div className="space-y-2 text-xs">
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Credit ID: <strong className="text-[#12312B]">{txn.creditId}</strong></span>
+            <span>Date: <strong className="text-[#12312B]">{txn.date}</strong></span>
+          </div>
+          <div className="flex justify-between text-[#6E6650]"><span>Type:</span><strong className="text-[#12312B]">{typeLabel}</strong></div>
+          <div className="flex justify-between text-[#6E6650]"><span>{txn.direction === "taken" ? "Received From" : "Given To"}:</span><strong className="text-[#12312B]">{txn.partyName}</strong></div>
+          <div className="flex justify-between text-[#6E6650]"><span>Party Type:</span><strong className="text-[#12312B]">{txn.partyType}</strong></div>
+          {txn.mobile && <div className="flex justify-between text-[#6E6650]"><span>Mobile:</span><strong className="text-[#12312B]">{txn.mobile}</strong></div>}
+          {txn.address && <div className="flex justify-between text-[#6E6650]"><span>Address:</span><strong className="text-[#12312B]">{txn.address}</strong></div>}
+          <div className="flex justify-between text-[#6E6650]"><span>Mode:</span><strong className="text-[#12312B]">{txn.mode}</strong></div>
+          {txn.bankName && <div className="flex justify-between text-[#6E6650]"><span>Bank Name:</span><strong className="text-[#12312B]">{txn.bankName}</strong></div>}
+          {txn.accountNumber && <div className="flex justify-between text-[#6E6650]"><span>Account Number:</span><strong className="text-[#12312B]">{txn.accountNumber}</strong></div>}
+          {txn.refType && txn.refNumber && <div className="flex justify-between text-[#6E6650]"><span>{txn.refType}:</span><strong className="text-[#12312B]">{txn.refNumber}</strong></div>}
+          {Number(txn.interestRate) > 0 && <div className="flex justify-between text-[#6E6650]"><span>Annual Interest Rate:</span><strong className="text-[#12312B]">{txn.interestRate}%</strong></div>}
+          {txn.remarks && <div className="flex justify-between text-[#6E6650]"><span>Remarks:</span><strong className="text-[#12312B]">{txn.remarks}</strong></div>}
+
+          <div className="pt-3 mt-3 border-t-2 border-[#12312B]">
+            <div className="flex justify-between items-center text-sm mb-1">
+              <span className="font-bold">Amount:</span>
+              <span className="font-bold text-[#B8862B] text-lg" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(txn.amount)}</span>
+            </div>
+          </div>
+        </div>
+        <div className="text-center pt-3 mt-3 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
+          Internal Credit / Loan Record · Computer Generated Slip
+        </div>
+      </div>
+      <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Slip</button>
+    </Modal>
+  );
+}
+
+function PayInterestModal({ creditTxn, interestPaidSoFar, onClose, onSave }) {
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [mode, setMode] = useState("Cash");
+  const [bankName, setBankName] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [refType, setRefType] = useState("None");
+  const [refNumber, setRefNumber] = useState("");
+  const [remarks, setRemarks] = useState("");
+
+  function submit() {
+    if (!amount || Number(amount) <= 0) return;
+    onSave({
+      creditTxnId: creditTxn.id, amount: Number(amount) || 0, date, mode,
+      bankName: mode === "Online" ? bankName.trim() : "", accountNumber: mode === "Online" ? accountNumber.trim() : "",
+      refType: mode === "Online" && refType !== "None" ? refType : "", refNumber: mode === "Online" && refType !== "None" ? refNumber.trim() : "",
+      remarks: remarks.trim(),
+    });
+  }
+
+  return (
+    <Modal title={`Pay Interest — ${creditTxn.creditId}`} onClose={onClose}>
+      <div className="p-3 rounded bg-[#FAF6EC] border text-xs mb-3" style={{ borderColor: "#D8CFB8" }}>
+        Against credit taken from <strong>{creditTxn.partyName}</strong> ({fmtINR(creditTxn.amount)}{Number(creditTxn.interestRate) > 0 ? ` @ ${creditTxn.interestRate}% p.a.` : ""}).
+        {interestPaidSoFar > 0 && <> Interest paid so far: <strong>{fmtINR(interestPaidSoFar)}</strong>.</>}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Interest Amount (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" /></Field>
+        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+      </div>
+
+      <Field label="Mode">
+        <div className="flex gap-2 flex-wrap">
+          {CREDIT_MODES.map(m => (
+            <button key={m} type="button" onClick={() => setMode(m)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+              style={{ background: mode === m ? "#12312B" : "white", color: mode === m ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {mode === "Online" && (
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Bank Name"><input className={inputCls} style={inputStyle} value={bankName} onChange={e => setBankName(e.target.value)} placeholder="e.g. HDFC Bank" /></Field>
+            <Field label="Account Number"><input className={inputCls} style={inputStyle} value={accountNumber} onChange={e => setAccountNumber(e.target.value)} placeholder="e.g. 5021XXXXXX" /></Field>
+          </div>
+          <Field label="Reference Type">
+            <div className="flex gap-2 flex-wrap">
+              {REFERENCE_TYPES.map(rt => (
+                <button key={rt} type="button" onClick={() => setRefType(rt)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+                  style={{ background: refType === rt ? "#12312B" : "white", color: refType === rt ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+                  {rt}
+                </button>
+              ))}
+            </div>
+          </Field>
+          {refType !== "None" && (
+            <Field label={refType}><input className={inputCls} style={inputStyle} value={refNumber} onChange={e => setRefNumber(e.target.value)} placeholder={`Enter ${refType.toLowerCase()}`} /></Field>
+          )}
+        </>
+      )}
+
+      <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any note for this interest payment" /></Field>
+
+      <button onClick={submit} disabled={!amount || Number(amount) <= 0} className="w-full mt-1 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Pay Interest &amp; Generate Slip
+      </button>
+    </Modal>
+  );
+}
+
+function InterestReceiptModal({ payment, creditTxn, onClose }) {
+  const receiptRef = useRef();
+  if (!payment) return null;
+
+  const handlePrint = () => {
+    const printContent = receiptRef.current.innerHTML;
+    const win = window.open("", "", "width=600,height=700");
+    win.document.write(`
+      <html>
+        <head>
+          <title>Interest Payment Slip - ${payment.paymentId}</title>
+          <style>
+            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
+            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
+            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
+            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+            .bold { font-weight: bold; }
+            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+          </style>
+        </head>
+        <body><div class="receipt-box">${printContent}</div></body>
+      </html>
+    `);
+    win.document.close(); win.focus(); win.print(); win.close();
+  };
+
+  return (
+    <Modal title="Interest Payment Slip" onClose={onClose}>
+      <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
+        <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
+          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Interest Payment Slip</p>
+        </div>
+        <div className="space-y-2 text-xs">
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Payment ID: <strong className="text-[#12312B]">{payment.paymentId}</strong></span>
+            <span>Date: <strong className="text-[#12312B]">{payment.date}</strong></span>
+          </div>
+          {creditTxn && <div className="flex justify-between text-[#6E6650]"><span>Against Credit ID:</span><strong className="text-[#12312B]">{creditTxn.creditId}</strong></div>}
+          {creditTxn && <div className="flex justify-between text-[#6E6650]"><span>Paid To:</span><strong className="text-[#12312B]">{creditTxn.partyName}</strong></div>}
+          <div className="flex justify-between text-[#6E6650]"><span>Mode:</span><strong className="text-[#12312B]">{payment.mode}</strong></div>
+          {payment.bankName && <div className="flex justify-between text-[#6E6650]"><span>Bank Name:</span><strong className="text-[#12312B]">{payment.bankName}</strong></div>}
+          {payment.accountNumber && <div className="flex justify-between text-[#6E6650]"><span>Account Number:</span><strong className="text-[#12312B]">{payment.accountNumber}</strong></div>}
+          {payment.refType && payment.refNumber && <div className="flex justify-between text-[#6E6650]"><span>{payment.refType}:</span><strong className="text-[#12312B]">{payment.refNumber}</strong></div>}
+          {payment.remarks && <div className="flex justify-between text-[#6E6650]"><span>Remarks:</span><strong className="text-[#12312B]">{payment.remarks}</strong></div>}
+
+          <div className="pt-3 mt-3 border-t-2 border-[#12312B]">
+            <div className="flex justify-between items-center text-sm mb-1">
+              <span className="font-bold">Interest Paid:</span>
+              <span className="font-bold text-[#B8862B] text-lg" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(payment.amount)}</span>
+            </div>
+          </div>
+        </div>
+        <div className="text-center pt-3 mt-3 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
+          Computer Generated Slip
         </div>
       </div>
       <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Slip</button>
@@ -3502,9 +4270,16 @@ function ExpenseReceiptModal({ expense, onClose }) {
 // field captured on the Student Register form so the center always has a
 // complete, printable admission record to keep on file.
 // ============================================================================
-function JoiningFormModal({ student, onClose }) {
+function JoiningFormModal({ student, deposits, onClose }) {
   const formRef = useRef();
   if (!student) return null;
+
+  // The one-time Advance Payment captured on the Student form (if any) is
+  // stored as a regular Deposit tagged with this exact remark — look it up
+  // so the Joining Form can show what was actually collected at admission.
+  const advanceDeposit = (deposits || []).find(d => d.studentId === student.id && !d.deleted && d.remarks === "Advance Payment at Admission");
+  const advanceAmount = advanceDeposit ? Number(advanceDeposit.amount) || 0 : 0;
+  const admissionNo = `ADM-${shortId(student.id)}`;
 
   const handlePrint = () => {
     const printContent = formRef.current.innerHTML;
@@ -3516,7 +4291,9 @@ function JoiningFormModal({ student, onClose }) {
           <style>
             @page { size: A4; margin: 16mm; }
             body { font-family: 'Inter', sans-serif; padding: 0; color: #12312B; }
-            .form-box { max-width: 100%; margin: auto; }
+            .form-box { max-width: 100%; margin: auto; border: 1.5px solid #B8862B; padding: 22px; border-radius: 4px; }
+            .form-box::before { content: ""; display: block; height: 3px; background: #12312B; margin: -22px -22px 18px -22px; }
+            .admission-no { text-align: right; font-family: monospace; font-size: 11px; color: #8A6420; letter-spacing: 0.06em; margin-bottom: 4px; }
             .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 12px; margin-bottom: 18px; }
             .section-title { font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #8A6420; border-bottom: 1px solid #D8CFB8; padding-bottom: 4px; margin: 18px 0 10px; }
             .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; }
@@ -3535,10 +4312,16 @@ function JoiningFormModal({ student, onClose }) {
   };
 
   const statusLabel = (student.status || "active") === "active" ? "Active" : (student.status === "dropped" ? "Dropped Out" : (student.resultStatus || "On Break"));
+  const statusTone = (student.status || "active") === "active" ? "paid" : student.status === "dropped" ? "overdue" : "break";
 
   return (
     <WideModal title="Student Joining Form" onClose={onClose}>
-      <div className="p-5 border bg-white rounded-sm mb-4" ref={formRef} style={{ borderColor: "#12312B" }}>
+      <div
+        className="joining-form-doc p-6 bg-white rounded-sm mb-4"
+        ref={formRef}
+        style={{ border: "1.5px solid #B8862B", borderRadius: "4px", boxShadow: "0 1px 3px rgba(18,49,43,0.08)" }}
+      >
+        <div className="text-right font-mono text-[11px] mb-1" style={{ color: "#8A6420", letterSpacing: "0.06em" }}>{admissionNo}</div>
         <div className="header">
           <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B]">COACHING CLASSES</h2>
           <p className="text-[11px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Student Joining / Admission Form</p>
@@ -3551,7 +4334,7 @@ function JoiningFormModal({ student, onClose }) {
           <div className="row"><span className="label">Date of Birth</span><span className="value">{student.dob || "—"}</span></div>
           <div className="row"><span className="label">Aadhar Number</span><span className="value">{student.aadharNumber || "—"}</span></div>
           <div className="row"><span className="label">Current School / Institution</span><span className="value">{student.currentSchool || "—"}</span></div>
-          <div className="row"><span className="label">Status</span><span className="value">{statusLabel}</span></div>
+          <div className="row"><span className="label">Status</span><span className="value"><Stamp text={statusLabel} tone={statusTone} /></span></div>
         </div>
 
         <div className="section-title">Contact Details</div>
@@ -3564,6 +4347,7 @@ function JoiningFormModal({ student, onClose }) {
         <div className="section-title">Academic Details</div>
         <div className="grid">
           <div className="row"><span className="label">Class</span><span className="value">{student.class || "—"}</span></div>
+          <div className="row"><span className="label">Stream</span><span className="value">{student.stream || "—"}</span></div>
           <div className="row"><span className="label">Fee Start Month</span><span className="value">{monthLabel(student.admissionMonth)}</span></div>
           <div className="row"><span className="label">Subjects / Batches</span><span className="value">{(student.batches || []).join(", ") || "—"}</span></div>
           <div className="row"><span className="label">Monthly Concession / Discount</span><span className="value">{fmtINR(student.monthlyDiscount || 0)}</span></div>
@@ -3572,6 +4356,12 @@ function JoiningFormModal({ student, onClose }) {
         <div className="section-title">Fee Details</div>
         <div className="grid">
           <div className="row"><span className="label">Opening Balance / Legacy Carried Dues</span><span className="value">{fmtINR(student.previousDues || 0)}</span></div>
+          <div className="row">
+            <span className="label">Advance Amount Paid at Admission</span>
+            <span className="value" style={{ color: advanceAmount > 0 ? "#3F6B52" : undefined }}>
+              {fmtINR(advanceAmount)}{advanceDeposit ? ` (${advanceDeposit.mode || "Cash"})` : ""}
+            </span>
+          </div>
           <div className="row"><span className="label">Form Generated On</span><span className="value">{todayStr()}</span></div>
         </div>
 
@@ -3581,7 +4371,7 @@ function JoiningFormModal({ student, onClose }) {
         </div>
 
         <div className="footer">
-          Computer Generated Joining Form · Coaching Classes Admission Record
+          Computer Generated Joining Form · Coaching Classes Admission Record · {admissionNo}
         </div>
       </div>
       <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Joining Form (A4)</button>
