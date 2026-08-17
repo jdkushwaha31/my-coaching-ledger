@@ -131,6 +131,49 @@ import {
 //      row splitting across pages, repeating header). The on-screen
 //      preview markup itself is unchanged — only what the popup window
 //      loads before printing it changed.
+//
+// Changes made in this fourth update pass:
+//  17. NEW FEATURE — Notes: a simple internal notepad tab (sidebar, right
+//      above Trash / Restore) completely separate from the financial
+//      ledger. Add / edit / pin / delete free-text notes (title + body),
+//      cloud-synced like everything else via a new "notes" Firestore
+//      collection. Pinned notes float to the top. Nothing here touches
+//      any student, deposit, charge, or balance (see NotesTab,
+//      NoteFormModal, saveNote / toggleNotePin / deleteNote).
+//  18. BUG FIX — Statement dates wrapping onto 3 lines (DD on one line,
+//      Month on the next, YYYY on the last): fmtDate() itself always
+//      produced a correct single-line "D Month YYYY" string — the actual
+//      bug was that the narrow table cells showing it had no
+//      `whitespace-nowrap`, so the browser wrapped the string wherever it
+//      ran out of column width. Added `whitespace-nowrap` to every date
+//      cell across every statement/log table (Deposits, Charges,
+//      Expenses, Center Statement, Banking Statement, Cash⇄Bank Transfer
+//      Logs, Credit & Loan Ledger, Interest Payments Log, Trash tab,
+//      Student Statement) — dates now always render on one line.
+//  19. Banking tab reorganized into four separate, professional pill-tab
+//      panels — Banking Statement, Cash ⇄ Bank Transfer Logs, Credit &
+//      Loan Ledger, Interest Payments Log — instead of one long stacked
+//      scroll, using the same sub-tab pattern already used by Fee &
+//      Class Structure (see StructureTab). Every feature that existed
+//      before (search & filters on the main statement, print/export,
+//      add/delete on each log, expand a credit entry's interest-payment
+//      history, Pay Interest) is fully intact — this only changes how
+//      the four sections are navigated, not what they do (see
+//      BankingTab, BANKING_SUB_TABS).
+//  20. BUG FIX — a student saved with ZERO subjects/batches selected was
+//      being silently charged the 1-subject Fee Matrix rate every month,
+//      because both computeStudentLedger() and the dashboard's
+//      forecastForMonth() did `batches.length || 1`, and expectedFeeFor()
+//      itself also forced any falsy batch count up to 1. A batch count of
+//      0 is falsy in JavaScript, so "no subjects chosen" was
+//      indistinguishable from "1 subject chosen" and got billed as if
+//      the student had taken a single subject they were never actually
+//      enrolled in. expectedFeeFor() now returns ₹0 immediately for a
+//      batch count of 0 (before ever consulting the fee matrix), and
+//      both call sites no longer force that fallback to 1 — a
+//      subject-less student now correctly accrues ₹0 tuition instead of
+//      the 1-subject rate. Students with 1+ subjects are billed exactly
+//      as before.
 // ============================================================================
 
 // Admin Access Password
@@ -327,7 +370,12 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
   if (student.admissionMonth && (student.status || "active") === "active" && student.admissionMonth <= curMonth) {
     monthsBetween(student.admissionMonth, curMonth).forEach(m => {
       const batches = batchesForMonth(student, m);
-      const bc = batches.length || 1;
+      // BUG FIX: no longer forces `bc` to 1 when the student has zero
+      // subjects selected for this month — that used to silently bill
+      // them the 1-subject fee matrix rate for a subject they were never
+      // enrolled in. expectedFeeFor() now returns ₹0 for a batch count of
+      // 0, so a subject-less student correctly accrues no tuition charge.
+      const bc = batches.length;
       const expected = expectedFeeFor(student.class, bc, student.monthlyDiscount || 0);
       if (expected > 0) {
         const lineId = `fee-${student.id}-${m}`;
@@ -462,6 +510,12 @@ export default function CoachingLedger() {
   const [bankTransactions, setBankTransactions] = useState([]);
   const [creditTransactions, setCreditTransactions] = useState([]);
   const [interestPayments, setInterestPayments] = useState([]);
+  // Internal Notes / notepad — free-form notes staff can jot down (office
+  // reminders, follow-ups, things to remember) that aren't tied to any
+  // student or transaction. Same live-cloud-sync pattern as everything
+  // else in the app (see NotesTab / addNote / updateNote / deleteNote /
+  // toggleNotePin below).
+  const [notes, setNotes] = useState([]);
 
   const [showStudentForm, setShowStudentForm] = useState(false);
   const [showDepositForm, setShowDepositForm] = useState(false);
@@ -476,6 +530,8 @@ export default function CoachingLedger() {
   const [showBankTxnForm, setShowBankTxnForm] = useState(false);
   const [showCreditForm, setShowCreditForm] = useState(false);
   const [showPayInterestModal, setShowPayInterestModal] = useState(null); // credit transaction
+  const [showNoteForm, setShowNoteForm] = useState(false);
+  const [editingNote, setEditingNote] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
   const [receiptData, setReceiptData] = useState(null);
   const [expenseReceiptData, setExpenseReceiptData] = useState(null);
@@ -540,6 +596,11 @@ export default function CoachingLedger() {
       setInterestPayments(data);
     });
 
+    const unsubNotes = onSnapshot(collection(db, "notes"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setNotes(data);
+    });
+
     const unsubFee = onSnapshot(doc(db, "settings", "feeStructure"), (docSnap) => {
       if (docSnap.exists()) {
         setFeeStructure(docSnap.data().matrix || {});
@@ -580,7 +641,7 @@ export default function CoachingLedger() {
 
     return () => {
       unsubStudents(); unsubDeposits(); unsubCharges(); unsubExpenses(); unsubBankTxns();
-      unsubCreditTxns(); unsubInterestPayments(); unsubFee(); unsubClasses(); unsubSubjects(); unsubStreams();
+      unsubCreditTxns(); unsubInterestPayments(); unsubNotes(); unsubFee(); unsubClasses(); unsubSubjects(); unsubStreams();
     };
   }, [isAuthenticated]);
 
@@ -629,7 +690,17 @@ export default function CoachingLedger() {
   const studentById = Object.fromEntries(students.map(s => [s.id, s]));
 
   function expectedFeeFor(cls, batchCount, monthlyDiscount = 0) {
-    const bc = Math.max(1, Math.min(6, batchCount || 1));
+    // BUG FIX: a student with ZERO subjects/batches selected must be
+    // charged ₹0 tuition — not the 1-subject fee matrix rate. The old
+    // code did `batchCount || 1`, so a batchCount of 0 (falsy) silently
+    // fell through to 1, and this student got billed as if they'd taken
+    // a single subject they were never actually enrolled in. Now a
+    // batchCount of 0 (or anything not a positive number) returns ₹0
+    // straight away, before the fee matrix is ever consulted. Any real
+    // subject count (1–6) still looks itself up exactly as before.
+    const count = Number(batchCount) || 0;
+    if (count <= 0) return 0;
+    const bc = Math.max(1, Math.min(6, count));
     const baseFee = (feeStructure[cls] && feeStructure[cls][bc]) || 0;
     return Math.max(0, baseFee - (Number(monthlyDiscount) || 0));
   }
@@ -715,6 +786,14 @@ export default function CoachingLedger() {
   const visibleInterestPayments = interestPayments.filter(p => !p.deleted);
   const trashedInterestPayments = interestPayments.filter(p => p.deleted);
   const creditTxnById = Object.fromEntries(creditTransactions.map(c => [c.id, c]));
+
+  // Notes — not part of the financial ledger at all, just a simple internal
+  // notepad. Pinned notes always float to the top; everything else sorts
+  // by most-recently-updated first.
+  const visibleNotes = [...notes.filter(n => !n.deleted)].sort((a, b) => {
+    if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+    return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
+  });
 
   const totalWithdrawals = round2(visibleBankTxns.filter(t => t.type === "withdrawal").reduce((a, t) => a + Number(t.amount || 0), 0));
   const totalBankDeposits = round2(visibleBankTxns.filter(t => t.type === "deposit").reduce((a, t) => a + Number(t.amount || 0), 0));
@@ -855,7 +934,9 @@ export default function CoachingLedger() {
     activeStudents.forEach(st => {
       if (!st.admissionMonth || st.admissionMonth > month) return;
       const batches = batchesForMonth(st, month);
-      const bc = batches.length || 1;
+      // Same fix as computeStudentLedger() above — a subject-less student
+      // must forecast ₹0, not the 1-subject rate.
+      const bc = batches.length;
       const expected = expectedFeeFor(st.class, bc, st.monthlyDiscount || 0);
       if (expected > 0) rows.push({ student: st, batches, expected });
     });
@@ -1047,6 +1128,34 @@ export default function CoachingLedger() {
     await deleteDoc(doc(db, "expenses", id));
   }
 
+  // ---- Notes — simple internal notepad, independent of the financial ledger ----
+  async function saveNote(data) {
+    if (data.id) {
+      const existing = notes.find(n => n.id === data.id);
+      await setDoc(doc(db, "notes", data.id), {
+        ...existing, title: data.title, body: data.body, pinned: !!(existing && existing.pinned),
+        updatedAt: nowStamp(),
+      });
+    } else {
+      const id = uid();
+      await setDoc(doc(db, "notes", id), {
+        id, title: data.title, body: data.body, pinned: false, deleted: false,
+        createdAt: nowStamp(), updatedAt: nowStamp(),
+      });
+    }
+    setShowNoteForm(false);
+    setEditingNote(null);
+  }
+  async function toggleNotePin(id) {
+    const n = notes.find(x => x.id === id);
+    if (!n) return;
+    await setDoc(doc(db, "notes", id), { ...n, pinned: !n.pinned, updatedAt: nowStamp() });
+  }
+  async function deleteNote(id) {
+    if (!window.confirm("Delete this note? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "notes", id));
+  }
+
   // ---- Banking — internal Cash ↔ Bank transfer transactions ----
   // These move money between the two balances the center actually holds
   // (physical Cash and the Bank/Online account) without creating any
@@ -1170,6 +1279,7 @@ export default function CoachingLedger() {
     { id: "dues", label: "Pending Dues", icon: AlertCircle },
     { id: "statement", label: "Center Statement", icon: FileText },
     { id: "banking", label: "Banking", icon: Landmark },
+    { id: "notes", label: "Notes", icon: BookOpen },
     { id: "trash", label: "Trash / Restore", icon: Archive },
   ];
 
@@ -1338,6 +1448,15 @@ export default function CoachingLedger() {
             onRemoveInterest={softDeleteInterestPayment}
           />
         )}
+        {tab === "notes" && (
+          <NotesTab
+            notes={visibleNotes}
+            onAdd={() => { setEditingNote(null); setShowNoteForm(true); }}
+            onEdit={(n) => { setEditingNote(n); setShowNoteForm(true); }}
+            onTogglePin={toggleNotePin}
+            onDelete={deleteNote}
+          />
+        )}
         {tab === "trash" && (
           <TrashTab
             trashedStudents={trashedStudents} trashedDeposits={trashedDeposits} trashedCharges={trashedCharges} trashedExpenses={trashedExpenses}
@@ -1392,6 +1511,9 @@ export default function CoachingLedger() {
       )}
       {showExpenseForm && (
         <ExpenseFormModal onClose={() => setShowExpenseForm(false)} onSave={addExpense} />
+      )}
+      {showNoteForm && (
+        <NoteFormModal initial={editingNote} onClose={() => { setShowNoteForm(false); setEditingNote(null); }} onSave={saveNote} />
       )}
       {expenseReceiptData && (
         <ExpenseReceiptModal expense={expenseReceiptData} onClose={() => setExpenseReceiptData(null)} />
@@ -2172,7 +2294,7 @@ function DepositsTab({ deposits, students, classes, studentDues, onAdd, onRemove
                 return (
                   <tr key={d.id} className="ledger-row">
                     <td className="px-4 py-2.5 text-[10px] font-mono text-[#9C8F6E]">#{getReceiptNo(d.id)}</td>
-                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(d.date)}</td>
+                    <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(d.date)}</td>
                     <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{st ? st.class : "—"}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#3F6B52]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(d.amount)}</td>
@@ -2294,7 +2416,7 @@ function ChargesTab({ chargeLines, students, classes, onAdd, onRemove, onOpenRec
                     <td className="px-4 py-2.5 text-[10px] font-mono">
                       <button onClick={() => onOpenReceipt(c)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{c.chargeId}</button>
                     </td>
-                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(c.date)}</td>
+                    <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(c.date)}</td>
                     <td className="px-4 py-2.5 font-medium">{c.studentName}{c.studentStatus !== "active" && <span className="ml-1.5 text-[10px] text-[#4A7B9D]">({c.studentStatus === "dropped" ? "dropped" : "on break"})</span>}</td>
                     <td className="px-4 py-2.5 font-semibold text-[#12312B]">{c.studentClass}</td>
                     <td className="px-4 py-2.5"><Stamp text={meta.label} tone={meta.tone} /></td>
@@ -2404,7 +2526,7 @@ function ExpensesTab({ expenses, onAdd, onRemove, onOpenReceipt }) {
                   <td className="px-4 py-2.5 text-[10px] font-mono">
                     <button onClick={() => onOpenReceipt(e)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open printable receipt">{e.expenseId || `EXP-${shortId(e.id)}`}</button>
                   </td>
-                  <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(e.date)}</td>
+                  <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(e.date)}</td>
                   <td className="px-4 py-2.5 font-medium">{e.category || "—"}</td>
                   <td className="px-4 py-2.5 text-xs text-[#6E6650]">{e.paidTo || "—"}</td>
                   <td className="px-4 py-2.5 font-semibold text-[#A63D2F]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(e.amount)}</td>
@@ -2426,7 +2548,74 @@ function ExpensesTab({ expenses, onAdd, onRemove, onOpenReceipt }) {
 }
 
 // ============================================================================
-// PENDING DUES LEDGER — a single, professional student-level balance list.
+// NOTES — a simple internal notepad for the office/staff. Completely
+// separate from the financial ledger: nothing here touches students,
+// deposits, charges, or balances. Just a place to jot things down (a
+// reminder to call a parent back, a to-do for the front desk, a note
+// about next month's schedule) that everyone using this cloud-synced
+// portal can see. Notes can be pinned so important ones stay at the top,
+// edited in place, and deleted permanently (no Trash step — notes are
+// deliberately lightweight, unlike financial records).
+// ============================================================================
+function NotesTab({ notes, onAdd, onEdit, onTogglePin, onDelete }) {
+  const [search, setSearch] = useState("");
+
+  const filtered = notes.filter(n => {
+    if (!search) return true;
+    const q = search.trim().toLowerCase();
+    return [n.title, n.body].filter(Boolean).join(" ").toLowerCase().includes(q);
+  });
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Office Notepad" title="Notes" action={
+        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Add Note
+        </button>
+      } />
+      <div className="text-sm text-[#6E6650] mb-4">A shared notepad for anything worth writing down — reminders, follow-ups, things to tell the next shift. Nothing here affects fees, dues, or balances. Pin a note to keep it at the top.</div>
+
+      {notes.length > 0 && (
+        <Card className="p-3.5 mb-4">
+          <div className="relative max-w-sm">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+            <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search notes…" />
+          </div>
+        </Card>
+      )}
+
+      {filtered.length === 0 ? (
+        <Card className="p-8 text-center text-sm text-[#9C8F6E]">
+          {notes.length === 0 ? "No notes yet — add one to keep track of anything worth remembering." : "No notes match this search."}
+        </Card>
+      ) : (
+        <div className="grid grid-cols-3 gap-3.5">
+          {filtered.map(n => (
+            <Card key={n.id} className="p-4 flex flex-col" style={{ borderTop: n.pinned ? "3px solid #B8862B" : undefined }}>
+              <div className="flex items-start justify-between gap-2 mb-1.5">
+                <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-base font-semibold text-[#1B1810] leading-snug break-words">{n.title || "Untitled Note"}</div>
+                <button onClick={() => onTogglePin(n.id)} title={n.pinned ? "Unpin" : "Pin to top"}
+                  className="shrink-0 text-xs mt-0.5" style={{ color: n.pinned ? "#B8862B" : "#D8CFB8" }}>
+                  <Tag size={14} style={{ transform: n.pinned ? "none" : "rotate(45deg)" }} />
+                </button>
+              </div>
+              <div className="text-xs text-[#4A4636] whitespace-pre-wrap break-words flex-1 mb-3">{n.body || "—"}</div>
+              <div className="flex items-center justify-between pt-2.5" style={{ borderTop: "1px solid #E4DCC5" }}>
+                <span className="text-[10px] text-[#9C8F6E] font-mono">{fmtDate(n.updatedAt || n.createdAt || todayStr())}</span>
+                <div className="flex items-center gap-3">
+                  <button onClick={() => onEdit(n)} className="text-[10px] text-[#12312B] underline font-semibold">Edit</button>
+                  <button onClick={() => onDelete(n.id)} className="text-[10px] text-[#A63D2F] underline">Delete</button>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 // Previously this tab showed two overlapping views (a card grid AND a
 // separate per-charge-line table) which duplicated the same information in
 // two different shapes. This is now consolidated into one clean, sortable,
@@ -2585,6 +2774,16 @@ const BANKING_TXN_TYPE_META = {
   credit_given: { label: "Credit Given (Lent)", tone: "overdue" },
   interest_payment: { label: "Interest Paid", tone: "break" },
 };
+
+// The four Banking sub-tabs — Banking Statement, Cash ⇄ Bank Transfer
+// Logs, Credit & Loan Ledger, and Interest Payments Log — rendered as a
+// pill-row inside BankingTab, same pattern as StructureTab's sub-tabs.
+const BANKING_SUB_TABS = [
+  { id: "statement", label: "Banking Statement", icon: FileText },
+  { id: "transfers", label: "Cash ⇄ Bank Transfer Logs", icon: ArrowUpRight },
+  { id: "credit", label: "Credit & Loan Ledger", icon: CreditCard },
+  { id: "interest", label: "Interest Payments Log", icon: Percent },
+];
 
 function CenterStatementTab({ transactions, totals, students, classes, onViewReceipt, onViewCharge }) {
   const statementRef = useRef();
@@ -2761,7 +2960,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
                             <span className="text-[#9C8F6E]">{t.chargeId || "—"}</span>
                           )}
                         </td>
-                        <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(t.date)}</td>
+                        <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(t.date)}</td>
                         <td className="px-4 py-2.5 text-xs font-mono">{t.month ? monthLabel(t.month) : "—"}</td>
                         <td className="px-4 py-2.5 font-medium">
                           <div>{t.studentName}{t.studentStatus !== "active" && <span className="ml-1.5 text-[10px] text-[#4A7B9D]">({t.studentStatus === "dropped" ? "dropped" : "on break"})</span>}</div>
@@ -2818,6 +3017,15 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [expandedCredit, setExpandedCredit] = useState({});
+  // Banking is now split into four separate, professionally organized
+  // sub-tabs — Banking Statement, Cash ⇄ Bank Transfer Logs, Credit &
+  // Loan Ledger, and Interest Payments Log — instead of one long stacked
+  // scroll. Every piece of functionality that existed before (search,
+  // filters, print/export, add/delete, expand credit history, pay
+  // interest, etc.) is unchanged; this state just controls which one of
+  // the four panels is visible at a time, exactly like the pill-tab
+  // pattern already used in Fee & Class Structure (see StructureTab).
+  const [subTab, setSubTab] = useState("statement");
 
   // Map of internal student doc id → full student record, so deposit rows
   // can show the human-readable Student ID alongside the description.
@@ -2876,12 +3084,6 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
     <div>
       <SectionHeader eyebrow="Internal Ledger" title="Banking" action={
         <div className="flex gap-2 flex-wrap justify-end">
-          <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
-            <Plus size={15} /> Record Cash ⇄ Bank Transfer
-          </button>
-          <button onClick={onAddCredit} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#8A6420", color: "#FAF6EC" }}>
-            <Plus size={15} /> Record Credit / Loan
-          </button>
           <button onClick={handlePrint} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm border" style={{ borderColor: "#12312B", color: "#12312B" }}>
             <Printer size={15} /> Print / Export
           </button>
@@ -2889,6 +3091,25 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
       } />
       <div className="text-sm text-[#6E6650] mb-4">Every student deposit, every center expense, every internal Cash ⇄ Bank transfer, and every Credit / Loan entry, in one auditable feed — with a running Cash Balance and Bank Balance shown on every line. Nothing here appears on the Center Statement.</div>
 
+      {/* Four separate, professionally organized sub-tabs — same pill-row
+          pattern as Fee & Class Structure. Only one panel renders at a
+          time; nothing below was removed, just regrouped. */}
+      <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
+        {BANKING_SUB_TABS.map((st, i) => {
+          const Icon = st.icon;
+          const active = subTab === st.id;
+          return (
+            <button key={st.id} onClick={() => setSubTab(st.id)}
+              className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+              style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+              <Icon size={13} /> {st.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {subTab === "statement" && (
+      <>
       <div className="grid grid-cols-2 gap-4 mb-5">
         <Card className="p-5" style={{ borderLeft: "4px solid #3F6B52" }}>
           <div className="text-[10px] uppercase text-[#3F6B52] font-mono flex items-center gap-1 mb-1"><Banknote size={13} /> Cash Balance (in hand)</div>
@@ -3006,7 +3227,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
                             <button onClick={() => onViewBankTxn(t.bankTxnId)} className="text-[#12312B] underline hover:text-[#3F6B52]" title="Open transaction slip">{t.refId}</button>
                           )}
                         </td>
-                        <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(t.date)}</td>
+                        <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(t.date)}</td>
                         <td className="px-4 py-2.5 text-xs">{t.label}</td>
                         <td className="px-4 py-2.5">
                           {/* Student ID is plain, non-clickable text — no toggle/arrow,
@@ -3033,17 +3254,24 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
           </div>
         </div>
       </Card>
+      </>
+      )}
 
+      {subTab === "transfers" && (
+      <>
       {/* ===================================================================
-          CASH ⇄ BANK TRANSFER LOGS — a dedicated section just for internal
+          CASH ⇄ BANK TRANSFER LOGS — a dedicated sub-tab for internal
           transfers, kept separate from the main statement above (which is
-          now read-only / no delete button). Delete lives here instead.
+          read-only / no delete button). Delete lives here instead.
       =================================================================== */}
-      <div className="mt-8 mb-3 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between">
         <div>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-0.5">Internal Transfers</div>
           <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-semibold text-[#1B1810]">Cash ⇄ Bank Transfer Logs</div>
         </div>
+        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Record Cash ⇄ Bank Transfer
+        </button>
       </div>
       <Card className="mb-8">
         {(!bankTxns || bankTxns.length === 0) ? (
@@ -3063,7 +3291,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
                   <td className="px-4 py-2.5 text-[10px] font-mono">
                     <button onClick={() => onViewBankTxn(t.id)} className="text-[#12312B] underline hover:text-[#3F6B52]">{t.txnId}</button>
                   </td>
-                  <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(t.date)}</td>
+                  <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(t.date)}</td>
                   <td className="px-4 py-2.5"><Stamp text={t.type === "withdrawal" ? "Bank → Cash" : "Cash → Bank"} tone={t.type === "withdrawal" ? "break" : "carried"} /></td>
                   <td className="px-4 py-2.5 text-xs text-[#6E6650]">{t.bankName || t.accountNumber ? `${t.bankName || "—"}${t.accountNumber ? " · " + t.accountNumber : ""}` : "—"}</td>
                   <td className="px-4 py-2.5 text-xs text-[#6E6650]">{t.refType && t.refNumber ? `${t.refType}: ${t.refNumber}` : "—"}</td>
@@ -3078,16 +3306,25 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
           </table>
         )}
       </Card>
+      </>
+      )}
 
+      {subTab === "credit" && (
+      <>
       {/* ===================================================================
           CREDIT & LOAN LEDGER — money borrowed (Credit Taken) or lent
           (Credit Given), each with a unique Credit ID, full party details,
           and a "Pay Interest" action (for money we've borrowed) that logs
           its own unique, clickable Interest Payment.
       =================================================================== */}
-      <div className="mt-2 mb-3">
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-0.5">Borrowed & Lent</div>
-        <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-semibold text-[#1B1810]">Credit &amp; Loan Ledger</div>
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-0.5">Borrowed & Lent</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-semibold text-[#1B1810]">Credit &amp; Loan Ledger</div>
+        </div>
+        <button onClick={onAddCredit} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#8A6420", color: "#FAF6EC" }}>
+          <Plus size={15} /> Record Credit / Loan
+        </button>
       </div>
       <Card>
         {(!creditTxns || creditTxns.length === 0) ? (
@@ -3119,7 +3356,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
                       <td className="px-4 py-2.5 text-[10px] font-mono">
                         <button onClick={() => onViewCredit(c.id)} className="text-[#12312B] underline hover:text-[#3F6B52]">{c.creditId}</button>
                       </td>
-                      <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(c.date)}</td>
+                      <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(c.date)}</td>
                       <td className="px-4 py-2.5"><Stamp text={c.direction === "taken" ? "Credit Taken" : "Credit Given"} tone={c.direction === "taken" ? "carried" : "overdue"} /></td>
                       <td className="px-4 py-2.5 text-xs">
                         <div className="font-medium">{c.partyName}</div>
@@ -3154,7 +3391,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
                                 </div>
                               ))}
                             </div>
-                            <div className="text-[10px] text-[#9C8F6E] mt-2">To delete an interest payment, use the dedicated <strong className="text-[#12312B]">Interest Payments Log</strong> section below.</div>
+                            <div className="text-[10px] text-[#9C8F6E] mt-2">To delete an interest payment, switch to the <strong className="text-[#12312B]">Interest Payments Log</strong> tab above.</div>
                           </div>
                         </td>
                       </tr>
@@ -3166,15 +3403,19 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
           </table>
         )}
       </Card>
+      </>
+      )}
 
+      {subTab === "interest" && (
+      <>
       {/* ===================================================================
-          INTEREST PAYMENTS LOG — a dedicated section just for interest
-          payments against Credit Taken entries, kept separate from the
-          Credit & Loan Ledger above (which is now read-only / no delete
-          button for interest). Delete lives here instead, exactly like
-          the Cash ⇄ Bank Transfer Logs section does for transfers.
+          INTEREST PAYMENTS LOG — a dedicated sub-tab for interest payments
+          against Credit Taken entries, kept separate from the Credit &
+          Loan Ledger tab (which is read-only / no delete button for
+          interest). Delete lives here instead, exactly like the Cash ⇄
+          Bank Transfer Logs tab does for transfers.
       =================================================================== */}
-      <div className="mt-8 mb-3">
+      <div className="mb-3">
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", letterSpacing: "0.1em" }} className="uppercase text-[#9C8F6E] mb-0.5">Interest Paid Against Credit Taken</div>
         <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-semibold text-[#1B1810]">Interest Payments Log</div>
       </div>
@@ -3198,7 +3439,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
                     <td className="px-4 py-2.5 text-[10px] font-mono">
                       <button onClick={() => onViewInterest(p.id)} className="text-[#12312B] underline hover:text-[#3F6B52]">{p.paymentId}</button>
                     </td>
-                    <td className="px-4 py-2.5 text-xs" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(p.date)}</td>
+                    <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(p.date)}</td>
                     <td className="px-4 py-2.5 text-xs font-mono text-[#6E6650]">{creditTxn ? creditTxn.creditId : "—"}</td>
                     <td className="px-4 py-2.5 text-xs text-[#6E6650]">{creditTxn ? creditTxn.partyName : "Unknown"}</td>
                     <td className="px-4 py-2.5 text-xs text-[#6E6650]">{p.mode || "Cash"}</td>
@@ -3214,6 +3455,8 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
           </table>
         )}
       </Card>
+      </>
+      )}
     </div>
   );
 }
@@ -3235,7 +3478,7 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
                 <tr key={s.id} className="ledger-row">
                   <td className="px-4 py-2.5 font-medium">{s.name}</td>
                   <td className="px-4 py-2.5 text-xs text-[#6E6650]">{s.class}</td>
-                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {s.deletedAt ? fmtDate(s.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {s.deletedAt ? fmtDate(s.deletedAt) : ""}</td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">
                     <button onClick={() => onRestoreStudent(s.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
                     <button onClick={() => onDeleteStudent(s.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
@@ -3258,10 +3501,10 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
                 const st = studentById[d.studentId];
                 return (
                   <tr key={d.id} className="ledger-row">
-                    <td className="px-4 py-2.5 text-xs font-mono">{fmtDate(d.date)}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(d.date)}</td>
                     <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
                     <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#3F6B52]">{fmtINR(d.amount)}</td>
-                    <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {d.deletedAt ? fmtDate(d.deletedAt) : ""}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {d.deletedAt ? fmtDate(d.deletedAt) : ""}</td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap">
                       <button onClick={() => onRestoreDeposit(d.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
                       <button onClick={() => onDeleteDeposit(d.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
@@ -3285,10 +3528,10 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
                 const st = studentById[c.studentId];
                 return (
                   <tr key={c.id} className="ledger-row">
-                    <td className="px-4 py-2.5 text-xs font-mono">{fmtDate(c.date)}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(c.date)}</td>
                     <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
                     <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#B8862B]">{fmtINR(c.amount)}</td>
-                    <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {c.deletedAt ? fmtDate(c.deletedAt) : ""}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {c.deletedAt ? fmtDate(c.deletedAt) : ""}</td>
                     <td className="px-4 py-2.5 text-right whitespace-nowrap">
                       <button onClick={() => onRestoreCharge(c.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
                       <button onClick={() => onDeleteCharge(c.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
@@ -3310,10 +3553,10 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
             <tbody>
               {trashedExpenses.map(e => (
                 <tr key={e.id} className="ledger-row">
-                  <td className="px-4 py-2.5 text-xs font-mono">{fmtDate(e.date)}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(e.date)}</td>
                   <td className="px-4 py-2.5 font-medium">{e.category || "—"}</td>
                   <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#A63D2F]">{fmtINR(e.amount)}</td>
-                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {e.deletedAt ? fmtDate(e.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {e.deletedAt ? fmtDate(e.deletedAt) : ""}</td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">
                     <button onClick={() => onRestoreExpense(e.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
                     <button onClick={() => onDeleteExpense(e.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
@@ -3334,10 +3577,10 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
             <tbody>
               {trashedBankTxns.map(t => (
                 <tr key={t.id} className="ledger-row">
-                  <td className="px-4 py-2.5 text-xs font-mono">{fmtDate(t.date)}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(t.date)}</td>
                   <td className="px-4 py-2.5 font-medium">{t.type === "withdrawal" ? "Bank Withdrawal" : "Cash Deposit to Bank"} <span className="text-[10px] text-[#9C8F6E] font-mono">({t.txnId})</span></td>
                   <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#8A6420]">{fmtINR(t.amount)}</td>
-                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {t.deletedAt ? fmtDate(t.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {t.deletedAt ? fmtDate(t.deletedAt) : ""}</td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">
                     <button onClick={() => onRestoreBankTxn(t.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
                     <button onClick={() => onDeleteBankTxn(t.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
@@ -3358,10 +3601,10 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
             <tbody>
               {trashedCreditTxns.map(c => (
                 <tr key={c.id} className="ledger-row">
-                  <td className="px-4 py-2.5 text-xs font-mono">{fmtDate(c.date)}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(c.date)}</td>
                   <td className="px-4 py-2.5 font-medium">{c.partyName} <span className="text-[10px] text-[#9C8F6E] font-mono">({c.creditId})</span></td>
                   <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#8A6420]">{fmtINR(c.amount)}</td>
-                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {c.deletedAt ? fmtDate(c.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {c.deletedAt ? fmtDate(c.deletedAt) : ""}</td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">
                     <button onClick={() => onRestoreCredit(c.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
                     <button onClick={() => onDeleteCredit(c.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
@@ -3382,10 +3625,10 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
             <tbody>
               {trashedInterestPayments.map(p => (
                 <tr key={p.id} className="ledger-row">
-                  <td className="px-4 py-2.5 text-xs font-mono">{fmtDate(p.date)}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(p.date)}</td>
                   <td className="px-4 py-2.5 font-medium">{p.paymentId}</td>
                   <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#8A6420]">{fmtINR(p.amount)}</td>
-                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono">Deleted {p.deletedAt ? fmtDate(p.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {p.deletedAt ? fmtDate(p.deletedAt) : ""}</td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">
                     <button onClick={() => onRestoreInterest(p.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
                     <button onClick={() => onDeleteInterest(p.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
@@ -4004,7 +4247,7 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt, onView
                       <span className="text-[#9C8F6E]">{l.chargeId || "—"}</span>
                     )}
                   </td>
-                  <td className="px-3 py-2 font-mono">{fmtDate(l.date)}</td>
+                  <td className="px-3 py-2 font-mono whitespace-nowrap">{fmtDate(l.date)}</td>
                   <td className="px-3 py-2 font-mono">{l.month ? monthLabel(l.month) : "—"}</td>
                   <td className="px-3 py-2">{l.label}</td>
                   <td className="px-3 py-2 text-[#6E6650]">{l.remarks || "—"}</td>
@@ -4210,6 +4453,32 @@ function ExpenseFormModal({ onClose, onSave }) {
 
       <button onClick={submit} disabled={!category.trim() || !amount} className="w-full mt-1 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
         Add Expense & Generate Receipt
+      </button>
+    </Modal>
+  );
+}
+
+function NoteFormModal({ initial, onClose, onSave }) {
+  const [title, setTitle] = useState(initial ? initial.title || "" : "");
+  const [body, setBody] = useState(initial ? initial.body || "" : "");
+
+  function submit() {
+    if (!title.trim() && !body.trim()) return;
+    onSave({ id: initial ? initial.id : null, title: title.trim(), body: body.trim() });
+  }
+
+  return (
+    <Modal title={initial ? "Edit Note" : "Add Note"} onClose={onClose}>
+      <div className="text-xs text-[#6E6650] mb-3">A quick note for the office — a reminder, a follow-up, anything worth writing down. This does not affect any student's fees or dues.</div>
+
+      <Field label="Title"><input className={inputCls} style={inputStyle} value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Call Priya's parent about fee date" autoFocus /></Field>
+
+      <Field label="Note">
+        <textarea className={inputCls} style={{ ...inputStyle, minHeight: "120px", resize: "vertical" }} value={body} onChange={e => setBody(e.target.value)} placeholder="Write as much detail as you need…" />
+      </Field>
+
+      <button onClick={submit} disabled={!title.trim() && !body.trim()} className="w-full mt-1 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        {initial ? "Save Changes" : "Add Note"}
       </button>
     </Modal>
   );
