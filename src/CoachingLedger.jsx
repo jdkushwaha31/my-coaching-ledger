@@ -9,7 +9,8 @@ import {
 import { 
   LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut, 
   BookOpen, Send, Printer, Award, ArrowUpRight, History, Tag, Undo2, Archive, RotateCcw, 
-  ClipboardList, Percent, FileText, Search, Banknote, Landmark, CreditCard
+  ClipboardList, Percent, FileText, Search, Banknote, Landmark, CreditCard,
+  GraduationCap, CalendarCheck, ClipboardCheck, MessageSquare, FileBarChart2
 } from "lucide-react";
 
 // ============================================================================
@@ -194,6 +195,34 @@ import {
 //      Streams) is untouched and still lives one level down, inside the
 //      new "Fee & Class Structure" sub-tab. Expenses Log and Banking are
 //      unaffected and remain separate sidebar tabs, exactly as before.
+//
+// Changes made in this sixth update pass:
+//  22. NEW FEATURE — Academic Monitoring: a new sidebar tab (id
+//      "academic-monitoring", right after Student Management) tracking
+//      student academic performance, for internal use and for
+//      parent-facing printouts. Uses the exact same bordered pill-tab
+//      pattern as Fee & Class Structure / Student Management (see
+//      AcademicMonitoringTab / ACADEMIC_MONITORING_SUB_TABS), with four
+//      sub-tabs in this order: Attendance (mark daily/class-wise
+//      Present/Absent/Late per student, date filter, per-student
+//      attendance % summary — see AttendanceTab), Test Scores (test name,
+//      subject, date, marks, remarks per student, with per-student score
+//      history and class-wise averages — see TestScoresTab), Behaviour &
+//      Conduct (dated notes tagged positive / neutral / needs-attention —
+//      see BehaviourTab), and Performance Report (a printable A4,
+//      parent-facing summary combining attendance %, recent test scores,
+//      and behaviour notes for one student, reusing the same Tailwind CDN
+//      + Google Fonts print-popup pattern as the Joining Form / Center
+//      Statement — see PerformanceReportTab). Each of Attendance, Test
+//      Scores, and Behaviour & Conduct has its own Firestore collection
+//      ("attendance", "testScores", "behaviourNotes" respectively), synced
+//      live via onSnapshot exactly like every other collection in this
+//      file, and each fully supports soft-delete + Trash/Restore +
+//      permanent delete, wired into the existing TrashTab and trashCount
+//      (see AttendanceFormModal / TestScoreFormModal / BehaviourFormModal
+//      and the saveAttendance / saveTestScore / saveBehaviourNote +
+//      soft/restore/permanent-delete functions below). Nothing about any
+//      existing tab, collection, or handler changed.
 // ============================================================================
 
 // Admin Access Password
@@ -536,6 +565,15 @@ export default function CoachingLedger() {
   // else in the app (see NotesTab / addNote / updateNote / deleteNote /
   // toggleNotePin below).
   const [notes, setNotes] = useState([]);
+  // Academic Monitoring — Attendance, Test Scores, and Behaviour & Conduct
+  // records. Each is its own Firestore collection, synced live via
+  // onSnapshot exactly like every other collection above, and each
+  // supports the same soft-delete + Trash/Restore pattern (see
+  // AttendanceTab / TestScoresTab / BehaviourTab and the
+  // saveAttendance / saveTestScore / saveBehaviourNote functions below).
+  const [attendance, setAttendance] = useState([]);
+  const [testScores, setTestScores] = useState([]);
+  const [behaviourNotes, setBehaviourNotes] = useState([]);
 
   const [showStudentForm, setShowStudentForm] = useState(false);
   const [showDepositForm, setShowDepositForm] = useState(false);
@@ -552,6 +590,12 @@ export default function CoachingLedger() {
   const [showPayInterestModal, setShowPayInterestModal] = useState(null); // credit transaction
   const [showNoteForm, setShowNoteForm] = useState(false);
   const [editingNote, setEditingNote] = useState(null);
+  const [showAttendanceForm, setShowAttendanceForm] = useState(false);
+  const [editingAttendance, setEditingAttendance] = useState(null);
+  const [showTestScoreForm, setShowTestScoreForm] = useState(false);
+  const [editingTestScore, setEditingTestScore] = useState(null);
+  const [showBehaviourForm, setShowBehaviourForm] = useState(false);
+  const [editingBehaviour, setEditingBehaviour] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
   const [receiptData, setReceiptData] = useState(null);
   const [expenseReceiptData, setExpenseReceiptData] = useState(null);
@@ -621,6 +665,23 @@ export default function CoachingLedger() {
       setNotes(data);
     });
 
+    // Academic Monitoring collections — same live-sync pattern as every
+    // other collection above.
+    const unsubAttendance = onSnapshot(collection(db, "attendance"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setAttendance(data);
+    });
+
+    const unsubTestScores = onSnapshot(collection(db, "testScores"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setTestScores(data);
+    });
+
+    const unsubBehaviourNotes = onSnapshot(collection(db, "behaviourNotes"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setBehaviourNotes(data);
+    });
+
     const unsubFee = onSnapshot(doc(db, "settings", "feeStructure"), (docSnap) => {
       if (docSnap.exists()) {
         setFeeStructure(docSnap.data().matrix || {});
@@ -661,7 +722,9 @@ export default function CoachingLedger() {
 
     return () => {
       unsubStudents(); unsubDeposits(); unsubCharges(); unsubExpenses(); unsubBankTxns();
-      unsubCreditTxns(); unsubInterestPayments(); unsubNotes(); unsubFee(); unsubClasses(); unsubSubjects(); unsubStreams();
+      unsubCreditTxns(); unsubInterestPayments(); unsubNotes();
+      unsubAttendance(); unsubTestScores(); unsubBehaviourNotes();
+      unsubFee(); unsubClasses(); unsubSubjects(); unsubStreams();
     };
   }, [isAuthenticated]);
 
@@ -814,6 +877,15 @@ export default function CoachingLedger() {
     if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
     return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
   });
+
+  // Academic Monitoring — Attendance, Test Scores, Behaviour & Conduct.
+  // Same visible/trashed split as every other collection above.
+  const visibleAttendance = attendance.filter(a => !a.deleted);
+  const trashedAttendance = attendance.filter(a => a.deleted);
+  const visibleTestScores = testScores.filter(t => !t.deleted);
+  const trashedTestScores = testScores.filter(t => t.deleted);
+  const visibleBehaviourNotes = behaviourNotes.filter(b => !b.deleted);
+  const trashedBehaviourNotes = behaviourNotes.filter(b => b.deleted);
 
   const totalWithdrawals = round2(visibleBankTxns.filter(t => t.type === "withdrawal").reduce((a, t) => a + Number(t.amount || 0), 0));
   const totalBankDeposits = round2(visibleBankTxns.filter(t => t.type === "deposit").reduce((a, t) => a + Number(t.amount || 0), 0));
@@ -1289,6 +1361,102 @@ export default function CoachingLedger() {
     setReceiptData({ deposit: newDep, student: st });
   }
 
+  // ---- Academic Monitoring — Attendance, Test Scores, Behaviour & Conduct.
+  // Same add-or-edit-by-id pattern as saveNote(), and the same soft
+  // delete / restore / permanent delete pattern as every other collection
+  // above (see softDeleteCharge / restoreCharge / permanentlyDeleteCharge
+  // for the template this follows). ----
+  async function saveAttendance(data) {
+    if (data.id) {
+      const existing = attendance.find(a => a.id === data.id);
+      await setDoc(doc(db, "attendance", data.id), {
+        ...existing, studentId: data.studentId, date: data.date, status: data.status,
+        remarks: data.remarks, deleted: existing ? existing.deleted : false,
+      });
+    } else {
+      const id = uid();
+      await setDoc(doc(db, "attendance", id), { ...data, id, deleted: false, createdAt: nowStamp() });
+    }
+    setShowAttendanceForm(false);
+    setEditingAttendance(null);
+  }
+  async function softDeleteAttendance(id) {
+    const a = attendance.find(x => x.id === id);
+    if (!a) return;
+    if (!window.confirm("Remove this attendance record? It can be restored later from Trash.")) return;
+    await setDoc(doc(db, "attendance", id), { ...a, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreAttendance(id) {
+    const a = attendance.find(x => x.id === id);
+    if (!a) return;
+    await setDoc(doc(db, "attendance", id), { ...a, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteAttendance(id) {
+    if (!window.confirm("Permanently delete this attendance record? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "attendance", id));
+  }
+
+  async function saveTestScore(data) {
+    if (data.id) {
+      const existing = testScores.find(t => t.id === data.id);
+      await setDoc(doc(db, "testScores", data.id), {
+        ...existing, studentId: data.studentId, testName: data.testName, subject: data.subject,
+        date: data.date, marksObtained: data.marksObtained, maxMarks: data.maxMarks, remarks: data.remarks,
+        deleted: existing ? existing.deleted : false,
+      });
+    } else {
+      const id = uid();
+      await setDoc(doc(db, "testScores", id), { ...data, id, deleted: false, createdAt: nowStamp() });
+    }
+    setShowTestScoreForm(false);
+    setEditingTestScore(null);
+  }
+  async function softDeleteTestScore(id) {
+    const t = testScores.find(x => x.id === id);
+    if (!t) return;
+    if (!window.confirm("Remove this test score? It can be restored later from Trash.")) return;
+    await setDoc(doc(db, "testScores", id), { ...t, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreTestScore(id) {
+    const t = testScores.find(x => x.id === id);
+    if (!t) return;
+    await setDoc(doc(db, "testScores", id), { ...t, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteTestScore(id) {
+    if (!window.confirm("Permanently delete this test score? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "testScores", id));
+  }
+
+  async function saveBehaviourNote(data) {
+    if (data.id) {
+      const existing = behaviourNotes.find(b => b.id === data.id);
+      await setDoc(doc(db, "behaviourNotes", data.id), {
+        ...existing, studentId: data.studentId, date: data.date, note: data.note, tag: data.tag,
+        deleted: existing ? existing.deleted : false,
+      });
+    } else {
+      const id = uid();
+      await setDoc(doc(db, "behaviourNotes", id), { ...data, id, deleted: false, createdAt: nowStamp() });
+    }
+    setShowBehaviourForm(false);
+    setEditingBehaviour(null);
+  }
+  async function softDeleteBehaviourNote(id) {
+    const b = behaviourNotes.find(x => x.id === id);
+    if (!b) return;
+    if (!window.confirm("Remove this behaviour note? It can be restored later from Trash.")) return;
+    await setDoc(doc(db, "behaviourNotes", id), { ...b, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreBehaviourNote(id) {
+    const b = behaviourNotes.find(x => x.id === id);
+    if (!b) return;
+    await setDoc(doc(db, "behaviourNotes", id), { ...b, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteBehaviourNote(id) {
+    if (!window.confirm("Permanently delete this behaviour note? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "behaviourNotes", id));
+  }
+
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutGrid },
     // Students Register, Pending Dues, Deposits Log, Charges, Center
@@ -1298,13 +1466,18 @@ export default function CoachingLedger() {
     // STUDENT_MANAGEMENT_SUB_TABS) — same merge pattern already used for
     // Banking's four sub-tabs.
     { id: "students-management", label: "Student Management", icon: Users },
+    // Academic Monitoring — Attendance, Test Scores, Behaviour & Conduct,
+    // and the printable Performance Report, grouped under one sidebar
+    // entry with its own internal pill row (see AcademicMonitoringTab /
+    // ACADEMIC_MONITORING_SUB_TABS), same pattern as Student Management.
+    { id: "academic-monitoring", label: "Academic Monitoring", icon: GraduationCap },
     { id: "expenses", label: "Expenses Log", icon: CreditCard },
     { id: "banking", label: "Banking", icon: Landmark },
     { id: "notes", label: "Notes", icon: BookOpen },
     { id: "trash", label: "Trash / Restore", icon: Archive },
   ];
 
-  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length;
+  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length + trashedAttendance.length + trashedTestScores.length + trashedBehaviourNotes.length;
 
   return (
     <div className="min-h-screen flex" style={{ background: "#FAF6EC", fontFamily: "'Inter', sans-serif", color: "#26231D" }}>
@@ -1421,6 +1594,21 @@ export default function CoachingLedger() {
             }}
           />
         )}
+        {tab === "academic-monitoring" && (
+          <AcademicMonitoringTab
+            students={visibleStudents} classes={classes}
+            attendance={visibleAttendance} testScores={visibleTestScores} behaviourNotes={visibleBehaviourNotes}
+            onAddAttendance={() => { setEditingAttendance(null); setShowAttendanceForm(true); }}
+            onEditAttendance={(a) => { setEditingAttendance(a); setShowAttendanceForm(true); }}
+            onRemoveAttendance={softDeleteAttendance}
+            onAddTestScore={() => { setEditingTestScore(null); setShowTestScoreForm(true); }}
+            onEditTestScore={(t) => { setEditingTestScore(t); setShowTestScoreForm(true); }}
+            onRemoveTestScore={softDeleteTestScore}
+            onAddBehaviour={() => { setEditingBehaviour(null); setShowBehaviourForm(true); }}
+            onEditBehaviour={(b) => { setEditingBehaviour(b); setShowBehaviourForm(true); }}
+            onRemoveBehaviour={softDeleteBehaviourNote}
+          />
+        )}
         {tab === "expenses" && (
           <ExpensesTab
             expenses={visibleExpenses}
@@ -1474,6 +1662,7 @@ export default function CoachingLedger() {
           <TrashTab
             trashedStudents={trashedStudents} trashedDeposits={trashedDeposits} trashedCharges={trashedCharges} trashedExpenses={trashedExpenses}
             trashedBankTxns={trashedBankTxns} trashedCreditTxns={trashedCreditTxns} trashedInterestPayments={trashedInterestPayments}
+            trashedAttendance={trashedAttendance} trashedTestScores={trashedTestScores} trashedBehaviourNotes={trashedBehaviourNotes}
             studentById={studentById}
             onRestoreStudent={restoreStudent} onDeleteStudent={permanentlyDeleteStudent}
             onRestoreDeposit={restoreDeposit} onDeleteDeposit={permanentlyDeleteDeposit}
@@ -1482,6 +1671,9 @@ export default function CoachingLedger() {
             onRestoreBankTxn={restoreBankTransaction} onDeleteBankTxn={permanentlyDeleteBankTransaction}
             onRestoreCredit={restoreCreditTransaction} onDeleteCredit={permanentlyDeleteCreditTransaction}
             onRestoreInterest={restoreInterestPayment} onDeleteInterest={permanentlyDeleteInterestPayment}
+            onRestoreAttendance={restoreAttendance} onDeleteAttendance={permanentlyDeleteAttendance}
+            onRestoreTestScore={restoreTestScore} onDeleteTestScore={permanentlyDeleteTestScore}
+            onRestoreBehaviour={restoreBehaviourNote} onDeleteBehaviour={permanentlyDeleteBehaviourNote}
           />
         )}
       </main>
@@ -1527,6 +1719,18 @@ export default function CoachingLedger() {
       )}
       {showNoteForm && (
         <NoteFormModal initial={editingNote} onClose={() => { setShowNoteForm(false); setEditingNote(null); }} onSave={saveNote} />
+      )}
+      {showAttendanceForm && (
+        <AttendanceFormModal students={visibleStudents} initial={editingAttendance}
+          onClose={() => { setShowAttendanceForm(false); setEditingAttendance(null); }} onSave={saveAttendance} />
+      )}
+      {showTestScoreForm && (
+        <TestScoreFormModal students={visibleStudents} initial={editingTestScore}
+          onClose={() => { setShowTestScoreForm(false); setEditingTestScore(null); }} onSave={saveTestScore} />
+      )}
+      {showBehaviourForm && (
+        <BehaviourFormModal students={visibleStudents} initial={editingBehaviour}
+          onClose={() => { setShowBehaviourForm(false); setEditingBehaviour(null); }} onSave={saveBehaviourNote} />
       )}
       {expenseReceiptData && (
         <ExpenseReceiptModal expense={expenseReceiptData} onClose={() => setExpenseReceiptData(null)} />
@@ -2510,6 +2714,704 @@ function ChargesTab({ chargeLines, students, classes, onAdd, onRemove, onOpenRec
           </table>
         )}
       </Card>
+    </div>
+  );
+}
+
+// ============================================================================
+// ACADEMIC MONITORING — tracks student academic performance (attendance,
+// test scores, behaviour/conduct) for the coaching center's internal use
+// and for printable parent-facing reports. Four sub-tabs, same bordered
+// pill-row pattern as StructureTab / StudentManagementTab / BankingTab.
+// Each of Attendance, Test Scores, and Behaviour & Conduct is backed by
+// its own Firestore collection (attendance / testScores / behaviourNotes),
+// with full soft-delete + Trash/Restore support wired into TrashTab.
+// ============================================================================
+const ACADEMIC_MONITORING_SUB_TABS = [
+  { id: "attendance", label: "Attendance", icon: CalendarCheck },
+  { id: "test-scores", label: "Test Scores", icon: ClipboardCheck },
+  { id: "behaviour", label: "Behaviour & Conduct", icon: MessageSquare },
+  { id: "report", label: "Performance Report", icon: FileBarChart2 },
+];
+
+function AcademicMonitoringTab({
+  students, classes, attendance, testScores, behaviourNotes,
+  onAddAttendance, onEditAttendance, onRemoveAttendance,
+  onAddTestScore, onEditTestScore, onRemoveTestScore,
+  onAddBehaviour, onEditBehaviour, onRemoveBehaviour,
+}) {
+  const [subTab, setSubTab] = useState("attendance");
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Academic Tracking" title="Academic Monitoring" />
+      <div className="text-sm text-[#6E6650] mb-4">Attendance, test performance, and behaviour & conduct for every student — for internal review, and to print a clean parent-facing summary.</div>
+
+      {/* Same bordered pill-row pattern as StructureTab / StudentManagementTab / BankingTab. */}
+      <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
+        {ACADEMIC_MONITORING_SUB_TABS.map((st, i) => {
+          const Icon = st.icon;
+          const active = subTab === st.id;
+          return (
+            <button key={st.id} onClick={() => setSubTab(st.id)}
+              className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+              style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+              <Icon size={13} /> {st.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {subTab === "attendance" && (
+        <AttendanceTab students={students} classes={classes} attendance={attendance}
+          onAdd={onAddAttendance} onEdit={onEditAttendance} onRemove={onRemoveAttendance} />
+      )}
+      {subTab === "test-scores" && (
+        <TestScoresTab students={students} classes={classes} testScores={testScores}
+          onAdd={onAddTestScore} onEdit={onEditTestScore} onRemove={onRemoveTestScore} />
+      )}
+      {subTab === "behaviour" && (
+        <BehaviourTab students={students} classes={classes} behaviourNotes={behaviourNotes}
+          onAdd={onAddBehaviour} onEdit={onEditBehaviour} onRemove={onRemoveBehaviour} />
+      )}
+      {subTab === "report" && (
+        <PerformanceReportTab students={students} attendance={attendance} testScores={testScores} behaviourNotes={behaviourNotes} />
+      )}
+    </div>
+  );
+}
+
+// ---- Attendance — mark daily / class-wise attendance (Present / Absent /
+// Late) per student, with a date filter and a per-student attendance %
+// summary. ----
+function AttendanceTab({ students, classes, attendance, onAdd, onEdit, onRemove }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [dateFilter, setDateFilter] = useState("");
+
+  const studentById = useMemo(() => Object.fromEntries((students || []).map(s => [s.id, s])), [students]);
+  const sorted = useMemo(() => [...attendance].sort((a, b) => compareChrono(a, b, -1)), [attendance]);
+
+  const matchesFilters = (a, includeDate) => {
+    const st = studentById[a.studentId];
+    if (!st) return false;
+    if (classFilter !== "all" && String(st.class) !== classFilter) return false;
+    if (includeDate && dateFilter && a.date !== dateFilter) return false;
+    if (search) {
+      const q = search.trim().toLowerCase();
+      if (!(st.name || "").toLowerCase().includes(q)) return false;
+    }
+    return true;
+  };
+
+  const filtered = useMemo(() => sorted.filter(a => matchesFilters(a, true)), [sorted, studentById, classFilter, dateFilter, search]); // eslint-disable-line react-hooks/exhaustive-deps
+  const isFiltered = search || classFilter !== "all" || dateFilter;
+
+  // Per-student attendance % summary — respects the Name / Class filters,
+  // but deliberately ignores the Date filter so it always reflects the
+  // student's full attendance history, not just one day.
+  const summary = useMemo(() => {
+    const map = {};
+    attendance.forEach(a => {
+      if (!matchesFilters(a, false)) return;
+      if (!map[a.studentId]) map[a.studentId] = { student: studentById[a.studentId], present: 0, absent: 0, late: 0, total: 0 };
+      map[a.studentId].total += 1;
+      if (a.status === "Present") map[a.studentId].present += 1;
+      else if (a.status === "Late") map[a.studentId].late += 1;
+      else map[a.studentId].absent += 1;
+    });
+    return Object.values(map).sort((a, b) => (a.student.name || "").localeCompare(b.student.name || ""));
+  }, [attendance, studentById, classFilter, search]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Daily / Class-wise" title="Attendance" action={
+        <button onClick={onAdd} disabled={students.length === 0} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Mark Attendance
+        </button>
+      } />
+      <div className="text-sm text-[#6E6650] mb-4">Mark Present / Absent / Late per student. Filter by date to review a single day — the attendance % summary below always reflects each student's full history.</div>
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[150px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Student Name</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Date</div>
+            <input type="date" className={inputCls} style={inputStyle} value={dateFilter} onChange={e => setDateFilter(e.target.value)} />
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setDateFilter(""); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
+      <div className="mb-3" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Attendance % Summary</span></div>
+      <Card className="mb-6">
+        {summary.length === 0 ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No attendance recorded yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Student", "Class", "Present", "Absent", "Late", "Total Days", "Attendance %"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {summary.map(s => {
+                const pct = s.total > 0 ? round2(((s.present + s.late) / s.total) * 100) : 0;
+                return (
+                  <tr key={s.student.id} className="ledger-row">
+                    <td className="px-4 py-2.5 font-medium">{s.student.name}</td>
+                    <td className="px-4 py-2.5 text-xs">{s.student.class}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#3F6B52] font-mono">{s.present}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#A63D2F] font-mono">{s.absent}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#B8862B] font-mono">{s.late}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono">{s.total}</td>
+                    <td className="px-4 py-2.5 text-xs font-semibold font-mono" style={{ color: pct >= 75 ? "#3F6B52" : "#A63D2F" }}>{pct}%</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {isFiltered && (
+        <div className="text-xs text-[#6E6650] mb-3">Showing {filtered.length} of {sorted.length} records</div>
+      )}
+      <Card>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{sorted.length === 0 ? "No attendance records yet." : "No attendance records match these filters."}</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Date", "Student", "Class", "Status", "Remarks", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(a => {
+                const st = studentById[a.studentId];
+                const tone = a.status === "Present" ? "paid" : a.status === "Late" ? "due" : "overdue";
+                return (
+                  <tr key={a.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(a.date)}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs">{st ? st.class : "—"}</td>
+                    <td className="px-4 py-2.5"><Stamp text={a.status} tone={tone} /></td>
+                    <td className="px-4 py-2.5 text-xs">{a.remarks || "—"}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onEdit(a)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
+                      <button onClick={() => onRemove(a.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ---- Test Scores — test/exam name, subject, date, marks, remarks per
+// student, with a per-student score history and class-wise average. ----
+function TestScoresTab({ students, classes, testScores, onAdd, onEdit, onRemove }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [subjectFilter, setSubjectFilter] = useState("all");
+
+  const studentById = useMemo(() => Object.fromEntries((students || []).map(s => [s.id, s])), [students]);
+  const sorted = useMemo(() => [...testScores].sort((a, b) => compareChrono(a, b, -1)), [testScores]);
+  const subjectOptions = useMemo(() => Array.from(new Set(testScores.map(t => t.subject).filter(Boolean))).sort(), [testScores]);
+
+  const filtered = useMemo(() => sorted.filter(t => {
+    const st = studentById[t.studentId];
+    if (!st) return false;
+    if (classFilter !== "all" && String(st.class) !== classFilter) return false;
+    if (subjectFilter !== "all" && t.subject !== subjectFilter) return false;
+    if (search) {
+      const q = search.trim().toLowerCase();
+      if (!(st.name || "").toLowerCase().includes(q)) return false;
+    }
+    return true;
+  }), [sorted, studentById, classFilter, subjectFilter, search]);
+  const isFiltered = search || classFilter !== "all" || subjectFilter !== "all";
+
+  // Class-wise average % — respects the Subject filter so a center can
+  // check e.g. "average Mathematics score by class".
+  const classAverages = useMemo(() => {
+    const map = {};
+    testScores.forEach(t => {
+      const st = studentById[t.studentId];
+      if (!st) return;
+      if (subjectFilter !== "all" && t.subject !== subjectFilter) return;
+      const max = Number(t.maxMarks) || 0;
+      if (max <= 0) return;
+      const cls = st.class;
+      if (!map[cls]) map[cls] = { totalObtained: 0, totalMax: 0, count: 0 };
+      map[cls].totalObtained += Number(t.marksObtained) || 0;
+      map[cls].totalMax += max;
+      map[cls].count += 1;
+    });
+    return Object.entries(map).map(([cls, v]) => ({
+      class: cls, count: v.count, avgPct: v.totalMax > 0 ? round2((v.totalObtained / v.totalMax) * 100) : 0,
+    })).sort((a, b) => (a.class || "").localeCompare(b.class || "", undefined, { numeric: true }));
+  }, [testScores, studentById, subjectFilter]);
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Exams & Tests" title="Test Scores" action={
+        <button onClick={onAdd} disabled={students.length === 0} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Add Test Score
+        </button>
+      } />
+      <div className="text-sm text-[#6E6650] mb-4">Record test/exam name, subject, date, marks obtained, max marks, and remarks per student. See each student's score history and class-wise averages below.</div>
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[150px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Student Name</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Subject</div>
+            <select className={inputCls} style={inputStyle} value={subjectFilter} onChange={e => setSubjectFilter(e.target.value)}>
+              <option value="all">All Subjects</option>
+              {subjectOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setSubjectFilter("all"); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
+      <div className="mb-3" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Class-wise Average</span></div>
+      <Card className="mb-6">
+        {classAverages.length === 0 ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No test scores recorded yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Class", "Tests Recorded", "Average %"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {classAverages.map(c => (
+                <tr key={c.class} className="ledger-row">
+                  <td className="px-4 py-2.5 font-semibold text-[#12312B]">{c.class}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono">{c.count}</td>
+                  <td className="px-4 py-2.5 text-xs font-semibold font-mono" style={{ color: c.avgPct >= 40 ? "#3F6B52" : "#A63D2F" }}>{c.avgPct}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {isFiltered && (
+        <div className="text-xs text-[#6E6650] mb-3">Showing {filtered.length} of {sorted.length} records</div>
+      )}
+      <Card>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{sorted.length === 0 ? "No test scores logged yet." : "No test scores match these filters."}</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Date", "Student", "Class", "Test", "Subject", "Marks", "%", "Remarks", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(t => {
+                const st = studentById[t.studentId];
+                const pct = Number(t.maxMarks) > 0 ? round2((Number(t.marksObtained) / Number(t.maxMarks)) * 100) : 0;
+                return (
+                  <tr key={t.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(t.date)}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs">{st ? st.class : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs">{t.testName}</td>
+                    <td className="px-4 py-2.5 text-xs">{t.subject}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono">{t.marksObtained}/{t.maxMarks}</td>
+                    <td className="px-4 py-2.5 text-xs font-semibold font-mono" style={{ color: pct >= 40 ? "#3F6B52" : "#A63D2F" }}>{pct}%</td>
+                    <td className="px-4 py-2.5 text-xs">{t.remarks || "—"}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onEdit(t)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
+                      <button onClick={() => onRemove(t.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ---- Behaviour & Conduct — short dated notes/observations per student
+// (discipline, participation, homework completion, etc.), each tagged
+// positive / neutral / needs-attention. ----
+const BEHAVIOUR_TAG_META = {
+  positive: { label: "Positive", tone: "paid" },
+  neutral: { label: "Neutral", tone: "break" },
+  "needs-attention": { label: "Needs Attention", tone: "overdue" },
+};
+
+function BehaviourTab({ students, classes, behaviourNotes, onAdd, onEdit, onRemove }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [tagFilter, setTagFilter] = useState("all");
+
+  const studentById = useMemo(() => Object.fromEntries((students || []).map(s => [s.id, s])), [students]);
+  const sorted = useMemo(() => [...behaviourNotes].sort((a, b) => compareChrono(a, b, -1)), [behaviourNotes]);
+
+  const filtered = useMemo(() => sorted.filter(b => {
+    const st = studentById[b.studentId];
+    if (!st) return false;
+    if (classFilter !== "all" && String(st.class) !== classFilter) return false;
+    if (tagFilter !== "all" && b.tag !== tagFilter) return false;
+    if (search) {
+      const q = search.trim().toLowerCase();
+      if (!(st.name || "").toLowerCase().includes(q)) return false;
+    }
+    return true;
+  }), [sorted, studentById, classFilter, tagFilter, search]);
+  const isFiltered = search || classFilter !== "all" || tagFilter !== "all";
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Discipline · Participation · Homework" title="Behaviour & Conduct" action={
+        <button onClick={onAdd} disabled={students.length === 0} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Add Note
+        </button>
+      } />
+      <div className="text-sm text-[#6E6650] mb-4">Short dated observations per student — discipline, participation, homework completion, etc. — each tagged Positive, Neutral, or Needs Attention.</div>
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="min-w-[150px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Student Name</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type a name…" />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {(classes || []).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Tag</div>
+            <select className={inputCls} style={inputStyle} value={tagFilter} onChange={e => setTagFilter(e.target.value)}>
+              <option value="all">All Tags</option>
+              {Object.entries(BEHAVIOUR_TAG_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+            </select>
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setTagFilter("all"); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
+      {isFiltered && (
+        <div className="text-xs text-[#6E6650] mb-3">Showing {filtered.length} of {sorted.length} notes</div>
+      )}
+      <Card>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{sorted.length === 0 ? "No behaviour notes logged yet." : "No notes match these filters."}</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Date", "Student", "Class", "Tag", "Note", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(b => {
+                const st = studentById[b.studentId];
+                const meta = BEHAVIOUR_TAG_META[b.tag] || { label: b.tag, tone: "due" };
+                return (
+                  <tr key={b.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtDate(b.date)}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs">{st ? st.class : "—"}</td>
+                    <td className="px-4 py-2.5"><Stamp text={meta.label} tone={meta.tone} /></td>
+                    <td className="px-4 py-2.5 text-xs">{b.note}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onEdit(b)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
+                      <button onClick={() => onRemove(b.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ---- Performance Report — a printable, parent-facing summary per student
+// combining attendance %, recent test scores, and behaviour notes into one
+// clean A4 report. Reuses the Joining Form / Center Statement print-window
+// pattern: Tailwind CDN + Google Fonts loaded into the popup, A4 layout,
+// letterhead style. ----
+function PerformanceReportTab({ students, attendance, testScores, behaviourNotes }) {
+  const [studentId, setStudentId] = useState(students[0]?.id || "");
+  const [studentSearch, setStudentSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const reportRef = useRef();
+
+  const student = students.find(s => s.id === studentId);
+  const classOptions = useMemo(() => Array.from(new Set(students.map(s => s.class))).sort(), [students]);
+  const filteredStudents = useMemo(() => {
+    const q = studentSearch.trim().toLowerCase();
+    return students.filter(s => {
+      if (classFilter !== "all" && String(s.class) !== classFilter) return false;
+      if (q && !((s.name || "").toLowerCase().includes(q) || (s.phone || "").toLowerCase().includes(q))) return false;
+      return true;
+    });
+  }, [students, studentSearch, classFilter]);
+
+  const studentAttendance = useMemo(() => (attendance || []).filter(a => a.studentId === studentId), [attendance, studentId]);
+  const attendancePct = useMemo(() => {
+    const total = studentAttendance.length;
+    if (!total) return null;
+    const present = studentAttendance.filter(a => a.status === "Present" || a.status === "Late").length;
+    return round2((present / total) * 100);
+  }, [studentAttendance]);
+
+  const studentTestScores = useMemo(() =>
+    (testScores || []).filter(t => t.studentId === studentId).sort((a, b) => compareChrono(a, b, -1)).slice(0, 10),
+    [testScores, studentId]
+  );
+  const avgScorePct = useMemo(() => {
+    if (!studentTestScores.length) return null;
+    const totalObtained = studentTestScores.reduce((a, t) => a + (Number(t.marksObtained) || 0), 0);
+    const totalMax = studentTestScores.reduce((a, t) => a + (Number(t.maxMarks) || 0), 0);
+    return totalMax > 0 ? round2((totalObtained / totalMax) * 100) : null;
+  }, [studentTestScores]);
+
+  const studentBehaviourNotes = useMemo(() =>
+    (behaviourNotes || []).filter(b => b.studentId === studentId).sort((a, b) => compareChrono(a, b, -1)).slice(0, 10),
+    [behaviourNotes, studentId]
+  );
+
+  const generatedOn = fmtDate(todayStr());
+
+  const handlePrint = () => {
+    if (!student || !reportRef.current) return;
+    const printContent = reportRef.current.innerHTML;
+    const win = window.open("", "", "width=900,height=1000");
+    // Same Tailwind CDN + Google Fonts print-popup pattern used by the
+    // Joining Form and every printable statement in this app, so this
+    // prints exactly like the on-screen preview instead of unstyled text.
+    win.document.write(`
+      <html>
+        <head>
+          <title>Performance Report - ${student.name}</title>
+          <script src="https://cdn.tailwindcss.com"></script>
+          <style>
+            ${FONT_IMPORT}
+            @page { size: A4; margin: 16mm; }
+            * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            body { font-family: 'Inter', sans-serif; color: #12312B; background: #fff; margin: 0; }
+            .report-doc { border: 1.5px solid #B8862B; border-radius: 4px; padding: 22px; }
+            .report-doc::before { content: ""; display: block; height: 3px; background: #12312B; margin: -22px -22px 18px -22px; }
+            table { page-break-inside: auto; }
+            tr { page-break-inside: avoid; page-break-after: auto; }
+            thead { display: table-header-group; }
+          </style>
+        </head>
+        <body>
+          <div class="report-doc">${printContent}</div>
+        </body>
+      </html>
+    `);
+    win.document.close(); win.focus(); setTimeout(() => { win.print(); win.close(); }, 300);
+  };
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Parent-Facing Summary" title="Performance Report" action={
+        <button onClick={handlePrint} disabled={!student} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Printer size={15} /> Print / Export
+        </button>
+      } />
+      <div className="text-sm text-[#6E6650] mb-4">A single printable A4 summary combining attendance %, recent test scores, and behaviour notes — for internal review or to hand to a parent.</div>
+
+      <Card className="p-3.5 mb-5">
+        <Field label="Select Student">
+          <div className="relative">
+            <div className="flex items-center border rounded-sm bg-white px-3 py-2 cursor-pointer" style={inputStyle} onClick={() => setPickerOpen(o => !o)}>
+              <Search size={13} className="text-[#9C8F6E] mr-2 shrink-0" />
+              <span className="text-sm flex-1 truncate">{student ? `${student.name} — ${student.class}${student.phone ? " · " + student.phone : ""}` : "Search by name, class, or phone…"}</span>
+            </div>
+            {pickerOpen && (
+              <div className="absolute z-10 mt-1 w-full bg-white border rounded-sm shadow-lg max-h-72 overflow-y-auto" style={{ borderColor: "#D8CFB8" }}>
+                <div className="p-2 sticky top-0 bg-white border-b flex gap-2" style={{ borderColor: "#EEE7D2" }}>
+                  <input autoFocus className={inputCls} style={inputStyle} value={studentSearch} onChange={e => setStudentSearch(e.target.value)} placeholder="Type name or phone…" />
+                  <select className={inputCls} style={{ ...inputStyle, width: "auto" }} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+                    <option value="all">All Classes</option>
+                    {classOptions.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                {filteredStudents.length === 0 ? (
+                  <div className="p-3 text-xs text-[#9C8F6E] text-center">No students match.</div>
+                ) : (
+                  filteredStudents.map(s => (
+                    <button key={s.id} type="button" onClick={() => { setStudentId(s.id); setPickerOpen(false); setStudentSearch(""); }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-[#F5F0E1] flex items-center justify-between"
+                      style={{ background: s.id === studentId ? "#F5F0E1" : "white" }}>
+                      <span>{s.name} <span className="text-xs text-[#9C8F6E]">— {s.class}</span></span>
+                      <span className="text-xs text-[#9C8F6E] font-mono">{s.phone || ""}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </Field>
+      </Card>
+
+      {!student ? (
+        <Card className="p-8 text-center text-sm text-[#9C8F6E]">Select a student to view their performance report.</Card>
+      ) : (
+        <div
+          className="p-6 bg-white rounded-sm mb-4"
+          ref={reportRef}
+          style={{ border: "1.5px solid #B8862B", borderRadius: "4px", boxShadow: "0 1px 3px rgba(18,49,43,0.08)" }}
+        >
+          <div className="text-center pb-3 mb-4" style={{ borderBottom: "2px dashed #12312B" }}>
+            <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+            <p className="text-[11px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Student Performance Report</p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm mb-5">
+            <div className="flex justify-between border-b border-dotted py-1.5" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Student Name</span><span className="font-semibold text-[#12312B]">{student.name}</span></div>
+            <div className="flex justify-between border-b border-dotted py-1.5" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Student ID</span><span className="font-semibold text-[#12312B]">{student.studentId || "—"}</span></div>
+            <div className="flex justify-between border-b border-dotted py-1.5" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Class</span><span className="font-semibold text-[#12312B]">{student.class}</span></div>
+            <div className="flex justify-between border-b border-dotted py-1.5" style={{ borderColor: "#D8CFB8" }}><span className="text-[#6E6650]">Report Generated</span><span className="font-semibold text-[#12312B]">{generatedOn}</span></div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 mb-5">
+            <div className="p-3 rounded-sm border" style={{ borderColor: "#D8CFB8" }}>
+              <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Attendance</div>
+              <div style={{ fontFamily: "'Zilla Slab', serif", color: attendancePct === null ? "#9C8F6E" : (attendancePct >= 75 ? "#3F6B52" : "#A63D2F") }} className="text-xl font-bold">
+                {attendancePct === null ? "No data" : `${attendancePct}%`}
+              </div>
+              <div className="text-[11px] text-[#9C8F6E]">{studentAttendance.length} day(s) recorded</div>
+            </div>
+            <div className="p-3 rounded-sm border" style={{ borderColor: "#D8CFB8" }}>
+              <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Average Test Score</div>
+              <div style={{ fontFamily: "'Zilla Slab', serif", color: avgScorePct === null ? "#9C8F6E" : (avgScorePct >= 40 ? "#3F6B52" : "#A63D2F") }} className="text-xl font-bold">
+                {avgScorePct === null ? "No data" : `${avgScorePct}%`}
+              </div>
+              <div className="text-[11px] text-[#9C8F6E]">Based on last {studentTestScores.length} test(s)</div>
+            </div>
+          </div>
+
+          <div className="font-bold text-[11px] uppercase tracking-wider mb-2" style={{ color: "#8A6420", borderBottom: "1px solid #D8CFB8", paddingBottom: "4px" }}>Recent Test Scores</div>
+          {studentTestScores.length === 0 ? (
+            <div className="text-xs text-[#9C8F6E] mb-4">No test scores recorded yet.</div>
+          ) : (
+            <table className="w-full text-xs mb-4">
+              <thead>
+                <tr>
+                  {["Date", "Test", "Subject", "Marks", "%", "Remarks"].map(h => (
+                    <th key={h} className="text-left py-1.5 uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "9px" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {studentTestScores.map(t => {
+                  const pct = Number(t.maxMarks) > 0 ? round2((Number(t.marksObtained) / Number(t.maxMarks)) * 100) : 0;
+                  return (
+                    <tr key={t.id} style={{ borderTop: "1px dotted #E4DCC5" }}>
+                      <td className="py-1.5 whitespace-nowrap">{fmtDate(t.date)}</td>
+                      <td className="py-1.5">{t.testName}</td>
+                      <td className="py-1.5">{t.subject}</td>
+                      <td className="py-1.5 font-mono">{t.marksObtained}/{t.maxMarks}</td>
+                      <td className="py-1.5 font-mono font-semibold" style={{ color: pct >= 40 ? "#3F6B52" : "#A63D2F" }}>{pct}%</td>
+                      <td className="py-1.5">{t.remarks || "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+
+          <div className="font-bold text-[11px] uppercase tracking-wider mb-2" style={{ color: "#8A6420", borderBottom: "1px solid #D8CFB8", paddingBottom: "4px" }}>Behaviour & Conduct Notes</div>
+          {studentBehaviourNotes.length === 0 ? (
+            <div className="text-xs text-[#9C8F6E] mb-4">No behaviour notes recorded yet.</div>
+          ) : (
+            <div className="space-y-1.5 mb-4">
+              {studentBehaviourNotes.map(b => {
+                const meta = BEHAVIOUR_TAG_META[b.tag] || { label: b.tag, tone: "due" };
+                return (
+                  <div key={b.id} className="text-xs flex items-start justify-between gap-3 py-1" style={{ borderBottom: "1px dotted #E4DCC5" }}>
+                    <div><span className="font-mono text-[#9C8F6E] mr-2 whitespace-nowrap">{fmtDate(b.date)}</span>{b.note}</div>
+                    <Stamp text={meta.label} tone={meta.tone} />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="flex justify-between mt-10 text-xs">
+            <div style={{ borderTop: "1px solid #12312B", paddingTop: "6px", width: "200px", textAlign: "center", color: "#4A4636" }}>Parent / Guardian Signature</div>
+            <div style={{ borderTop: "1px solid #12312B", paddingTop: "6px", width: "200px", textAlign: "center", color: "#4A4636" }}>Authorized Signatory</div>
+          </div>
+
+          <div className="text-center text-[10px] text-[#9C8F6E] mt-6 pt-3" style={{ borderTop: "1.5px solid #12312B" }}>
+            Computer Generated Report · Coaching Classes Academic Monitoring
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3531,7 +4433,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
   );
 }
 
-function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, trashedCreditTxns, trashedInterestPayments, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn, onRestoreCredit, onDeleteCredit, onRestoreInterest, onDeleteInterest }) {
+function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, trashedCreditTxns, trashedInterestPayments, trashedAttendance, trashedTestScores, trashedBehaviourNotes, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn, onRestoreCredit, onDeleteCredit, onRestoreInterest, onDeleteInterest, onRestoreAttendance, onDeleteAttendance, onRestoreTestScore, onDeleteTestScore, onRestoreBehaviour, onDeleteBehaviour }) {
   return (
     <div>
       <SectionHeader eyebrow="Recycle Bin" title="Trash / Restore" />
@@ -3705,6 +4607,88 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
                   </td>
                 </tr>
               ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Attendance Records</span></div>
+      <Card className="mb-6">
+        {(!trashedAttendance || trashedAttendance.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted attendance records.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedAttendance.map(a => {
+                const st = studentById[a.studentId];
+                return (
+                  <tr key={a.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(a.date)}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{a.status}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {a.deletedAt ? fmtDate(a.deletedAt) : ""}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onRestoreAttendance(a.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                      <button onClick={() => onDeleteAttendance(a.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Test Scores</span></div>
+      <Card className="mb-6">
+        {(!trashedTestScores || trashedTestScores.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted test scores.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedTestScores.map(t => {
+                const st = studentById[t.studentId];
+                return (
+                  <tr key={t.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(t.date)}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{t.testName} — {t.subject}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono">{t.marksObtained}/{t.maxMarks}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {t.deletedAt ? fmtDate(t.deletedAt) : ""}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onRestoreTestScore(t.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                      <button onClick={() => onDeleteTestScore(t.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Behaviour Notes</span></div>
+      <Card>
+        {(!trashedBehaviourNotes || trashedBehaviourNotes.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted behaviour notes.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedBehaviourNotes.map(b => {
+                const st = studentById[b.studentId];
+                return (
+                  <tr key={b.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(b.date)}</td>
+                    <td className="px-4 py-2.5 font-medium">{st ? st.name : "—"}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#6E6650]">{b.note}</td>
+                    <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {b.deletedAt ? fmtDate(b.deletedAt) : ""}</td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onRestoreBehaviour(b.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                      <button onClick={() => onDeleteBehaviour(b.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -4199,6 +5183,172 @@ function AddChargeModal({ students, charges, initialStudent, curMonth, onClose, 
       <Field label="Remarks — what is this charge for?"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="e.g. Annual exam fee" /></Field>
       <button onClick={submit} disabled={!studentId || !amount} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
         Add Charge
+      </button>
+    </Modal>
+  );
+}
+
+// ============================================================================
+// ACADEMIC MONITORING — FORM MODALS. Each reuses the exact same student
+// picker (search + class filter, dropdown of matches) as AddChargeModal
+// above, so marking attendance, logging a test score, or adding a
+// behaviour note all feel consistent with adding a charge. Each modal
+// doubles as both "Add" and "Edit" — when `initial` is passed, its id is
+// carried through in onSave so the parent's save function knows to update
+// the existing record instead of creating a new one (same pattern as
+// NoteFormModal / saveNote).
+// ============================================================================
+function StudentPickerField({ students, studentId, setStudentId }) {
+  const [studentSearch, setStudentSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const student = students.find(s => s.id === studentId);
+  const classOptions = useMemo(() => Array.from(new Set(students.map(s => s.class))).sort(), [students]);
+  const filteredStudents = useMemo(() => {
+    const q = studentSearch.trim().toLowerCase();
+    return students.filter(s => {
+      if (classFilter !== "all" && String(s.class) !== classFilter) return false;
+      if (q && !((s.name || "").toLowerCase().includes(q) || (s.phone || "").toLowerCase().includes(q))) return false;
+      return true;
+    });
+  }, [students, studentSearch, classFilter]);
+
+  return (
+    <Field label="Student">
+      <div className="relative">
+        <div className="flex items-center border rounded-sm bg-white px-3 py-2 cursor-pointer" style={inputStyle} onClick={() => setPickerOpen(o => !o)}>
+          <Search size={13} className="text-[#9C8F6E] mr-2 shrink-0" />
+          <span className="text-sm flex-1 truncate">{student ? `${student.name} — ${student.class}${student.phone ? " · " + student.phone : ""}` : "Search by name, class, or phone…"}</span>
+        </div>
+        {pickerOpen && (
+          <div className="absolute z-10 mt-1 w-full bg-white border rounded-sm shadow-lg max-h-72 overflow-y-auto" style={{ borderColor: "#D8CFB8" }}>
+            <div className="p-2 sticky top-0 bg-white border-b flex gap-2" style={{ borderColor: "#EEE7D2" }}>
+              <input autoFocus className={inputCls} style={inputStyle} value={studentSearch} onChange={e => setStudentSearch(e.target.value)} placeholder="Type name or phone…" />
+              <select className={inputCls} style={{ ...inputStyle, width: "auto" }} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+                <option value="all">All Classes</option>
+                {classOptions.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            {filteredStudents.length === 0 ? (
+              <div className="p-3 text-xs text-[#9C8F6E] text-center">No students match.</div>
+            ) : (
+              filteredStudents.map(s => (
+                <button key={s.id} type="button" onClick={() => { setStudentId(s.id); setPickerOpen(false); setStudentSearch(""); }}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-[#F5F0E1] flex items-center justify-between"
+                  style={{ background: s.id === studentId ? "#F5F0E1" : "white" }}>
+                  <span>{s.name} <span className="text-xs text-[#9C8F6E]">— {s.class}</span></span>
+                  <span className="text-xs text-[#9C8F6E] font-mono">{s.phone || ""}</span>
+                </button>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+function AttendanceFormModal({ students, initial, onClose, onSave }) {
+  const [studentId, setStudentId] = useState(initial?.studentId || students[0]?.id || "");
+  const [date, setDate] = useState(initial?.date || todayStr());
+  const [status, setStatus] = useState(initial?.status || "Present");
+  const [remarks, setRemarks] = useState(initial?.remarks || "");
+
+  function submit() {
+    if (!studentId || !date) return;
+    onSave({ id: initial?.id, studentId, date, status, remarks: remarks.trim() });
+  }
+
+  return (
+    <Modal title={initial ? "Edit Attendance" : "Mark Attendance"} onClose={onClose}>
+      <StudentPickerField students={students} studentId={studentId} setStudentId={setStudentId} />
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+        <Field label="Status">
+          <select className={inputCls} style={inputStyle} value={status} onChange={e => setStatus(e.target.value)}>
+            <option value="Present">Present</option>
+            <option value="Absent">Absent</option>
+            <option value="Late">Late</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="e.g. Left early, informed in advance" /></Field>
+      <button onClick={submit} disabled={!studentId || !date} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        {initial ? "Save Changes" : "Mark Attendance"}
+      </button>
+    </Modal>
+  );
+}
+
+function TestScoreFormModal({ students, initial, onClose, onSave }) {
+  const [studentId, setStudentId] = useState(initial?.studentId || students[0]?.id || "");
+  const [testName, setTestName] = useState(initial?.testName || "");
+  const [subject, setSubject] = useState(initial?.subject || "");
+  const [date, setDate] = useState(initial?.date || todayStr());
+  const [marksObtained, setMarksObtained] = useState(initial?.marksObtained ?? "");
+  const [maxMarks, setMaxMarks] = useState(initial?.maxMarks ?? "");
+  const [remarks, setRemarks] = useState(initial?.remarks || "");
+
+  const canSubmit = studentId && testName.trim() && subject.trim() && date && marksObtained !== "" && maxMarks !== "";
+
+  function submit() {
+    if (!canSubmit) return;
+    onSave({
+      id: initial?.id, studentId, testName: testName.trim(), subject: subject.trim(), date,
+      marksObtained: Number(marksObtained), maxMarks: Number(maxMarks), remarks: remarks.trim(),
+    });
+  }
+
+  return (
+    <Modal title={initial ? "Edit Test Score" : "Add Test Score"} onClose={onClose}>
+      <StudentPickerField students={students} studentId={studentId} setStudentId={setStudentId} />
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Test / Exam Name"><input className={inputCls} style={inputStyle} value={testName} onChange={e => setTestName(e.target.value)} placeholder="e.g. Unit Test 1" /></Field>
+        <Field label="Subject"><input className={inputCls} style={inputStyle} value={subject} onChange={e => setSubject(e.target.value)} placeholder="e.g. Mathematics" /></Field>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+        <Field label="Marks Obtained"><input type="number" className={inputCls} style={inputStyle} value={marksObtained} onChange={e => setMarksObtained(e.target.value)} placeholder="0" /></Field>
+        <Field label="Max Marks"><input type="number" className={inputCls} style={inputStyle} value={maxMarks} onChange={e => setMaxMarks(e.target.value)} placeholder="100" /></Field>
+      </div>
+      <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="e.g. Needs more practice in algebra" /></Field>
+      <button onClick={submit} disabled={!canSubmit} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        {initial ? "Save Changes" : "Add Test Score"}
+      </button>
+    </Modal>
+  );
+}
+
+function BehaviourFormModal({ students, initial, onClose, onSave }) {
+  const [studentId, setStudentId] = useState(initial?.studentId || students[0]?.id || "");
+  const [date, setDate] = useState(initial?.date || todayStr());
+  const [tag, setTag] = useState(initial?.tag || "neutral");
+  const [note, setNote] = useState(initial?.note || "");
+
+  function submit() {
+    if (!studentId || !date || !note.trim()) return;
+    onSave({ id: initial?.id, studentId, date, tag, note: note.trim() });
+  }
+
+  return (
+    <Modal title={initial ? "Edit Behaviour Note" : "Add Behaviour Note"} onClose={onClose}>
+      <StudentPickerField students={students} studentId={studentId} setStudentId={setStudentId} />
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+        <Field label="Tag">
+          <select className={inputCls} style={inputStyle} value={tag} onChange={e => setTag(e.target.value)}>
+            <option value="positive">Positive</option>
+            <option value="neutral">Neutral</option>
+            <option value="needs-attention">Needs Attention</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="Note — discipline, participation, homework completion, etc.">
+        <textarea className={inputCls} style={{ ...inputStyle, minHeight: "80px" }} value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. Completed homework consistently this week" />
+      </Field>
+      <button onClick={submit} disabled={!studentId || !date || !note.trim()} className="w-full mt-3 py-2.5 rounded-sm text-sm font-medium disabled:opacity-40" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        {initial ? "Save Changes" : "Add Note"}
       </button>
     </Modal>
   );
