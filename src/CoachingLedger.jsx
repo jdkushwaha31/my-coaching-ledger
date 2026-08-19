@@ -285,6 +285,60 @@ import {
 //      creating a duplicate to trash.
 //      Nothing about any existing tab, collection, component, or handler
 //      changed.
+//
+// Changes made in this fourth update pass:
+//  24. Teacher Management → renamed to "Institute Management" in the
+//      sidebar label and the tab's own SectionHeader/eyebrow text only —
+//      the internal id stays "teacher-management" so nothing that already
+//      referenced it (routing, trashCount, etc.) broke. Subtitle reworded
+//      to mention Salary and Advance now living here too.
+//      NEW FEATURE — Salary (see SalaryTab / SalaryFormModal /
+//      SalarySlipModal): a new sub-tab, right after "Staff", for paying
+//      teachers and other staff. The picker merges visibleTeachers and
+//      visibleStaff into one list (see mergeStaffAndTeachers()) with a
+//      personType flag ("teacher"|"staff") carried through everywhere.
+//      Pay Salary writes a `salaryPayments` record (own generateSalaryId()
+//      sequence, "SAL<year>####", same mechanism as generateStaffId) and,
+//      when the net amount paid is > 0, a matching banking feed line
+//      (kind: "debit", bucket by mode) so it lands in the Banking
+//      Statement's running Cash/Bank balance exactly like an expense —
+//      see bankingSalaryLines, folded into bankingFeedAsc alongside
+//      bankingExpenseLines. A printable salary slip (ChargeReceiptModal's
+//      print-window pattern) is shown after saving and can be reopened
+//      from the Salary history table.
+//      NEW FEATURE — Advance (see AdvanceTab / AdvanceFormModal): another
+//      new sub-tab, right after "Salary", for recording an advance given
+//      to a teacher or staff member. Give Advance writes an `advances`
+//      record (own generateAdvanceId() sequence, "ADV<year>####|,
+//      outstandingAmount starts equal to amount, status "open") and its
+//      own banking debit line (bankingAdvanceLines), same treatment as an
+//      expense. The Salary form reads a person's open advances (oldest
+//      first) and lets the office deduct part or all of the outstanding
+//      total from a salary payment; the deducted amount is subtracted
+//      from that payment's net payable and walked across the person's
+//      open advance records (oldest first) reducing each one's
+//      outstandingAmount, flipping status to "settled" at zero — see the
+//      settlement loop inside saveSalaryPayment(). The salary slip lists
+//      which advance record(s) were deducted, with date/reference.
+//      Both new collections follow the exact same onSnapshot subscribe /
+//      visibleX = x.filter(r => !r.deleted) / trashedX / soft-delete
+//      pattern as teachers/staff, and are fully wired into the existing
+//      Trash tab (new "Deleted Salary Payments" / "Deleted Advances"
+//      sections, counted in trashCount) exactly like every other
+//      collection. ASSUMPTION: soft-deleting a salary payment does not
+//      reverse any advance settlement it made (no existing soft-delete in
+//      this file reverses side effects either, e.g. deleting a deposit
+//      doesn't undo the charges it paid off) — flagging this in case the
+//      office wants that behavior changed.
+//      NEW — Per-person Statement (see PersonStatementModal): a combined,
+//      chronological (compareChrono) history of every salary payment and
+//      every advance given/settled for one teacher or staff member, with
+//      running totals, modeled directly on StudentStatementModal. Opens
+//      from a row in Salary/Advance history or from a new small
+//      "Statement" action added next to the existing Edit/Remove actions
+//      on each row in the Teachers and Staff registers (see TeachersTab /
+//      StaffTab) — those two tables' existing columns and actions are
+//      otherwise untouched.
 // ============================================================================
 
 // Admin Access Password
@@ -439,6 +493,52 @@ function generateStaffId(allStaff) {
     }
   });
   return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+// Same mechanism again — Salary Slip IDs, own prefix/sequence.
+function generateSalaryId(allSalaryPayments) {
+  const year = new Date().getFullYear();
+  const prefix = `SAL${year}`;
+  let max = 0;
+  (allSalaryPayments || []).forEach(p => {
+    if (p && p.slipId && p.slipId.startsWith(prefix)) {
+      const n = parseInt(p.slipId.slice(prefix.length), 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  });
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+// Same mechanism again — Advance IDs, own prefix/sequence.
+function generateAdvanceId(allAdvances) {
+  const year = new Date().getFullYear();
+  const prefix = `ADV${year}`;
+  let max = 0;
+  (allAdvances || []).forEach(a => {
+    if (a && a.advanceId && a.advanceId.startsWith(prefix)) {
+      const n = parseInt(a.advanceId.slice(prefix.length), 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  });
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+// Merges Teachers and Staff — two separate Firestore collections today —
+// into one flat, selectable list for the Salary/Advance pickers, tagging
+// each entry with personType so it can be written back onto the
+// salaryPayments/advances record and used to look the person back up in
+// either collection later (see SalaryFormModal, AdvanceFormModal,
+// PersonStatementModal).
+function mergeStaffAndTeachers(teachers, staff) {
+  return [
+    ...(teachers || []).map(t => ({
+      personId: t.id, personType: "teacher", name: t.name, displayId: t.teacherId || "",
+      role: (t.expertiseSubjects || []).join(", ") || "Teacher",
+      salaryAmount: t.salaryAmount || 0, paymentMode: t.paymentMode || "Cash", phone: t.phone || "",
+    })),
+    ...(staff || []).map(s => ({
+      personId: s.id, personType: "staff", name: s.name, displayId: s.staffId || "",
+      role: s.title || "Staff",
+      salaryAmount: s.salaryAmount || 0, paymentMode: s.paymentMode || "Cash", phone: s.phone || "",
+    })),
+  ];
 }
 // Test ID pattern: {class}{subject}{YY}{seq} — YY is the year of the
 // selected TEST DATE (not system date, so backdating into a prior year
@@ -775,6 +875,10 @@ export default function CoachingLedger() {
   const [batchSchedule, setBatchSchedule] = useState([]);
   const [attendanceLog, setAttendanceLog] = useState([]);
   const [tests, setTests] = useState([]);
+  // Salary / Advance — two new Firestore collections, same live-sync +
+  // soft-delete pattern as teachers/staff above (see UPDATE NOTES #24).
+  const [salaryPayments, setSalaryPayments] = useState([]);
+  const [advances, setAdvances] = useState([]);
 
   const [showStudentForm, setShowStudentForm] = useState(false);
   const [showDepositForm, setShowDepositForm] = useState(false);
@@ -810,6 +914,12 @@ export default function CoachingLedger() {
   const [bankTxnReceiptData, setBankTxnReceiptData] = useState(null);
   const [creditReceiptData, setCreditReceiptData] = useState(null);
   const [interestReceiptData, setInterestReceiptData] = useState(null); // { payment, creditTxn }
+  // Salary / Advance modal state — same shape/naming convention as the
+  // other form + receipt state above (see UPDATE NOTES #24).
+  const [showSalaryForm, setShowSalaryForm] = useState(false);
+  const [salarySlipData, setSalarySlipData] = useState(null); // salaryPayments record to print/reprint
+  const [showAdvanceForm, setShowAdvanceForm] = useState(false);
+  const [showPersonStatement, setShowPersonStatement] = useState(null); // { personId, personType }
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -899,6 +1009,16 @@ export default function CoachingLedger() {
       const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
       setStaff(data);
     });
+    // Salary / Advance — same live-sync pattern as every collection above
+    // (see UPDATE NOTES #24).
+    const unsubSalaryPayments = onSnapshot(collection(db, "salaryPayments"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setSalaryPayments(data);
+    });
+    const unsubAdvances = onSnapshot(collection(db, "advances"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setAdvances(data);
+    });
     const unsubBatchSchedule = onSnapshot(collection(db, "batchSchedule"), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setBatchSchedule(data);
@@ -954,7 +1074,7 @@ export default function CoachingLedger() {
       unsubStudents(); unsubDeposits(); unsubCharges(); unsubExpenses(); unsubBankTxns();
       unsubCreditTxns(); unsubInterestPayments(); unsubNotes();
       unsubAttendance(); unsubTestScores(); unsubBehaviourNotes();
-      unsubTeachers(); unsubStaff(); unsubBatchSchedule(); unsubAttendanceLog(); unsubTests();
+      unsubTeachers(); unsubStaff(); unsubSalaryPayments(); unsubAdvances(); unsubBatchSchedule(); unsubAttendanceLog(); unsubTests();
       unsubFee(); unsubClasses(); unsubSubjects(); unsubStreams();
     };
   }, [isAuthenticated]);
@@ -1128,6 +1248,13 @@ export default function CoachingLedger() {
   const visibleStaff = staff.filter(s => !s.deleted);
   const trashedStaff = staff.filter(s => s.deleted);
   const teacherById = Object.fromEntries(teachers.map(t => [t.id, t]));
+  const staffById = Object.fromEntries(staff.map(s => [s.id, s]));
+  // Salary / Advance — same visible/trashed split as every other
+  // collection (see UPDATE NOTES #24).
+  const visibleSalaryPayments = salaryPayments.filter(p => !p.deleted);
+  const trashedSalaryPayments = salaryPayments.filter(p => p.deleted);
+  const visibleAdvances = advances.filter(a => !a.deleted);
+  const trashedAdvances = advances.filter(a => a.deleted);
 
   const totalWithdrawals = round2(visibleBankTxns.filter(t => t.type === "withdrawal").reduce((a, t) => a + Number(t.amount || 0), 0));
   const totalBankDeposits = round2(visibleBankTxns.filter(t => t.type === "deposit").reduce((a, t) => a + Number(t.amount || 0), 0));
@@ -1203,10 +1330,38 @@ export default function CoachingLedger() {
     };
   });
 
+  // Salary payments — money actually handed over right now (baseAmount
+  // minus whatever was already deducted as an advance settlement). If the
+  // full base salary was absorbed by an advance deduction, netPaid is 0
+  // and no cash/bank actually moved, so no banking line is created for
+  // that payment (see UPDATE NOTES #24).
+  const bankingSalaryLines = visibleSalaryPayments.filter(p => Number(p.netPaid) > 0).map(p => {
+    const isCash = (p.mode || "Cash") === "Cash";
+    return {
+      id: `${p.id}-salary`, refId: p.slipId, source: "salary", salaryPaymentId: p.id,
+      type: "salary_payment", kind: "debit", bucket: isCash ? "cash" : "bank",
+      date: p.date || todayStr(), createdAt: p.createdAt || "",
+      label: `Staff Salary — ${p.personName || "Unknown"} (${monthLabel(p.month)})`,
+      remarks: p.remarks || "", amount: round2(p.netPaid), mode: p.mode || "Cash",
+    };
+  });
+
+  // Advances given — always money OUT, the moment the advance is given.
+  const bankingAdvanceLines = visibleAdvances.map(a => {
+    const isCash = (a.mode || "Cash") === "Cash";
+    return {
+      id: `${a.id}-advance`, refId: a.advanceId, source: "advance", advanceId: a.id,
+      type: "advance_given", kind: "debit", bucket: isCash ? "cash" : "bank",
+      date: a.date || todayStr(), createdAt: a.createdAt || "",
+      label: `Staff Advance — ${a.personName || "Unknown"}`,
+      remarks: a.remarks || "", amount: round2(a.amount), mode: a.mode || "Cash",
+    };
+  });
+
   // Ascending pass (oldest first) to compute the running Cash / Bank balance
   // at each line — this is what makes "two balances with every transaction"
   // work correctly regardless of what order the statement is displayed in.
-  const bankingFeedAsc = [...bankingDepositLines, ...bankingExpenseLines, ...bankingTransferLines, ...bankingCreditLines, ...bankingInterestLines]
+  const bankingFeedAsc = [...bankingDepositLines, ...bankingExpenseLines, ...bankingTransferLines, ...bankingCreditLines, ...bankingInterestLines, ...bankingSalaryLines, ...bankingAdvanceLines]
     .sort((a, b) => compareChrono(a, b, 1) || (a.kind === "credit" ? -1 : 1));
 
   let runningCash = 0, runningBank = 0;
@@ -1446,6 +1601,89 @@ export default function CoachingLedger() {
   async function permanentlyDeleteStaffMember(id) {
     if (!window.confirm("Permanently delete this staff member? This cannot be undone.")) return;
     await deleteDoc(doc(db, "staff", id));
+  }
+
+  // ---- Salary ----
+  // Pays a teacher or staff member. If advanceDeducted > 0, walks that
+  // person's open advances oldest-first (compareChrono), reducing each
+  // one's outstandingAmount (flipping it to "settled" at zero) until the
+  // requested deduction is exhausted — see UPDATE NOTES #24. netPaid is
+  // what actually leaves Cash/Bank right now (baseAmount minus whatever
+  // was deducted), which is what bankingSalaryLines reads.
+  async function saveSalaryPayment(data) {
+    const id = uid();
+    const slipId = generateSalaryId(salaryPayments);
+    let remainingToDeduct = round2(Number(data.advanceDeducted) || 0);
+    const settledAdvances = [];
+    if (remainingToDeduct > 0) {
+      const openAdvances = advances
+        .filter(a => !a.deleted && a.personId === data.personId && (a.status || "open") === "open" && Number(a.outstandingAmount) > 0)
+        .sort((a, b) => compareChrono(a, b, 1));
+      for (const adv of openAdvances) {
+        if (remainingToDeduct <= 0) break;
+        const applied = Math.min(remainingToDeduct, Number(adv.outstandingAmount) || 0);
+        if (applied <= 0) continue;
+        const newOutstanding = round2((Number(adv.outstandingAmount) || 0) - applied);
+        await setDoc(doc(db, "advances", adv.id), {
+          ...adv, outstandingAmount: newOutstanding, status: newOutstanding <= 0 ? "settled" : "open",
+        });
+        settledAdvances.push({ advanceId: adv.id, advanceRefId: adv.advanceId, date: adv.date, amount: round2(applied) });
+        remainingToDeduct = round2(remainingToDeduct - applied);
+      }
+    }
+    // If the office asked to deduct more than is actually outstanding,
+    // only what was really available gets applied.
+    const actualDeducted = round2((Number(data.advanceDeducted) || 0) - remainingToDeduct);
+    const netPaid = round2((Number(data.baseAmount) || 0) - actualDeducted);
+    const record = {
+      ...data, id, slipId, advanceDeducted: actualDeducted, netPaid, settledAdvances,
+      deleted: false, createdAt: nowStamp(),
+    };
+    await setDoc(doc(db, "salaryPayments", id), record);
+    setShowSalaryForm(false);
+    setSalarySlipData(record);
+  }
+  async function softDeleteSalaryPayment(id) {
+    const p = salaryPayments.find(x => x.id === id);
+    if (!p) return;
+    if (!window.confirm("Move this salary payment to Trash? It can be restored later.")) return;
+    await setDoc(doc(db, "salaryPayments", id), { ...p, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreSalaryPayment(id) {
+    const p = salaryPayments.find(x => x.id === id);
+    if (!p) return;
+    await setDoc(doc(db, "salaryPayments", id), { ...p, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteSalaryPayment(id) {
+    if (!window.confirm("Permanently delete this salary payment? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "salaryPayments", id));
+  }
+
+  // ---- Advance ----
+  async function saveAdvance(data) {
+    const id = uid();
+    const advanceId = generateAdvanceId(advances);
+    const amount = round2(Number(data.amount) || 0);
+    await setDoc(doc(db, "advances", id), {
+      ...data, id, advanceId, amount, outstandingAmount: amount, status: "open",
+      deleted: false, createdAt: nowStamp(),
+    });
+    setShowAdvanceForm(false);
+  }
+  async function softDeleteAdvance(id) {
+    const a = advances.find(x => x.id === id);
+    if (!a) return;
+    if (!window.confirm("Move this advance to Trash? It can be restored later.")) return;
+    await setDoc(doc(db, "advances", id), { ...a, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreAdvance(id) {
+    const a = advances.find(x => x.id === id);
+    if (!a) return;
+    await setDoc(doc(db, "advances", id), { ...a, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteAdvance(id) {
+    if (!window.confirm("Permanently delete this advance? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "advances", id));
   }
 
   // ---- Batch Schedule ----
@@ -1791,11 +2029,14 @@ export default function CoachingLedger() {
     // STUDENT_MANAGEMENT_SUB_TABS) — same merge pattern already used for
     // Banking's four sub-tabs.
     { id: "students-management", label: "Student Management", icon: Users },
-    // Teacher Management — Teachers, Performance, Batch Schedule, and
-    // Staff, grouped under one sidebar entry with its own internal pill
-    // row, same pattern as Student Management (see TeacherManagementTab /
-    // TEACHER_MANAGEMENT_SUB_TABS). See UPDATE NOTES #23.
-    { id: "teacher-management", label: "Teacher Management", icon: UserCog },
+    // Teacher Management — Teachers, Performance, Batch Schedule, Staff,
+    // Salary, and Advance, grouped under one sidebar entry with its own
+    // internal pill row, same pattern as Student Management (see
+    // TeacherManagementTab / TEACHER_MANAGEMENT_SUB_TABS). See UPDATE
+    // NOTES #23. Renamed to "Institute Management" in UPDATE NOTES #24 —
+    // the id stays "teacher-management" on purpose so nothing that
+    // already references it breaks.
+    { id: "teacher-management", label: "Institute Management", icon: UserCog },
     // Academic Monitoring — Attendance, Test Scores, Behaviour & Conduct,
     // and the printable Performance Report, grouped under one sidebar
     // entry with its own internal pill row (see AcademicMonitoringTab /
@@ -1813,7 +2054,7 @@ export default function CoachingLedger() {
     { id: "trash", label: "Trash / Restore", icon: Archive },
   ];
 
-  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length + trashedAttendance.length + trashedTestScores.length + trashedBehaviourNotes.length + trashedTeachers.length + trashedStaff.length;
+  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length + trashedAttendance.length + trashedTestScores.length + trashedBehaviourNotes.length + trashedTeachers.length + trashedStaff.length + trashedSalaryPayments.length + trashedAdvances.length;
 
   return (
     <div className="min-h-screen flex" style={{ background: "#FAF6EC", fontFamily: "'Inter', sans-serif", color: "#26231D" }}>
@@ -1952,6 +2193,7 @@ export default function CoachingLedger() {
               onAdd: () => { setEditingTeacher(null); setShowTeacherForm(true); },
               onEdit: (t) => { setEditingTeacher(t); setShowTeacherForm(true); },
               onRemove: softDeleteTeacher,
+              onStatement: (t) => setShowPersonStatement({ personId: t.id, personType: "teacher" }),
             }}
             performanceTabProps={{
               teachers: visibleTeachers, batches: batchSchedule, attendanceRecords: attendanceLog, tests,
@@ -1967,6 +2209,20 @@ export default function CoachingLedger() {
               onAdd: () => { setEditingStaffMember(null); setShowStaffForm(true); },
               onEdit: (s) => { setEditingStaffMember(s); setShowStaffForm(true); },
               onRemove: softDeleteStaffMember,
+              onStatement: (s) => setShowPersonStatement({ personId: s.id, personType: "staff" }),
+            }}
+            salaryTabProps={{
+              salaryPayments: visibleSalaryPayments, persons: mergeStaffAndTeachers(visibleTeachers, visibleStaff),
+              onAdd: () => setShowSalaryForm(true),
+              onViewSlip: (p) => setSalarySlipData(p),
+              onRemove: softDeleteSalaryPayment,
+              onStatement: (personId, personType) => setShowPersonStatement({ personId, personType }),
+            }}
+            advanceTabProps={{
+              advances: visibleAdvances, persons: mergeStaffAndTeachers(visibleTeachers, visibleStaff),
+              onAdd: () => setShowAdvanceForm(true),
+              onRemove: softDeleteAdvance,
+              onStatement: (personId, personType) => setShowPersonStatement({ personId, personType }),
             }}
           />
         )}
@@ -2037,6 +2293,7 @@ export default function CoachingLedger() {
             trashedBankTxns={trashedBankTxns} trashedCreditTxns={trashedCreditTxns} trashedInterestPayments={trashedInterestPayments}
             trashedAttendance={trashedAttendance} trashedTestScores={trashedTestScores} trashedBehaviourNotes={trashedBehaviourNotes}
             trashedTeachers={trashedTeachers} trashedStaff={trashedStaff}
+            trashedSalaryPayments={trashedSalaryPayments} trashedAdvances={trashedAdvances}
             studentById={studentById}
             onRestoreStudent={restoreStudent} onDeleteStudent={permanentlyDeleteStudent}
             onRestoreDeposit={restoreDeposit} onDeleteDeposit={permanentlyDeleteDeposit}
@@ -2050,6 +2307,8 @@ export default function CoachingLedger() {
             onRestoreBehaviour={restoreBehaviourNote} onDeleteBehaviour={permanentlyDeleteBehaviourNote}
             onRestoreTeacher={restoreTeacher} onDeleteTeacher={permanentlyDeleteTeacher}
             onRestoreStaff={restoreStaffMember} onDeleteStaff={permanentlyDeleteStaffMember}
+            onRestoreSalaryPayment={restoreSalaryPayment} onDeleteSalaryPayment={permanentlyDeleteSalaryPayment}
+            onRestoreAdvance={restoreAdvance} onDeleteAdvance={permanentlyDeleteAdvance}
           />
         )}
       </main>
@@ -2119,6 +2378,27 @@ export default function CoachingLedger() {
       {showBatchScheduleForm && (
         <BatchScheduleFormModal classes={classes} subjectsList={subjectsList} teachers={visibleTeachers} initial={editingBatchSchedule}
           onClose={() => { setShowBatchScheduleForm(false); setEditingBatchSchedule(null); }} onSave={saveBatchScheduleEntry} />
+      )}
+      {showSalaryForm && (
+        <SalaryFormModal persons={mergeStaffAndTeachers(visibleTeachers, visibleStaff)} advances={visibleAdvances}
+          onClose={() => setShowSalaryForm(false)} onSave={saveSalaryPayment} />
+      )}
+      {salarySlipData && (
+        <SalarySlipModal payment={salarySlipData} onClose={() => setSalarySlipData(null)} />
+      )}
+      {showAdvanceForm && (
+        <AdvanceFormModal persons={mergeStaffAndTeachers(visibleTeachers, visibleStaff)}
+          onClose={() => setShowAdvanceForm(false)} onSave={saveAdvance} />
+      )}
+      {showPersonStatement && (
+        <PersonStatementModal
+          person={showPersonStatement.personType === "teacher" ? teacherById[showPersonStatement.personId] : staffById[showPersonStatement.personId]}
+          personType={showPersonStatement.personType}
+          salaryPayments={visibleSalaryPayments.filter(p => p.personId === showPersonStatement.personId)}
+          advances={visibleAdvances.filter(a => a.personId === showPersonStatement.personId)}
+          onClose={() => setShowPersonStatement(null)}
+          onViewSlip={(p) => setSalarySlipData(p)}
+        />
       )}
       {expenseReceiptData && (
         <ExpenseReceiptModal expense={expenseReceiptData} onClose={() => setExpenseReceiptData(null)} />
@@ -4821,7 +5101,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
   );
 }
 
-function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, trashedCreditTxns, trashedInterestPayments, trashedAttendance, trashedTestScores, trashedBehaviourNotes, trashedTeachers, trashedStaff, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn, onRestoreCredit, onDeleteCredit, onRestoreInterest, onDeleteInterest, onRestoreAttendance, onDeleteAttendance, onRestoreTestScore, onDeleteTestScore, onRestoreBehaviour, onDeleteBehaviour, onRestoreTeacher, onDeleteTeacher, onRestoreStaff, onDeleteStaff }) {
+function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, trashedCreditTxns, trashedInterestPayments, trashedAttendance, trashedTestScores, trashedBehaviourNotes, trashedTeachers, trashedStaff, trashedSalaryPayments, trashedAdvances, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn, onRestoreCredit, onDeleteCredit, onRestoreInterest, onDeleteInterest, onRestoreAttendance, onDeleteAttendance, onRestoreTestScore, onDeleteTestScore, onRestoreBehaviour, onDeleteBehaviour, onRestoreTeacher, onDeleteTeacher, onRestoreStaff, onDeleteStaff, onRestoreSalaryPayment, onDeleteSalaryPayment, onRestoreAdvance, onDeleteAdvance }) {
   return (
     <div>
       <SectionHeader eyebrow="Recycle Bin" title="Trash / Restore" />
@@ -5127,6 +5407,54 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
           </table>
         )}
       </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Salary Payments</span></div>
+      <Card className="mb-6">
+        {(!trashedSalaryPayments || trashedSalaryPayments.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted salary payments.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedSalaryPayments.map(p => (
+                <tr key={p.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(p.date)}</td>
+                  <td className="px-4 py-2.5 font-medium">{p.personName} <span className="text-[10px] text-[#9C8F6E] font-mono">{p.slipId}</span></td>
+                  <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#3F6B52]">{fmtINR(p.netPaid)}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {p.deletedAt ? fmtDate(p.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRestoreSalaryPayment(p.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                    <button onClick={() => onDeleteSalaryPayment(p.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Advances</span></div>
+      <Card>
+        {(!trashedAdvances || trashedAdvances.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted advances.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedAdvances.map(a => (
+                <tr key={a.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(a.date)}</td>
+                  <td className="px-4 py-2.5 font-medium">{a.personName} <span className="text-[10px] text-[#9C8F6E] font-mono">{a.advanceId}</span></td>
+                  <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#A63D2F]">{fmtINR(a.amount)}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {a.deletedAt ? fmtDate(a.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRestoreAdvance(a.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                    <button onClick={() => onDeleteAdvance(a.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
     </div>
   );
 }
@@ -5141,14 +5469,16 @@ const TEACHER_MANAGEMENT_SUB_TABS = [
   { id: "performance", label: "Performance", icon: FileBarChart2 },
   { id: "batch-schedule", label: "Batch Schedule", icon: CalendarCheck },
   { id: "staff", label: "Staff", icon: Users },
+  { id: "salary", label: "Salary", icon: Wallet },
+  { id: "advance", label: "Advance", icon: Banknote },
 ];
 
-function TeacherManagementTab({ teachersTabProps, performanceTabProps, batchScheduleTabProps, staffTabProps }) {
+function TeacherManagementTab({ teachersTabProps, performanceTabProps, batchScheduleTabProps, staffTabProps, salaryTabProps, advanceTabProps }) {
   const [subTab, setSubTab] = useState("teachers");
   return (
     <div>
-      <SectionHeader eyebrow="Staffing" title="Teacher Management" />
-      <div className="text-sm text-[#6E6650] mb-4">Teacher register, performance, batch allotment, and other staff — in one place.</div>
+      <SectionHeader eyebrow="Staffing" title="Institute Management" />
+      <div className="text-sm text-[#6E6650] mb-4">Teacher register, performance, batch allotment, other staff, and Salary & Advance payments — in one place.</div>
 
       <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
         {TEACHER_MANAGEMENT_SUB_TABS.map((st, i) => {
@@ -5168,11 +5498,13 @@ function TeacherManagementTab({ teachersTabProps, performanceTabProps, batchSche
       {subTab === "performance" && <TeacherPerformanceTab {...performanceTabProps} />}
       {subTab === "batch-schedule" && <BatchScheduleTab {...batchScheduleTabProps} />}
       {subTab === "staff" && <StaffTab {...staffTabProps} />}
+      {subTab === "salary" && <SalaryTab {...salaryTabProps} />}
+      {subTab === "advance" && <AdvanceTab {...advanceTabProps} />}
     </div>
   );
 }
 
-function TeachersTab({ teachers, subjectsList, batchSchedule, onAdd, onEdit, onRemove }) {
+function TeachersTab({ teachers, subjectsList, batchSchedule, onAdd, onEdit, onRemove, onStatement }) {
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState({});
 
@@ -5232,6 +5564,7 @@ function TeachersTab({ teachers, subjectsList, batchSchedule, onAdd, onEdit, onR
                       <td className="px-4 py-2.5 text-xs text-[#6E6650]">{(t.expertiseSubjects || []).join(", ") || "—"}</td>
                       <td className="px-4 py-2.5 text-xs"><Stamp text={(t.status || "active") === "active" ? "Active" : "Inactive"} tone={(t.status || "active") === "active" ? "paid" : "overdue"} /></td>
                       <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                        {onStatement && <button onClick={() => onStatement(t)} className="text-xs text-[#8A6420] underline mr-3">Statement</button>}
                         <button onClick={() => onEdit(t)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
                         <button onClick={() => onRemove(t.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
                       </td>
@@ -5608,7 +5941,7 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
   );
 }
 
-function StaffTab({ staff, onAdd, onEdit, onRemove }) {
+function StaffTab({ staff, onAdd, onEdit, onRemove, onStatement }) {
   return (
     <div>
       <SectionHeader eyebrow="Register" title="Other Staff" action={
@@ -5636,6 +5969,7 @@ function StaffTab({ staff, onAdd, onEdit, onRemove }) {
                   <td className="px-4 py-2.5 text-xs font-mono">{fmtINR(s.salaryAmount || 0)}</td>
                   <td className="px-4 py-2.5 text-xs"><Stamp text={(s.status || "active") === "active" ? "Active" : "Inactive"} tone={(s.status || "active") === "active" ? "paid" : "overdue"} /></td>
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    {onStatement && <button onClick={() => onStatement(s)} className="text-xs text-[#8A6420] underline mr-3">Statement</button>}
                     <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
                     <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
                   </td>
@@ -5721,6 +6055,485 @@ function StaffFormModal({ initial, staff, onClose, onSave }) {
         {initial ? "Save Changes" : "Register Staff"}
       </button>
     </Modal>
+  );
+}
+
+// ============================================================================
+// SALARY / ADVANCE — two new sub-tabs inside Institute Management (see
+// TEACHER_MANAGEMENT_SUB_TABS), right after "Staff". Both read from a
+// merged Teachers+Staff picker (mergeStaffAndTeachers) and follow the same
+// onSnapshot / visibleX / trashedX / soft-delete pattern as every other
+// collection in this file. See UPDATE NOTES #24.
+// ============================================================================
+
+// Shared merged-person picker — same search-dropdown pattern already used
+// for the student picker in DepositFormModal / AddChargeModal, just over
+// the merged Teachers+Staff list instead of Students. `value` is a
+// composite "personType:personId" key so a teacher and a staff member can
+// never collide even if their Firestore doc ids ever did.
+function PersonPicker({ persons, value, onChange, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const selected = persons.find(p => `${p.personType}:${p.personId}` === value);
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return persons;
+    return persons.filter(p => [p.name, p.displayId, p.role, p.phone].filter(Boolean).join(" ").toLowerCase().includes(q));
+  }, [persons, search]);
+
+  return (
+    <div className="relative">
+      <div className="flex items-center border rounded-sm bg-white px-3 py-2 cursor-pointer" style={inputStyle} onClick={() => setOpen(o => !o)}>
+        <Search size={13} className="text-[#9C8F6E] mr-2 shrink-0" />
+        <span className="text-sm flex-1 truncate">
+          {selected ? `${selected.name} — ${selected.personType === "teacher" ? "Teacher" : "Staff"}${selected.role ? " · " + selected.role : ""}` : (placeholder || "Search by name, ID, or role…")}
+        </span>
+      </div>
+      {open && (
+        <div className="absolute z-10 mt-1 w-full bg-white border rounded-sm shadow-lg max-h-64 overflow-y-auto" style={{ borderColor: "#D8CFB8" }}>
+          <div className="p-2 sticky top-0 bg-white border-b" style={{ borderColor: "#EEE7D2" }}>
+            <input autoFocus className={inputCls} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Type name, ID, or role…" />
+          </div>
+          {filtered.length === 0 ? (
+            <div className="p-3 text-xs text-[#9C8F6E] text-center">No teacher or staff member matches.</div>
+          ) : (
+            filtered.map(p => {
+              const key = `${p.personType}:${p.personId}`;
+              return (
+                <button key={key} type="button" onClick={() => { onChange(key); setOpen(false); setSearch(""); }}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-[#F5F0E1] flex items-center justify-between"
+                  style={{ background: key === value ? "#F5F0E1" : "white" }}>
+                  <span>{p.name} <span className="text-xs text-[#9C8F6E]">— {p.personType === "teacher" ? "Teacher" : "Staff"}{p.role ? " · " + p.role : ""}</span></span>
+                  <span className="text-xs text-[#9C8F6E] font-mono">{p.displayId || ""}</span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SalaryTab({ salaryPayments, persons, onAdd, onViewSlip, onRemove, onStatement }) {
+  const [monthFilter, setMonthFilter] = useState("");
+  const [search, setSearch] = useState("");
+
+  const sorted = useMemo(() => [...salaryPayments].sort((a, b) => compareChrono(a, b, -1)), [salaryPayments]);
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return sorted.filter(p => {
+      if (monthFilter && p.month !== monthFilter) return false;
+      if (!q) return true;
+      return [p.personName, p.personRole, p.slipId].filter(Boolean).join(" ").toLowerCase().includes(q);
+    });
+  }, [sorted, monthFilter, search]);
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Payroll" title="Salary" action={
+        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Pay Salary
+        </button>
+      } />
+      <Card className="p-3.5 mb-4">
+        <div className="grid grid-cols-2 gap-3">
+          <div className="relative">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" style={{ marginTop: "9px" }} />
+            <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, role, or slip ID…" />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Month</div>
+            <input type="month" className={inputCls} style={inputStyle} value={monthFilter} onChange={e => setMonthFilter(e.target.value)} />
+          </div>
+        </div>
+      </Card>
+      <Card>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{salaryPayments.length === 0 ? "No salary payments recorded yet." : "No salary payments match this filter."}</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Date", "Person", "Month", "Base", "Advance Deducted", "Net Paid", "Mode", "Slip", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(p => (
+                <tr key={p.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(p.date)}</td>
+                  <td className="px-4 py-2.5 font-medium">
+                    {onStatement ? (
+                      <button onClick={() => onStatement(p.personId, p.personType)} className="underline hover:text-[#3F6B52]">{p.personName}</button>
+                    ) : p.personName}
+                    <div className="text-[10px] text-[#9C8F6E]">{p.personRole}{p.personType === "teacher" ? " · Teacher" : " · Staff"}</div>
+                  </td>
+                  <td className="px-4 py-2.5 text-xs font-mono">{monthLabel(p.month)}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono">{fmtINR(p.baseAmount)}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono text-[#B8862B]">{p.advanceDeducted > 0 ? fmtINR(p.advanceDeducted) : "—"}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#3F6B52]">{fmtINR(p.netPaid)}</td>
+                  <td className="px-4 py-2.5 text-xs">{p.mode || "Cash"}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono">{p.slipId}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onViewSlip(p)} className="text-xs text-[#12312B] underline mr-3">Slip</button>
+                    <button onClick={() => onRemove(p.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function SalaryFormModal({ persons, advances, onClose, onSave }) {
+  const [personKey, setPersonKey] = useState(persons[0] ? `${persons[0].personType}:${persons[0].personId}` : "");
+  const selected = persons.find(p => `${p.personType}:${p.personId}` === personKey);
+  const [month, setMonth] = useState(currentMonthKey());
+  const [baseAmount, setBaseAmount] = useState(selected?.salaryAmount || "");
+  const [mode, setMode] = useState(selected?.paymentMode || "Cash");
+  const [date, setDate] = useState(todayStr());
+  const [remarks, setRemarks] = useState("");
+  const [advanceDeductInput, setAdvanceDeductInput] = useState("");
+
+  // When the selected person changes, default the amount/mode fields from
+  // their record — same "default-fill from salaryAmount" pattern already
+  // used in TeacherFormModal / StaffFormModal — and reset the advance
+  // deduction so it's never carried over onto a different person.
+  useEffect(() => {
+    setBaseAmount(selected?.salaryAmount || "");
+    setMode(selected?.paymentMode || "Cash");
+    setAdvanceDeductInput("");
+  }, [personKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const outstandingAdvance = useMemo(() => {
+    if (!selected) return 0;
+    return round2((advances || [])
+      .filter(a => a.personId === selected.personId && a.personType === selected.personType && (a.status || "open") === "open")
+      .reduce((sum, a) => sum + (Number(a.outstandingAmount) || 0), 0));
+  }, [advances, selected]);
+
+  const deduct = Math.min(Number(advanceDeductInput) || 0, outstandingAdvance);
+  const netPayable = round2((Number(baseAmount) || 0) - deduct);
+
+  function submit() {
+    if (!selected || !month || !(Number(baseAmount) > 0)) return;
+    onSave({
+      personId: selected.personId, personType: selected.personType, personName: selected.name, personRole: selected.role,
+      month, baseAmount: Number(baseAmount) || 0, advanceDeducted: deduct, mode, date, remarks: remarks.trim(),
+    });
+  }
+
+  return (
+    <Modal title="Pay Salary" onClose={onClose}>
+      <Field label="Select Teacher / Staff Member">
+        <PersonPicker persons={persons} value={personKey} onChange={setPersonKey} />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="For Month"><input type="month" className={inputCls} style={inputStyle} value={month} onChange={e => setMonth(e.target.value)} /></Field>
+        <Field label="Date Paid"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+      </div>
+      <Field label="Base Salary Amount (₹)"><input type="number" className={inputCls} style={inputStyle} value={baseAmount} onChange={e => setBaseAmount(e.target.value)} placeholder="0" /></Field>
+
+      {outstandingAdvance > 0 && (
+        <div className="p-3 border rounded-sm mb-3 bg-white" style={{ borderColor: "#B8862B" }}>
+          <div className="text-xs font-semibold text-[#8A6420] mb-1.5">Outstanding Advance: {fmtINR(outstandingAdvance)}</div>
+          <Field label="Deduct From This Salary (₹, optional)">
+            <input type="number" className={inputCls} style={inputStyle} value={advanceDeductInput}
+              onChange={e => setAdvanceDeductInput(e.target.value)} placeholder="0" max={outstandingAdvance} />
+          </Field>
+          <button type="button" onClick={() => setAdvanceDeductInput(String(outstandingAdvance))} className="text-[10px] text-[#8A6420] underline">
+            Deduct full outstanding amount
+          </button>
+        </div>
+      )}
+
+      <Field label="Payment Mode">
+        <div className="flex gap-2 flex-wrap">
+          {PAYMENT_MODES.map(m => (
+            <button key={m} type="button" onClick={() => setMode(m)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+              style={{ background: mode === m ? "#12312B" : "white", color: mode === m ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any note for this payment" /></Field>
+
+      <div className="text-xs text-[#6E6650] mb-3 flex justify-between">
+        <span>Net Payable Now:</span>
+        <strong className={netPayable >= 0 ? "text-[#3F6B52]" : "text-[#A63D2F]"}>{fmtINR(netPayable)}</strong>
+      </div>
+
+      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Pay Salary & Generate Slip
+      </button>
+    </Modal>
+  );
+}
+
+function SalarySlipModal({ payment, onClose }) {
+  const slipRef = useRef();
+  if (!payment) return null;
+
+  const handlePrint = () => {
+    const printContent = slipRef.current.innerHTML;
+    const win = window.open("", "", "width=600,height=750");
+    win.document.write(`
+      <html>
+        <head>
+          <title>Salary Slip - ${payment.slipId || ""}</title>
+          <style>
+            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
+            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 420px; margin: auto; }
+            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
+            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
+            .bold { font-weight: bold; }
+            .sign-row { display: flex; justify-content: space-between; margin-top: 40px; }
+            .sign-line { border-top: 1px solid #12312B; width: 45%; text-align: center; padding-top: 4px; font-size: 11px; }
+            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+          </style>
+        </head>
+        <body><div class="receipt-box">${printContent}</div></body>
+      </html>
+    `);
+    win.document.close(); win.focus(); win.print(); win.close();
+  };
+
+  return (
+    <Modal title="Salary Slip" onClose={onClose}>
+      <div className="p-4 border bg-white rounded-sm mb-4" ref={slipRef} style={{ borderColor: "#12312B" }}>
+        <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
+          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
+          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Salary Slip</p>
+        </div>
+        <div className="space-y-2 text-xs">
+          <div className="flex justify-between text-[#6E6650]">
+            <span>Slip ID: <strong className="text-[#12312B]">{payment.slipId}</strong></span>
+            <span>Date: <strong className="text-[#12312B]">{fmtDate(payment.date)}</strong></span>
+          </div>
+          <div className="flex justify-between text-[#6E6650]"><span>Employee Name:</span><strong className="text-[#12312B]">{payment.personName}</strong></div>
+          <div className="flex justify-between text-[#6E6650]"><span>Role / Designation:</span><strong className="text-[#12312B]">{payment.personRole}{payment.personType === "teacher" ? " (Teacher)" : " (Staff)"}</strong></div>
+          <div className="flex justify-between text-[#6E6650]"><span>For Month:</span><strong className="text-[#12312B]">{monthLabel(payment.month)}</strong></div>
+          {payment.remarks && <div className="flex justify-between text-[#6E6650]"><span>Remarks:</span><strong className="text-[#12312B]">{payment.remarks}</strong></div>}
+
+          <div className="pt-3 mt-3 border-t-2 border-[#12312B] space-y-1">
+            <div className="flex justify-between"><span>Base Salary:</span><strong>{fmtINR(payment.baseAmount)}</strong></div>
+            {payment.advanceDeducted > 0 && (
+              <div className="flex justify-between text-[#B8862B]">
+                <span>
+                  Advance Deducted{(payment.settledAdvances || []).length > 0 ? ` (${payment.settledAdvances.map(s => s.advanceRefId).filter(Boolean).join(", ")})` : ""}:
+                </span>
+                <strong>− {fmtINR(payment.advanceDeducted)}</strong>
+              </div>
+            )}
+            <div className="flex justify-between items-center text-sm pt-1 mt-1 border-t" style={{ borderColor: "#D8CFB8" }}>
+              <span className="font-bold">Net Amount Paid:</span>
+              <span className="font-bold text-[#3F6B52] text-lg" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{fmtINR(payment.netPaid)}</span>
+            </div>
+            <div className="flex justify-between text-[#6E6650]"><span>Payment Mode:</span><strong className="text-[#12312B]">{payment.mode || "Cash"}</strong></div>
+          </div>
+        </div>
+        <div className="sign-row" style={{ display: "flex", justifyContent: "space-between", marginTop: "32px" }}>
+          <div className="sign-line" style={{ borderTop: "1px solid #12312B", width: "45%", textAlign: "center", paddingTop: "4px", fontSize: "11px" }}>Employee Signature</div>
+          <div className="sign-line" style={{ borderTop: "1px solid #12312B", width: "45%", textAlign: "center", paddingTop: "4px", fontSize: "11px" }}>Authorized Signatory</div>
+        </div>
+        <div className="text-center pt-3 mt-3 border-t border-dashed border-[#12312B] text-[10px] text-[#9C8F6E]">
+          Computer Generated Salary Slip
+        </div>
+      </div>
+      <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Salary Slip</button>
+    </Modal>
+  );
+}
+
+function AdvanceTab({ advances, persons, onAdd, onRemove, onStatement }) {
+  const sorted = useMemo(() => [...advances].sort((a, b) => compareChrono(a, b, -1)), [advances]);
+  return (
+    <div>
+      <SectionHeader eyebrow="Payroll" title="Advance" action={
+        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Give Advance
+        </button>
+      } />
+      <Card>
+        {sorted.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No advances recorded yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Date", "Person", "Amount Given", "Settled", "Outstanding", "Mode", "Status", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map(a => {
+                const settled = round2((Number(a.amount) || 0) - (Number(a.outstandingAmount) || 0));
+                const isSettled = (a.status || "open") === "settled";
+                return (
+                  <tr key={a.id} className="ledger-row">
+                    <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(a.date)}</td>
+                    <td className="px-4 py-2.5 font-medium">
+                      {onStatement ? (
+                        <button onClick={() => onStatement(a.personId, a.personType)} className="underline hover:text-[#3F6B52]">{a.personName}</button>
+                      ) : a.personName}
+                      <div className="text-[10px] text-[#9C8F6E]">{a.personRole}{a.personType === "teacher" ? " · Teacher" : " · Staff"} · {a.advanceId}</div>
+                    </td>
+                    <td className="px-4 py-2.5 text-xs font-mono">{fmtINR(a.amount)}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono text-[#3F6B52]">{fmtINR(settled)}</td>
+                    <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#A63D2F]">{fmtINR(a.outstandingAmount)}</td>
+                    <td className="px-4 py-2.5 text-xs">{a.mode || "Cash"}</td>
+                    <td className="px-4 py-2.5 text-xs"><Stamp text={isSettled ? "Settled" : "Open"} tone={isSettled ? "paid" : "overdue"} /></td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <button onClick={() => onRemove(a.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function AdvanceFormModal({ persons, onClose, onSave }) {
+  const [personKey, setPersonKey] = useState(persons[0] ? `${persons[0].personType}:${persons[0].personId}` : "");
+  const selected = persons.find(p => `${p.personType}:${p.personId}` === personKey);
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [mode, setMode] = useState("Cash");
+  const [remarks, setRemarks] = useState("");
+
+  function submit() {
+    if (!selected || !(Number(amount) > 0)) return;
+    onSave({
+      personId: selected.personId, personType: selected.personType, personName: selected.name, personRole: selected.role,
+      amount: Number(amount) || 0, date, mode, remarks: remarks.trim(),
+    });
+  }
+
+  return (
+    <Modal title="Give Advance" onClose={onClose}>
+      <Field label="Select Teacher / Staff Member">
+        <PersonPicker persons={persons} value={personKey} onChange={setPersonKey} />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Amount (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" /></Field>
+        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+      </div>
+      <Field label="Payment Mode">
+        <div className="flex gap-2 flex-wrap">
+          {PAYMENT_MODES.map(m => (
+            <button key={m} type="button" onClick={() => setMode(m)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+              style={{ background: mode === m ? "#12312B" : "white", color: mode === m ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </Field>
+      <Field label="Reason / Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="e.g. Personal emergency" /></Field>
+      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Give Advance
+      </button>
+    </Modal>
+  );
+}
+
+// Per-person Statement — combined chronological (compareChrono) history of
+// every salary payment and every advance given/settled for one teacher or
+// staff member, with a running Advance Outstanding total. Modeled directly
+// on StudentStatementModal. Reachable from Salary/Advance history rows and
+// from the "Statement" action on the Teachers/Staff registers.
+function PersonStatementModal({ person, personType, salaryPayments, advances, onClose, onViewSlip }) {
+  if (!person) return null;
+
+  const timeline = useMemo(() => {
+    const salaryLines = (salaryPayments || []).map(p => ({
+      kind: "salary", date: p.date, createdAt: p.createdAt,
+      label: `Salary Paid — ${monthLabel(p.month)}`, amount: p.netPaid, ref: p.slipId, raw: p,
+    }));
+    const advanceGivenLines = (advances || []).map(a => ({
+      kind: "advance_given", date: a.date, createdAt: a.createdAt,
+      label: "Advance Given", amount: a.amount, ref: a.advanceId, raw: a,
+    }));
+    // One settlement line per salary payment that deducted against an
+    // advance, so the running outstanding total moves down at the same
+    // point in time the deduction actually happened.
+    const settlementLines = (salaryPayments || []).flatMap(p =>
+      (p.settledAdvances || []).map(s => ({
+        kind: "advance_settled", date: p.date, createdAt: p.createdAt,
+        label: `Advance Settled (${s.advanceRefId || ""}) via Salary ${p.slipId}`, amount: s.amount, ref: p.slipId, raw: p,
+      }))
+    );
+    const merged = [...salaryLines, ...advanceGivenLines, ...settlementLines].sort((a, b) => compareChrono(a, b, 1));
+    let runningOutstanding = 0;
+    return merged.map(l => {
+      if (l.kind === "advance_given") runningOutstanding = round2(runningOutstanding + l.amount);
+      if (l.kind === "advance_settled") runningOutstanding = round2(runningOutstanding - l.amount);
+      return { ...l, runningOutstanding };
+    }).sort((a, b) => compareChrono(a, b, -1));
+  }, [salaryPayments, advances]);
+
+  const totalSalaryPaid = round2((salaryPayments || []).reduce((sum, p) => sum + (Number(p.netPaid) || 0), 0));
+  const totalAdvanceGiven = round2((advances || []).reduce((sum, a) => sum + (Number(a.amount) || 0), 0));
+  const totalAdvanceOutstanding = round2((advances || []).filter(a => (a.status || "open") === "open").reduce((sum, a) => sum + (Number(a.outstandingAmount) || 0), 0));
+
+  return (
+    <WideModal title={`Statement — ${person.name}${personType === "teacher" ? " (Teacher)" : " (Staff)"}`} onClose={onClose}>
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="p-2.5 rounded bg-[#EAF1EA] border" style={{ borderColor: "#3F6B52" }}>
+          <div className="text-[10px] uppercase text-[#3F6B52] font-mono">Total Salary Paid</div>
+          <div className="text-lg font-bold text-[#3F6B52]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(totalSalaryPaid)}</div>
+        </div>
+        <div className="p-2.5 rounded bg-[#FAF6EC] border" style={{ borderColor: "#D8CFB8" }}>
+          <div className="text-[10px] uppercase text-[#9C8F6E] font-mono">Total Advance Given</div>
+          <div className="text-lg font-bold" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(totalAdvanceGiven)}</div>
+        </div>
+        <div className="p-2.5 rounded bg-[#F7E7E3] border" style={{ borderColor: "#A63D2F" }}>
+          <div className="text-[10px] uppercase text-[#A63D2F] font-mono">Advance Outstanding</div>
+          <div className="text-lg font-bold text-[#A63D2F]" style={{ fontFamily: "'Zilla Slab', serif" }}>{fmtINR(totalAdvanceOutstanding)}</div>
+        </div>
+      </div>
+
+      {timeline.length === 0 ? (
+        <div className="p-8 text-center text-sm text-[#9C8F6E]">No salary payments or advances recorded yet for this person.</div>
+      ) : (
+        <table className="w-full text-xs">
+          <thead>
+            <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+              {["Date", "Reference", "Description", "Amount", "Advance Outstanding"].map(h => (
+                <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-3 py-2 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {timeline.map((l, i) => (
+              <tr key={i} className="ledger-row">
+                <td className="px-3 py-2 font-mono whitespace-nowrap">{fmtDate(l.date)}</td>
+                <td className="px-3 py-2 font-mono">
+                  {l.kind === "salary" && onViewSlip ? (
+                    <button onClick={() => onViewSlip(l.raw)} className="underline text-[#12312B] hover:text-[#3F6B52]">{l.ref}</button>
+                  ) : (l.ref || "—")}
+                </td>
+                <td className="px-3 py-2">{l.label}</td>
+                <td className={"px-3 py-2 font-mono " + (l.kind === "advance_given" ? "text-[#A63D2F]" : "text-[#3F6B52]")}>{fmtINR(l.amount)}</td>
+                <td className="px-3 py-2 font-mono font-semibold">{fmtINR(l.runningOutstanding)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </WideModal>
   );
 }
 
