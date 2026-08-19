@@ -10,7 +10,8 @@ import {
   LayoutGrid, Users, Wallet, Receipt, AlertCircle, Plus, Trash2, X, Check, Lock, LogOut, 
   BookOpen, Send, Printer, Award, ArrowUpRight, History, Tag, Undo2, Archive, RotateCcw, 
   ClipboardList, Percent, FileText, Search, Banknote, Landmark, CreditCard,
-  GraduationCap, CalendarCheck, ClipboardCheck, MessageSquare, FileBarChart2
+  GraduationCap, CalendarCheck, ClipboardCheck, MessageSquare, FileBarChart2,
+  UserCog, Clock, BadgeCheck
 } from "lucide-react";
 
 // ============================================================================
@@ -223,6 +224,67 @@ import {
 //      and the saveAttendance / saveTestScore / saveBehaviourNote +
 //      soft/restore/permanent-delete functions below). Nothing about any
 //      existing tab, collection, or handler changed.
+//
+// Changes made in this seventh update pass:
+//  23. NEW FEATURE — Teacher Management, Batch Schedule, Staff, Teacher
+//      Performance, Attendance (batch-wise), and Test Marks. Five new
+//      Firestore collections, synced live via onSnapshot exactly like
+//      every other collection in this file: "teachers", "staff",
+//      "batchSchedule", "attendanceLog", "tests".
+//      NOTE on naming: the brief asked for a Firestore collection named
+//      "attendance" for the new batch-wise marking feature, but this file
+//      already has a per-student "attendance" collection powering the
+//      existing Academic Monitoring → Attendance sub-tab (see change #22
+//      above). That collection is untouched — this pass uses a
+//      differently-named collection, "attendanceLog", for the new
+//      roster/date/subject-based marking feature so the two never collide
+//      or get mixed up. Flagging this rename since it wasn't explicitly
+//      asked for.
+//    - Teacher Management (new sidebar tab, right after Student
+//      Management): sub-tabs Teachers (register/list/expand-row, mirrors
+//      StudentsTab + StudentFormModal — see TeachersTab /
+//      TeacherFormModal), Performance (see computeTeacherPerformance /
+//      TeacherPerformanceTab), Batch Schedule (see BatchScheduleTab /
+//      BatchScheduleFormModal), and Staff (reuses the Teacher form shell
+//      minus expertise/batch fields, plus a free-text Title — see
+//      StaffTab / StaffFormModal). Batch Schedule and Staff were placed
+//      here as sub-tabs rather than their own sidebar entries, to keep
+//      the sidebar from getting crowded — flagged as a judgment call per
+//      the brief, easy to promote to top-level nav later if preferred.
+//    - Attendance (new sidebar tab): sub-tabs "Mark Attendance" (date +
+//      class + subject, autofill from Batch Schedule only when the date
+//      is today and exactly one schedule window matches the current
+//      time, defaults everyone to Absent, idempotent upsert keyed by
+//      date+class+subject — see MarkAttendanceTab) and "Test Marks"
+//      (auto-generated Test ID {class}{subject}{YY}{seq}, roster pulled
+//      from the matching Batch Schedule record — see TestMarksTab). Test
+//      Marks was placed under Attendance rather than its own sidebar
+//      entry, same sidebar-crowding judgment call as above.
+//    - Teacher Performance is intentionally NOT hardcoded to one
+//      weighting formula — see computeTeacherPerformance(), an isolated,
+//      clearly-commented function with the attendance/test-score weights
+//      called out as the one thing to confirm/tune. The Performance
+//      sub-tab shows the computed summary AND the batch-level numbers it
+//      was built from, so it's auditable rather than a black box.
+//    - "Student active in a batch as of date X" (Test Marks roster) reuses
+//      the same batchHistory-by-month logic batchesForMonth() already
+//      uses for fee calculation (matched on the selected test date's
+//      month) — see studentsActiveInBatch(). Flagged: this checks the
+//      student's CURRENT class against the batch's class, since class
+//      itself isn't tracked with per-date history the way subjects/
+//      batches are (only the latest class change is snapshotted via
+//      Promote). Worth confirming if that's precise enough.
+//    - Trash/Restore: Teachers and Staff are fully wired into the
+//      existing Trash tab (soft delete / restore / permanent delete),
+//      same as students. Batch Schedule entries use a simple confirm +
+//      permanent delete (no trash bin) since they're setup/config
+//      records, not financial or attendance history. Attendance and Test
+//      Marks records save as one upserted document per key (date+class+
+//      subject, or the generated Test ID) exactly as specified, so
+//      re-opening the same combination edits in place rather than
+//      creating a duplicate to trash.
+//      Nothing about any existing tab, collection, component, or handler
+//      changed.
 // ============================================================================
 
 // Admin Access Password
@@ -351,6 +413,132 @@ function generateStudentId(allStudents) {
   });
   return `${prefix}${String(max + 1).padStart(4, "0")}`;
 }
+// Same mechanism as generateStudentId, own prefix/sequence — Teacher IDs
+// never share a counter with Student IDs.
+function generateTeacherId(allTeachers) {
+  const year = new Date().getFullYear();
+  const prefix = `TCH${year}`;
+  let max = 0;
+  (allTeachers || []).forEach(t => {
+    if (t && t.teacherId && t.teacherId.startsWith(prefix)) {
+      const n = parseInt(t.teacherId.slice(prefix.length), 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  });
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+// Same mechanism again, own prefix/sequence for Other Staff.
+function generateStaffId(allStaff) {
+  const year = new Date().getFullYear();
+  const prefix = `STF${year}`;
+  let max = 0;
+  (allStaff || []).forEach(s => {
+    if (s && s.staffId && s.staffId.startsWith(prefix)) {
+      const n = parseInt(s.staffId.slice(prefix.length), 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  });
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+// Test ID pattern: {class}{subject}{YY}{seq} — YY is the year of the
+// selected TEST DATE (not system date, so backdating into a prior year
+// produces that year's sequence correctly), seq is 2-digit, scoped to
+// class+subject+year, computed the same way generateStudentId scans for
+// the current max and adds one. Recomputed reactively while the Test
+// Marks form is open (see TestMarksTab), same "computed live, finalized
+// on save" behavior as displayStudentId in StudentFormModal.
+function generateTestId(allTests, cls, subject, dateStr, excludeTestId) {
+  const yy = (dateStr || todayStr()).slice(2, 4);
+  const prefix = `${cls || ""}${subject || ""}${yy}`;
+  let max = 0;
+  (allTests || []).forEach(t => {
+    if (!t || !t.testId || t.testId === excludeTestId) return;
+    if (t.testId.startsWith(prefix)) {
+      const seq = parseInt(t.testId.slice(prefix.length), 10);
+      if (!isNaN(seq) && seq > max) max = seq;
+    }
+  });
+  return `${prefix}${String(max + 1).padStart(2, "0")}`;
+}
+// Batch Schedule autofill (Attendance → Mark Attendance): only ever
+// called for today's date. Compares the current real time against every
+// batchSchedule record's startTime–endTime window for today's day-of-
+// week; returns the single matching record, or null if zero or more than
+// one match (ambiguous — leave Class/Subject for manual selection).
+function findAutofillBatch(batchSchedule) {
+  const now = new Date();
+  const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const today = dayNames[now.getDay()];
+  const nowMins = now.getHours() * 60 + now.getMinutes();
+  const toMins = (t) => { if (!t) return null; const [h, m] = t.split(":").map(Number); return h * 60 + (m || 0); };
+  const matches = (batchSchedule || []).filter(b => {
+    if (!b.daysOfWeek || !b.daysOfWeek.includes(today)) return false;
+    const start = toMins(b.startTime), end = toMins(b.endTime);
+    if (start == null || end == null) return false;
+    return nowMins >= start && nowMins <= end;
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+// Test Marks / Attendance roster resolution — "students active in this
+// batch as of date X". Reuses the exact same batchHistory-by-month logic
+// batchesForMonth() already uses for fee calculation (see closest
+// precedent near expectedFeeFor), matched against the selected date's
+// month. See UPDATE NOTES #23 for the flagged caveat: class itself is
+// checked against the student's CURRENT class, since (unlike
+// subjects/batches) class isn't tracked with its own per-date history.
+function studentsActiveInBatch(students, batch, dateStr, batchesForMonth) {
+  if (!batch) return [];
+  const mKey = (dateStr || todayStr()).slice(0, 7);
+  return (students || []).filter(s => {
+    if (s.deleted) return false;
+    if (String(s.class) !== String(batch.class)) return false;
+    const activeSubjects = batchesForMonth(s, mKey);
+    return activeSubjects.includes(batch.subject);
+  });
+}
+// Teacher Performance — deliberately isolated so the weighting is easy to
+// adjust later without hunting through the rest of the file. FLAGGED AS A
+// DECISION TO CONFIRM: attendance consistency and average test score are
+// currently weighted 50/50 (attendanceWeight / testWeight below); each
+// batch contributes to the teacher's average unweighted by class size.
+// Returns null if the teacher has no batches, so the UI can show "No
+// batches assigned yet" instead of a misleading 0.
+function computeTeacherPerformance(teacher, batches, attendanceRecords, tests) {
+  const attendanceWeight = 0.5; // <-- confirm/tune this
+  const testWeight = 0.5;       // <-- confirm/tune this
+  const myBatches = (batches || []).filter(b => b.teacherId === teacher.id);
+  if (!myBatches.length) return null;
+
+  const batchBreakdown = myBatches.map(b => {
+    const relevantAttendance = (attendanceRecords || []).filter(a => a.batchId === b.id);
+    let presentCount = 0, totalMarks = 0;
+    relevantAttendance.forEach(a => (a.records || []).forEach(r => { totalMarks++; if (r.status === "Present") presentCount++; }));
+    const attendancePct = totalMarks > 0 ? (presentCount / totalMarks) * 100 : null;
+
+    const relevantTests = (tests || []).filter(t => String(t.class) === String(b.class) && t.subject === b.subject);
+    let scoreSum = 0, scoreCount = 0;
+    relevantTests.forEach(t => (t.scores || []).forEach(sc => {
+      if (sc.marks === "" || sc.marks == null || !t.maxMarks) return;
+      scoreSum += (Number(sc.marks) / Number(t.maxMarks)) * 100; scoreCount++;
+    }));
+    const avgTestPct = scoreCount > 0 ? scoreSum / scoreCount : null;
+
+    return { batch: b, attendancePct, avgTestPct };
+  });
+
+  const withAttendance = batchBreakdown.filter(b => b.attendancePct != null);
+  const withTests = batchBreakdown.filter(b => b.avgTestPct != null);
+  const avgAttendance = withAttendance.length ? withAttendance.reduce((a, b) => a + b.attendancePct, 0) / withAttendance.length : null;
+  const avgTest = withTests.length ? withTests.reduce((a, b) => a + b.avgTestPct, 0) / withTests.length : null;
+
+  let summaryScore = null;
+  if (avgAttendance != null && avgTest != null) summaryScore = avgAttendance * attendanceWeight + avgTest * testWeight;
+  else if (avgAttendance != null) summaryScore = avgAttendance;
+  else if (avgTest != null) summaryScore = avgTest;
+
+  return { summaryScore, avgAttendance, avgTest, batchBreakdown };
+}
+
 // Single source of truth for receipt numbering, so the Deposit Receipt,
 // the WhatsApp receipt message, and the Student Statement always show
 // the exact same receipt number for a given deposit.
@@ -575,6 +763,19 @@ export default function CoachingLedger() {
   const [testScores, setTestScores] = useState([]);
   const [behaviourNotes, setBehaviourNotes] = useState([]);
 
+  // Teacher Management / Batch Schedule / Staff / Attendance / Test Marks —
+  // five new Firestore collections, same live-sync + soft-delete pattern
+  // as everything above (see UPDATE NOTES #23). NOTE: this "attendanceLog"
+  // collection is deliberately a different name from the existing
+  // "attendance" collection above, which powers the older per-student
+  // Academic Monitoring → Attendance sub-tab — the two are unrelated and
+  // must not collide.
+  const [teachers, setTeachers] = useState([]);
+  const [staff, setStaff] = useState([]);
+  const [batchSchedule, setBatchSchedule] = useState([]);
+  const [attendanceLog, setAttendanceLog] = useState([]);
+  const [tests, setTests] = useState([]);
+
   const [showStudentForm, setShowStudentForm] = useState(false);
   const [showDepositForm, setShowDepositForm] = useState(false);
   const [showPromoteModal, setShowPromoteModal] = useState(null);
@@ -596,6 +797,12 @@ export default function CoachingLedger() {
   const [editingTestScore, setEditingTestScore] = useState(null);
   const [showBehaviourForm, setShowBehaviourForm] = useState(false);
   const [editingBehaviour, setEditingBehaviour] = useState(null);
+  const [showTeacherForm, setShowTeacherForm] = useState(false);
+  const [editingTeacher, setEditingTeacher] = useState(null);
+  const [showStaffForm, setShowStaffForm] = useState(false);
+  const [editingStaffMember, setEditingStaffMember] = useState(null);
+  const [showBatchScheduleForm, setShowBatchScheduleForm] = useState(false);
+  const [editingBatchSchedule, setEditingBatchSchedule] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
   const [receiptData, setReceiptData] = useState(null);
   const [expenseReceiptData, setExpenseReceiptData] = useState(null);
@@ -682,6 +889,29 @@ export default function CoachingLedger() {
       setBehaviourNotes(data);
     });
 
+    // Teacher Management / Batch Schedule / Staff / Attendance / Test Marks
+    // collections — same live-sync pattern as every collection above.
+    const unsubTeachers = onSnapshot(collection(db, "teachers"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setTeachers(data);
+    });
+    const unsubStaff = onSnapshot(collection(db, "staff"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setStaff(data);
+    });
+    const unsubBatchSchedule = onSnapshot(collection(db, "batchSchedule"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setBatchSchedule(data);
+    });
+    const unsubAttendanceLog = onSnapshot(collection(db, "attendanceLog"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setAttendanceLog(data);
+    });
+    const unsubTests = onSnapshot(collection(db, "tests"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setTests(data);
+    });
+
     const unsubFee = onSnapshot(doc(db, "settings", "feeStructure"), (docSnap) => {
       if (docSnap.exists()) {
         setFeeStructure(docSnap.data().matrix || {});
@@ -724,6 +954,7 @@ export default function CoachingLedger() {
       unsubStudents(); unsubDeposits(); unsubCharges(); unsubExpenses(); unsubBankTxns();
       unsubCreditTxns(); unsubInterestPayments(); unsubNotes();
       unsubAttendance(); unsubTestScores(); unsubBehaviourNotes();
+      unsubTeachers(); unsubStaff(); unsubBatchSchedule(); unsubAttendanceLog(); unsubTests();
       unsubFee(); unsubClasses(); unsubSubjects(); unsubStreams();
     };
   }, [isAuthenticated]);
@@ -886,6 +1117,17 @@ export default function CoachingLedger() {
   const trashedTestScores = testScores.filter(t => t.deleted);
   const visibleBehaviourNotes = behaviourNotes.filter(b => !b.deleted);
   const trashedBehaviourNotes = behaviourNotes.filter(b => b.deleted);
+
+  // Teacher Management / Batch Schedule / Staff / Attendance / Test Marks —
+  // Teachers and Staff follow the same soft-delete + Trash pattern as
+  // students. Batch Schedule, Attendance, and Test Marks records don't get
+  // a trash bin (see UPDATE NOTES #23) — batchSchedule/attendanceLog/tests
+  // are used as-is.
+  const visibleTeachers = teachers.filter(t => !t.deleted);
+  const trashedTeachers = teachers.filter(t => t.deleted);
+  const visibleStaff = staff.filter(s => !s.deleted);
+  const trashedStaff = staff.filter(s => s.deleted);
+  const teacherById = Object.fromEntries(teachers.map(t => [t.id, t]));
 
   const totalWithdrawals = round2(visibleBankTxns.filter(t => t.type === "withdrawal").reduce((a, t) => a + Number(t.amount || 0), 0));
   const totalBankDeposits = round2(visibleBankTxns.filter(t => t.type === "deposit").reduce((a, t) => a + Number(t.amount || 0), 0));
@@ -1156,6 +1398,89 @@ export default function CoachingLedger() {
   async function permanentlyDeleteStudent(id) {
     if (!window.confirm("Permanently delete this student and all associated records? This cannot be undone.")) return;
     await deleteDoc(doc(db, "students", id));
+  }
+
+  // ---- Teachers ----
+  async function saveTeacher(data) {
+    const id = data.id || uid();
+    const teacherId = data.teacherId || generateTeacherId(teachers);
+    await setDoc(doc(db, "teachers", id), { ...data, id, teacherId, deleted: false });
+    setShowTeacherForm(false);
+    setEditingTeacher(null);
+  }
+  async function softDeleteTeacher(id) {
+    const t = teacherById[id];
+    if (!t) return;
+    if (!window.confirm("Move this teacher to Trash? Their record can be restored later.")) return;
+    await setDoc(doc(db, "teachers", id), { ...t, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreTeacher(id) {
+    const t = teachers.find(x => x.id === id);
+    if (!t) return;
+    await setDoc(doc(db, "teachers", id), { ...t, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteTeacher(id) {
+    if (!window.confirm("Permanently delete this teacher? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "teachers", id));
+  }
+
+  // ---- Staff ----
+  async function saveStaffMember(data) {
+    const id = data.id || uid();
+    const staffId = data.staffId || generateStaffId(staff);
+    await setDoc(doc(db, "staff", id), { ...data, id, staffId, deleted: false });
+    setShowStaffForm(false);
+    setEditingStaffMember(null);
+  }
+  async function softDeleteStaffMember(id) {
+    const s = staff.find(x => x.id === id);
+    if (!s) return;
+    if (!window.confirm("Move this staff member to Trash? Their record can be restored later.")) return;
+    await setDoc(doc(db, "staff", id), { ...s, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreStaffMember(id) {
+    const s = staff.find(x => x.id === id);
+    if (!s) return;
+    await setDoc(doc(db, "staff", id), { ...s, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteStaffMember(id) {
+    if (!window.confirm("Permanently delete this staff member? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "staff", id));
+  }
+
+  // ---- Batch Schedule ----
+  async function saveBatchScheduleEntry(data) {
+    const id = data.id || uid();
+    await setDoc(doc(db, "batchSchedule", id), { ...data, id });
+    setShowBatchScheduleForm(false);
+    setEditingBatchSchedule(null);
+  }
+  async function deleteBatchScheduleEntry(id) {
+    if (!window.confirm("Delete this batch schedule entry? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "batchSchedule", id));
+  }
+
+  // ---- Attendance (batch-wise) — idempotent upsert keyed by
+  // date_class_subject, so re-saving the same combination edits the same
+  // document instead of creating a duplicate.
+  async function saveAttendanceLog(dateStr, cls, subject, batchId, records) {
+    const key = `${dateStr}_${cls}_${subject}`.replace(/[^a-zA-Z0-9_-]/g, "-");
+    const existing = attendanceLog.find(a => a.id === key);
+    await setDoc(doc(db, "attendanceLog", key), {
+      id: key, date: dateStr, class: cls, subject, batchId, records,
+      createdAt: existing ? existing.createdAt : nowStamp(),
+    });
+  }
+
+  // ---- Test Marks — upsert by testId (same reopen-and-reload behavior:
+  // selecting the same Class+Subject+Date, or the same generated Test ID,
+  // loads existing marks instead of starting blank).
+  async function saveTest(data) {
+    const existing = tests.find(t => t.testId === data.testId);
+    const id = existing ? existing.id : uid();
+    await setDoc(doc(db, "tests", id), {
+      ...data, id, createdAt: existing ? existing.createdAt : nowStamp(),
+    });
   }
 
   async function softDeleteDeposit(id) {
@@ -1466,18 +1791,29 @@ export default function CoachingLedger() {
     // STUDENT_MANAGEMENT_SUB_TABS) — same merge pattern already used for
     // Banking's four sub-tabs.
     { id: "students-management", label: "Student Management", icon: Users },
+    // Teacher Management — Teachers, Performance, Batch Schedule, and
+    // Staff, grouped under one sidebar entry with its own internal pill
+    // row, same pattern as Student Management (see TeacherManagementTab /
+    // TEACHER_MANAGEMENT_SUB_TABS). See UPDATE NOTES #23.
+    { id: "teacher-management", label: "Teacher Management", icon: UserCog },
     // Academic Monitoring — Attendance, Test Scores, Behaviour & Conduct,
     // and the printable Performance Report, grouped under one sidebar
     // entry with its own internal pill row (see AcademicMonitoringTab /
     // ACADEMIC_MONITORING_SUB_TABS), same pattern as Student Management.
     { id: "academic-monitoring", label: "Academic Monitoring", icon: GraduationCap },
+    // Attendance (batch-wise, roster + autofill) and Test Marks, grouped
+    // under one sidebar entry with its own internal pill row — see
+    // AttendanceMgmtTab / ATTENDANCE_MGMT_SUB_TABS and UPDATE NOTES #23.
+    // Not to be confused with the older per-student Attendance sub-tab
+    // inside Academic Monitoring above, which is untouched.
+    { id: "attendance", label: "Attendance", icon: ClipboardList },
     { id: "expenses", label: "Expenses Log", icon: CreditCard },
     { id: "banking", label: "Banking", icon: Landmark },
     { id: "notes", label: "Notes", icon: BookOpen },
     { id: "trash", label: "Trash / Restore", icon: Archive },
   ];
 
-  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length + trashedAttendance.length + trashedTestScores.length + trashedBehaviourNotes.length;
+  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length + trashedAttendance.length + trashedTestScores.length + trashedBehaviourNotes.length + trashedTeachers.length + trashedStaff.length;
 
   return (
     <div className="min-h-screen flex" style={{ background: "#FAF6EC", fontFamily: "'Inter', sans-serif", color: "#26231D" }}>
@@ -1609,6 +1945,43 @@ export default function CoachingLedger() {
             onRemoveBehaviour={softDeleteBehaviourNote}
           />
         )}
+        {tab === "teacher-management" && (
+          <TeacherManagementTab
+            teachersTabProps={{
+              teachers: visibleTeachers, subjectsList, batchSchedule,
+              onAdd: () => { setEditingTeacher(null); setShowTeacherForm(true); },
+              onEdit: (t) => { setEditingTeacher(t); setShowTeacherForm(true); },
+              onRemove: softDeleteTeacher,
+            }}
+            performanceTabProps={{
+              teachers: visibleTeachers, batches: batchSchedule, attendanceRecords: attendanceLog, tests,
+            }}
+            batchScheduleTabProps={{
+              batchSchedule, teachers: visibleTeachers, classes, subjectsList,
+              onAdd: () => { setEditingBatchSchedule(null); setShowBatchScheduleForm(true); },
+              onEdit: (b) => { setEditingBatchSchedule(b); setShowBatchScheduleForm(true); },
+              onRemove: deleteBatchScheduleEntry,
+            }}
+            staffTabProps={{
+              staff: visibleStaff,
+              onAdd: () => { setEditingStaffMember(null); setShowStaffForm(true); },
+              onEdit: (s) => { setEditingStaffMember(s); setShowStaffForm(true); },
+              onRemove: softDeleteStaffMember,
+            }}
+          />
+        )}
+        {tab === "attendance" && (
+          <AttendanceMgmtTab
+            markAttendanceTabProps={{
+              classes, subjectsList, batchSchedule, students: visibleStudents,
+              attendanceLog, batchesForMonth, onSave: saveAttendanceLog,
+            }}
+            testMarksTabProps={{
+              classes, subjectsList, batchSchedule, students: visibleStudents,
+              tests, batchesForMonth, onSave: saveTest,
+            }}
+          />
+        )}
         {tab === "expenses" && (
           <ExpensesTab
             expenses={visibleExpenses}
@@ -1663,6 +2036,7 @@ export default function CoachingLedger() {
             trashedStudents={trashedStudents} trashedDeposits={trashedDeposits} trashedCharges={trashedCharges} trashedExpenses={trashedExpenses}
             trashedBankTxns={trashedBankTxns} trashedCreditTxns={trashedCreditTxns} trashedInterestPayments={trashedInterestPayments}
             trashedAttendance={trashedAttendance} trashedTestScores={trashedTestScores} trashedBehaviourNotes={trashedBehaviourNotes}
+            trashedTeachers={trashedTeachers} trashedStaff={trashedStaff}
             studentById={studentById}
             onRestoreStudent={restoreStudent} onDeleteStudent={permanentlyDeleteStudent}
             onRestoreDeposit={restoreDeposit} onDeleteDeposit={permanentlyDeleteDeposit}
@@ -1674,6 +2048,8 @@ export default function CoachingLedger() {
             onRestoreAttendance={restoreAttendance} onDeleteAttendance={permanentlyDeleteAttendance}
             onRestoreTestScore={restoreTestScore} onDeleteTestScore={permanentlyDeleteTestScore}
             onRestoreBehaviour={restoreBehaviourNote} onDeleteBehaviour={permanentlyDeleteBehaviourNote}
+            onRestoreTeacher={restoreTeacher} onDeleteTeacher={permanentlyDeleteTeacher}
+            onRestoreStaff={restoreStaffMember} onDeleteStaff={permanentlyDeleteStaffMember}
           />
         )}
       </main>
@@ -1731,6 +2107,18 @@ export default function CoachingLedger() {
       {showBehaviourForm && (
         <BehaviourFormModal students={visibleStudents} initial={editingBehaviour}
           onClose={() => { setShowBehaviourForm(false); setEditingBehaviour(null); }} onSave={saveBehaviourNote} />
+      )}
+      {showTeacherForm && (
+        <TeacherFormModal subjectsList={subjectsList} initial={editingTeacher} teachers={visibleTeachers}
+          onClose={() => { setShowTeacherForm(false); setEditingTeacher(null); }} onSave={saveTeacher} />
+      )}
+      {showStaffForm && (
+        <StaffFormModal initial={editingStaffMember} staff={visibleStaff}
+          onClose={() => { setShowStaffForm(false); setEditingStaffMember(null); }} onSave={saveStaffMember} />
+      )}
+      {showBatchScheduleForm && (
+        <BatchScheduleFormModal classes={classes} subjectsList={subjectsList} teachers={visibleTeachers} initial={editingBatchSchedule}
+          onClose={() => { setShowBatchScheduleForm(false); setEditingBatchSchedule(null); }} onSave={saveBatchScheduleEntry} />
       )}
       {expenseReceiptData && (
         <ExpenseReceiptModal expense={expenseReceiptData} onClose={() => setExpenseReceiptData(null)} />
@@ -4433,7 +4821,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
   );
 }
 
-function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, trashedCreditTxns, trashedInterestPayments, trashedAttendance, trashedTestScores, trashedBehaviourNotes, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn, onRestoreCredit, onDeleteCredit, onRestoreInterest, onDeleteInterest, onRestoreAttendance, onDeleteAttendance, onRestoreTestScore, onDeleteTestScore, onRestoreBehaviour, onDeleteBehaviour }) {
+function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, trashedCreditTxns, trashedInterestPayments, trashedAttendance, trashedTestScores, trashedBehaviourNotes, trashedTeachers, trashedStaff, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn, onRestoreCredit, onDeleteCredit, onRestoreInterest, onDeleteInterest, onRestoreAttendance, onDeleteAttendance, onRestoreTestScore, onDeleteTestScore, onRestoreBehaviour, onDeleteBehaviour, onRestoreTeacher, onDeleteTeacher, onRestoreStaff, onDeleteStaff }) {
   return (
     <div>
       <SectionHeader eyebrow="Recycle Bin" title="Trash / Restore" />
@@ -4693,6 +5081,933 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
           </table>
         )}
       </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Teachers</span></div>
+      <Card className="mb-6">
+        {(!trashedTeachers || trashedTeachers.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted teachers.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedTeachers.map(t => (
+                <tr key={t.id} className="ledger-row">
+                  <td className="px-4 py-2.5 font-medium">{t.name} <span className="text-[10px] text-[#9C8F6E] font-mono">{t.teacherId}</span></td>
+                  <td className="px-4 py-2.5 text-xs text-[#6E6650]">{(t.expertiseSubjects || []).join(", ") || "—"}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {t.deletedAt ? fmtDate(t.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRestoreTeacher(t.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                    <button onClick={() => onDeleteTeacher(t.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Staff</span></div>
+      <Card>
+        {(!trashedStaff || trashedStaff.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted staff.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedStaff.map(s => (
+                <tr key={s.id} className="ledger-row">
+                  <td className="px-4 py-2.5 font-medium">{s.name} <span className="text-[10px] text-[#9C8F6E] font-mono">{s.staffId}</span></td>
+                  <td className="px-4 py-2.5 text-xs text-[#6E6650]">{s.title || "—"}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {s.deletedAt ? fmtDate(s.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRestoreStaff(s.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                    <button onClick={() => onDeleteStaff(s.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ============================================================================
+// TEACHER MANAGEMENT — new sidebar tab. Sub-tabs: Teachers, Performance,
+// Batch Schedule, Staff. Same bordered pill-row pattern as
+// STUDENT_MANAGEMENT_SUB_TABS. See UPDATE NOTES #23.
+// ============================================================================
+const TEACHER_MANAGEMENT_SUB_TABS = [
+  { id: "teachers", label: "Teachers", icon: UserCog },
+  { id: "performance", label: "Performance", icon: FileBarChart2 },
+  { id: "batch-schedule", label: "Batch Schedule", icon: CalendarCheck },
+  { id: "staff", label: "Staff", icon: Users },
+];
+
+function TeacherManagementTab({ teachersTabProps, performanceTabProps, batchScheduleTabProps, staffTabProps }) {
+  const [subTab, setSubTab] = useState("teachers");
+  return (
+    <div>
+      <SectionHeader eyebrow="Staffing" title="Teacher Management" />
+      <div className="text-sm text-[#6E6650] mb-4">Teacher register, performance, batch allotment, and other staff — in one place.</div>
+
+      <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
+        {TEACHER_MANAGEMENT_SUB_TABS.map((st, i) => {
+          const Icon = st.icon;
+          const active = subTab === st.id;
+          return (
+            <button key={st.id} onClick={() => setSubTab(st.id)}
+              className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+              style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+              <Icon size={13} /> {st.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {subTab === "teachers" && <TeachersTab {...teachersTabProps} />}
+      {subTab === "performance" && <TeacherPerformanceTab {...performanceTabProps} />}
+      {subTab === "batch-schedule" && <BatchScheduleTab {...batchScheduleTabProps} />}
+      {subTab === "staff" && <StaffTab {...staffTabProps} />}
+    </div>
+  );
+}
+
+function TeachersTab({ teachers, subjectsList, batchSchedule, onAdd, onEdit, onRemove }) {
+  const [search, setSearch] = useState("");
+  const [expanded, setExpanded] = useState({});
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return teachers;
+    return teachers.filter(t => {
+      const haystack = [t.name, t.teacherId, t.phone, t.guardianPhone, t.address, t.aadharNumber, ...(t.expertiseSubjects || [])].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [teachers, search]);
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Register" title="Teachers Directory" action={
+        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Add Teacher
+        </button>
+      } />
+      <Card className="p-3.5 mb-4">
+        <div className="relative">
+          <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" style={{ marginTop: "9px" }} />
+          <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name, Teacher ID, subject, phone, Aadhar…" />
+        </div>
+      </Card>
+      <Card>
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">{teachers.length === 0 ? "No teachers registered yet." : "No teachers match this search."}</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["#", "", "Name", "Expertise Subjects", "Status", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((t, idx) => {
+                const isOpen = !!expanded[t.id];
+                const myBatches = batchSchedule.filter(b => b.teacherId === t.id || b.substituteTeacherId === t.id);
+                return (
+                  <React.Fragment key={t.id}>
+                    <tr className="ledger-row">
+                      <td className="pl-4 py-2.5 text-xs text-[#9C8F6E] font-mono">{idx + 1}</td>
+                      <td className="pl-1 py-2.5">
+                        <button onClick={() => setExpanded(prev => ({ ...prev, [t.id]: !prev[t.id] }))} className="text-[#9C8F6E] hover:text-[#12312B] text-xs w-4">{isOpen ? "▾" : "▸"}</button>
+                      </td>
+                      <td className="px-4 py-2.5 font-medium">
+                        <div>{t.name}</div>
+                        <div className="text-[10px] text-[#9C8F6E] flex gap-1.5">
+                          {t.teacherId && <span className="font-mono">{t.teacherId}</span>}
+                          {t.phone && <span>{t.teacherId ? "· " : ""}{t.phone}</span>}
+                        </div>
+                      </td>
+                      <td className="px-4 py-2.5 text-xs text-[#6E6650]">{(t.expertiseSubjects || []).join(", ") || "—"}</td>
+                      <td className="px-4 py-2.5 text-xs"><Stamp text={(t.status || "active") === "active" ? "Active" : "Inactive"} tone={(t.status || "active") === "active" ? "paid" : "overdue"} /></td>
+                      <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                        <button onClick={() => onEdit(t)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
+                        <button onClick={() => onRemove(t.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr>
+                        <td></td><td></td>
+                        <td colSpan={4} className="px-4 pb-3 pt-0">
+                          <div className="p-3 rounded bg-[#FAF6EC] border text-xs space-y-2" style={{ borderColor: "#D8CFB8" }}>
+                            <div className="grid grid-cols-3 gap-3">
+                              <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Gender</span>{t.gender || "—"}</div>
+                              <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Date of Birth</span>{t.dob ? fmtDate(t.dob) : "—"}</div>
+                              <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Joining Date</span>{t.joiningDate ? fmtDate(t.joiningDate) : "—"}</div>
+                              <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Guardian / Emergency Phone</span>{t.guardianPhone || "—"}</div>
+                              <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Aadhar Number</span>{t.aadharNumber || "—"}</div>
+                              <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Address</span>{t.address || "—"}</div>
+                              <div><span className="text-[#9C8F6E] block font-mono text-[10px] uppercase">Current Salary</span>{fmtINR(t.salaryAmount || 0)}{t.paymentMode ? ` (${t.paymentMode})` : ""}</div>
+                            </div>
+                            {(t.qualifications || []).length > 0 && (
+                              <div>
+                                <span className="text-[#9C8F6E] block font-mono text-[10px] uppercase mb-1">Qualifications</span>
+                                {t.qualifications.map((q, i) => <div key={i}>{q.degree} — {q.institution} ({q.year})</div>)}
+                              </div>
+                            )}
+                            {(t.parallelProfessions || []).length > 0 && (
+                              <div>
+                                <span className="text-[#9C8F6E] block font-mono text-[10px] uppercase mb-1">Parallel Professions</span>
+                                {t.parallelProfessions.map((p, i) => <div key={i}>{p.role} — {p.organization}{p.description ? ` (${p.description})` : ""}</div>)}
+                              </div>
+                            )}
+                            <div>
+                              <span className="text-[#9C8F6E] block font-mono text-[10px] uppercase mb-1">Batches Allotted</span>
+                              {myBatches.length === 0 ? "—" : myBatches.map(b => (
+                                <div key={b.id}>{b.batchName} — Class {b.class} · {b.subject} ({(b.daysOfWeek || []).join("/")}, {b.startTime}–{b.endTime}){b.substituteTeacherId === t.id ? " [Substitute]" : ""}</div>
+                              ))}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function TeacherFormModal({ subjectsList, initial, teachers, onClose, onSave }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [dob, setDob] = useState(initial?.dob || "");
+  const [gender, setGender] = useState(initial?.gender || "");
+  const [phone, setPhone] = useState(initial?.phone || "");
+  const [guardianPhone, setGuardianPhone] = useState(initial?.guardianPhone || "");
+  const [address, setAddress] = useState(initial?.address || "");
+  const [aadharNumber, setAadharNumber] = useState(initial?.aadharNumber || "");
+  const [joiningDate, setJoiningDate] = useState(initial?.joiningDate || todayStr());
+  const [expertiseSubjects, setExpertiseSubjects] = useState(initial?.expertiseSubjects || []);
+  const [salaryAmount, setSalaryAmount] = useState(initial?.salaryAmount || "");
+  const [paymentMode, setPaymentMode] = useState(initial?.paymentMode || "Bank Transfer");
+  const [status, setStatus] = useState(initial?.status || "active");
+  const [qualifications, setQualifications] = useState(initial?.qualifications || []);
+  const [parallelProfessions, setParallelProfessions] = useState(initial?.parallelProfessions || []);
+
+  const displayTeacherId = initial?.teacherId || useMemo(() => generateTeacherId(teachers), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function toggleSubject(sub) {
+    setExpertiseSubjects(prev => prev.includes(sub) ? prev.filter(x => x !== sub) : [...prev, sub]);
+  }
+  function addQualification() { setQualifications(prev => [...prev, { degree: "", institution: "", year: "" }]); }
+  function updateQualification(i, field, val) { setQualifications(prev => prev.map((q, idx) => idx === i ? { ...q, [field]: val } : q)); }
+  function removeQualification(i) { setQualifications(prev => prev.filter((_, idx) => idx !== i)); }
+  function addProfession() { setParallelProfessions(prev => [...prev, { role: "", organization: "", description: "" }]); }
+  function updateProfession(i, field, val) { setParallelProfessions(prev => prev.map((p, idx) => idx === i ? { ...p, [field]: val } : p)); }
+  function removeProfession(i) { setParallelProfessions(prev => prev.filter((_, idx) => idx !== i)); }
+
+  function submit() {
+    if (!name.trim()) return;
+    const salaryHistory = [...(initial?.salaryHistory || [])];
+    const newAmt = Number(salaryAmount) || 0;
+    const prevAmt = initial ? (Number(initial.salaryAmount) || 0) : null;
+    if (prevAmt === null || newAmt !== prevAmt) {
+      salaryHistory.push({ date: todayStr(), amount: newAmt, remarks: initial ? "Salary updated" : "Initial salary" });
+    }
+    onSave({
+      ...initial, id: initial?.id, teacherId: initial?.teacherId || displayTeacherId,
+      name: name.trim(), dob, gender, phone: phone.trim(), guardianPhone: guardianPhone.trim(),
+      address: address.trim(), aadharNumber: aadharNumber.trim(), joiningDate: joiningDate || todayStr(),
+      qualifications, parallelProfessions, expertiseSubjects,
+      salaryAmount: newAmt, paymentMode, salaryHistory, status,
+    });
+  }
+
+  return (
+    <WideModal title={initial ? "Edit Teacher" : "Add Teacher"} onClose={onClose}>
+      <div className="flex items-center justify-between mb-3 p-2 rounded bg-[#FAF6EC] border" style={{ borderColor: "#D8CFB8" }}>
+        <span className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono">Teacher ID</span>
+        <span className="text-sm font-bold text-[#12312B]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{displayTeacherId}{!initial && " (auto-assigned on save)"}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Full Name"><input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Anjali Verma" /></Field>
+        <Field label="Gender">
+          <select className={inputCls} style={inputStyle} value={gender} onChange={e => setGender(e.target.value)}>
+            <option value="">— Select —</option><option value="Male">Male</option><option value="Female">Female</option>
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Date of Birth"><input type="date" className={inputCls} style={inputStyle} value={dob} onChange={e => setDob(e.target.value)} /></Field>
+        <Field label="Joining Date"><input type="date" className={inputCls} style={inputStyle} value={joiningDate} onChange={e => setJoiningDate(e.target.value)} /></Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Phone"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit phone number" /></Field>
+        <Field label="Emergency Contact"><input className={inputCls} style={inputStyle} value={guardianPhone} onChange={e => setGuardianPhone(e.target.value)} placeholder="Alternate contact" /></Field>
+      </div>
+      <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="House / street / area / city" /></Field>
+      <Field label="Aadhar Number"><input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} placeholder="12-digit Aadhar number" maxLength={14} /></Field>
+
+      <Field label={`Expertise Subjects (${expertiseSubjects.length} selected)`}>
+        <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 border bg-white rounded-sm">
+          {subjectsList.map(sub => {
+            const active = expertiseSubjects.includes(sub);
+            return (
+              <button key={sub} type="button" onClick={() => toggleSubject(sub)} className="px-2.5 py-1 text-xs rounded-sm border flex items-center gap-1"
+                style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>
+                {active && <Check size={12} />}{sub}
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+
+      <div className="p-3 border rounded-sm mb-3 bg-white" style={{ borderColor: "#D8CFB8" }}>
+        <div className="text-xs font-semibold text-[#12312B] mb-2">Academic Qualifications</div>
+        {qualifications.map((q, i) => (
+          <div key={i} className="grid grid-cols-[1fr_1fr_80px_28px] gap-2 mb-2">
+            <input className={inputCls} style={inputStyle} value={q.degree} onChange={e => updateQualification(i, "degree", e.target.value)} placeholder="Degree" />
+            <input className={inputCls} style={inputStyle} value={q.institution} onChange={e => updateQualification(i, "institution", e.target.value)} placeholder="Institution" />
+            <input className={inputCls} style={inputStyle} value={q.year} onChange={e => updateQualification(i, "year", e.target.value)} placeholder="Year" />
+            <button type="button" onClick={() => removeQualification(i)} className="text-[#A63D2F]"><X size={14} /></button>
+          </div>
+        ))}
+        <button type="button" onClick={addQualification} className="text-xs text-[#12312B] underline flex items-center gap-1"><Plus size={12} /> Add Qualification</button>
+      </div>
+
+      <div className="p-3 border rounded-sm mb-3 bg-white" style={{ borderColor: "#D8CFB8" }}>
+        <div className="text-xs font-semibold text-[#12312B] mb-2">Parallel Professions (optional)</div>
+        {parallelProfessions.map((p, i) => (
+          <div key={i} className="grid grid-cols-[1fr_1fr_1fr_28px] gap-2 mb-2">
+            <input className={inputCls} style={inputStyle} value={p.role} onChange={e => updateProfession(i, "role", e.target.value)} placeholder="Role" />
+            <input className={inputCls} style={inputStyle} value={p.organization} onChange={e => updateProfession(i, "organization", e.target.value)} placeholder="Organization" />
+            <input className={inputCls} style={inputStyle} value={p.description} onChange={e => updateProfession(i, "description", e.target.value)} placeholder="Description" />
+            <button type="button" onClick={() => removeProfession(i)} className="text-[#A63D2F]"><X size={14} /></button>
+          </div>
+        ))}
+        <button type="button" onClick={addProfession} className="text-xs text-[#12312B] underline flex items-center gap-1"><Plus size={12} /> Add Profession</button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Current Salary (₹)"><input type="number" className={inputCls} style={inputStyle} value={salaryAmount} onChange={e => setSalaryAmount(e.target.value)} placeholder="0" /></Field>
+        <Field label="Payment Mode">
+          <select className={inputCls} style={inputStyle} value={paymentMode} onChange={e => setPaymentMode(e.target.value)}>
+            {PAYMENT_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </Field>
+      </div>
+      {initial?.salaryHistory?.length > 0 && (
+        <div className="text-[10px] text-[#9C8F6E] mb-3">Salary history: {initial.salaryHistory.map((h, i) => `${fmtDate(h.date)} — ${fmtINR(h.amount)}`).join(" · ")}</div>
+      )}
+      <Field label="Status">
+        <select className={inputCls} style={inputStyle} value={status} onChange={e => setStatus(e.target.value)}>
+          <option value="active">Active</option><option value="inactive">Inactive</option>
+        </select>
+      </Field>
+
+      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        {initial ? "Save Changes" : "Register Teacher"}
+      </button>
+    </WideModal>
+  );
+}
+
+function TeacherPerformanceTab({ teachers, batches, attendanceRecords, tests }) {
+  return (
+    <div>
+      <SectionHeader eyebrow="Staffing" title="Teacher Performance" />
+      <div className="text-sm text-[#6E6650] mb-4">
+        Computed from each teacher's allotted batches — attendance consistency of enrolled students and their average test scores.
+        The weighting is a placeholder pending confirmation (see computeTeacherPerformance in code) — every underlying number is shown below so it's auditable, not a black box.
+      </div>
+      {teachers.length === 0 ? (
+        <Card><div className="p-8 text-center text-sm text-[#9C8F6E]">No teachers registered yet.</div></Card>
+      ) : (
+        <div className="space-y-4">
+          {teachers.map(t => {
+            const perf = computeTeacherPerformance(t, batches, attendanceRecords, tests);
+            return (
+              <Card key={t.id} className="p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div>
+                    <div className="font-semibold text-[#12312B]">{t.name}</div>
+                    <div className="text-[10px] text-[#9C8F6E] font-mono">{t.teacherId}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono">Summary Score</div>
+                    <div className="text-xl font-bold text-[#12312B]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
+                      {perf && perf.summaryScore != null ? `${perf.summaryScore.toFixed(1)}%` : "—"}
+                    </div>
+                  </div>
+                </div>
+                {!perf ? (
+                  <div className="text-xs text-[#9C8F6E]">No batches assigned yet.</div>
+                ) : (
+                  <>
+                    <div className="text-xs text-[#6E6650] mb-2">Avg. Attendance: {perf.avgAttendance != null ? `${perf.avgAttendance.toFixed(1)}%` : "—"} · Avg. Test Score: {perf.avgTest != null ? `${perf.avgTest.toFixed(1)}%` : "—"}</div>
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid #D8CFB8" }}>
+                          <th className="text-left py-1.5 text-[#9C8F6E] font-mono uppercase text-[10px]">Batch</th>
+                          <th className="text-left py-1.5 text-[#9C8F6E] font-mono uppercase text-[10px]">Attendance %</th>
+                          <th className="text-left py-1.5 text-[#9C8F6E] font-mono uppercase text-[10px]">Avg Test %</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {perf.batchBreakdown.map(bb => (
+                          <tr key={bb.batch.id} className="ledger-row">
+                            <td className="py-1.5">{bb.batch.batchName} (Class {bb.batch.class} · {bb.batch.subject})</td>
+                            <td className="py-1.5">{bb.attendancePct != null ? `${bb.attendancePct.toFixed(1)}%` : "—"}</td>
+                            <td className="py-1.5">{bb.avgTestPct != null ? `${bb.avgTestPct.toFixed(1)}%` : "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BatchScheduleTab({ batchSchedule, teachers, classes, subjectsList, onAdd, onEdit, onRemove }) {
+  const teacherById = Object.fromEntries(teachers.map(t => [t.id, t]));
+  return (
+    <div>
+      <SectionHeader eyebrow="Scheduling" title="Batch Schedule" action={
+        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Add Batch
+        </button>
+      } />
+      <Card>
+        {batchSchedule.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No batches scheduled yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Batch", "Class", "Subject", "Days", "Time", "Teacher", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {batchSchedule.map(b => (
+                <tr key={b.id} className="ledger-row">
+                  <td className="px-4 py-2.5 font-medium">{b.batchName}</td>
+                  <td className="px-4 py-2.5 text-xs">{b.class}</td>
+                  <td className="px-4 py-2.5 text-xs">{b.subject}</td>
+                  <td className="px-4 py-2.5 text-xs">{(b.daysOfWeek || []).join(", ")}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{b.startTime}–{b.endTime}{b.duration ? ` (${b.duration})` : ""}</td>
+                  <td className="px-4 py-2.5 text-xs">
+                    {teacherById[b.teacherId]?.name || "—"}
+                    {b.substituteTeacherId && teacherById[b.substituteTeacherId] && <div className="text-[10px] text-[#9C8F6E]">Sub: {teacherById[b.substituteTeacherId].name}</div>}
+                  </td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onEdit(b)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
+                    <button onClick={() => onRemove(b.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onClose, onSave }) {
+  const [batchName, setBatchName] = useState(initial?.batchName || "");
+  const [cls, setCls] = useState(initial?.class || classes[0] || "");
+  const [subject, setSubject] = useState(initial?.subject || subjectsList[0] || "");
+  const [startTime, setStartTime] = useState(initial?.startTime || "");
+  const [endTime, setEndTime] = useState(initial?.endTime || "");
+  const [daysOfWeek, setDaysOfWeek] = useState(initial?.daysOfWeek || []);
+  const [teacherId, setTeacherId] = useState(initial?.teacherId || "");
+  const [substituteTeacherId, setSubstituteTeacherId] = useState(initial?.substituteTeacherId || "");
+
+  function toggleDay(d) { setDaysOfWeek(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]); }
+
+  function durationLabel() {
+    if (!startTime || !endTime) return "";
+    const [sh, sm] = startTime.split(":").map(Number);
+    const [eh, em] = endTime.split(":").map(Number);
+    let mins = (eh * 60 + em) - (sh * 60 + sm);
+    if (mins < 0) mins += 24 * 60;
+    return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  }
+
+  function submit() {
+    if (!batchName.trim() || !teacherId) return;
+    onSave({
+      ...initial, id: initial?.id, batchName: batchName.trim(), class: cls, subject,
+      startTime, endTime, duration: durationLabel(), daysOfWeek, teacherId,
+      substituteTeacherId: substituteTeacherId || null,
+    });
+  }
+
+  return (
+    <Modal title={initial ? "Edit Batch" : "Add Batch"} onClose={onClose}>
+      <Field label="Batch Name"><input className={inputCls} style={inputStyle} value={batchName} onChange={e => setBatchName(e.target.value)} placeholder="e.g. Morning Physics Batch" /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Class">
+          <select className={inputCls} style={inputStyle} value={cls} onChange={e => setCls(e.target.value)}>
+            {classes.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="Subject">
+          <select className={inputCls} style={inputStyle} value={subject} onChange={e => setSubject(e.target.value)}>
+            {subjectsList.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Start Time"><input type="time" className={inputCls} style={inputStyle} value={startTime} onChange={e => setStartTime(e.target.value)} /></Field>
+        <Field label="End Time"><input type="time" className={inputCls} style={inputStyle} value={endTime} onChange={e => setEndTime(e.target.value)} /></Field>
+      </div>
+      {startTime && endTime && <div className="text-[10px] text-[#9C8F6E] mb-3">Duration: {durationLabel()}</div>}
+      <Field label="Days of Week">
+        <div className="flex flex-wrap gap-2">
+          {DAYS_OF_WEEK.map(d => {
+            const active = daysOfWeek.includes(d);
+            return (
+              <button key={d} type="button" onClick={() => toggleDay(d)} className="px-2.5 py-1 text-xs rounded-sm border"
+                style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#4A4636", borderColor: active ? "#12312B" : "#D8CFB8" }}>{d}</button>
+            );
+          })}
+        </div>
+      </Field>
+      <Field label="Teacher">
+        <select className={inputCls} style={inputStyle} value={teacherId} onChange={e => setTeacherId(e.target.value)}>
+          <option value="">— Select Teacher —</option>
+          {teachers.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+      </Field>
+      <Field label="Substitute Teacher (optional)">
+        <select className={inputCls} style={inputStyle} value={substituteTeacherId} onChange={e => setSubstituteTeacherId(e.target.value)}>
+          <option value="">— None —</option>
+          {teachers.filter(t => t.id !== teacherId).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+      </Field>
+      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        {initial ? "Save Changes" : "Add Batch"}
+      </button>
+    </Modal>
+  );
+}
+
+function StaffTab({ staff, onAdd, onEdit, onRemove }) {
+  return (
+    <div>
+      <SectionHeader eyebrow="Register" title="Other Staff" action={
+        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Add Staff
+        </button>
+      } />
+      <Card>
+        {staff.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No staff registered yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Name", "Title", "Salary", "Status", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {staff.map(s => (
+                <tr key={s.id} className="ledger-row">
+                  <td className="px-4 py-2.5 font-medium">{s.name}<div className="text-[10px] text-[#9C8F6E] font-mono">{s.staffId}</div></td>
+                  <td className="px-4 py-2.5 text-xs">{s.title || "—"}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono">{fmtINR(s.salaryAmount || 0)}</td>
+                  <td className="px-4 py-2.5 text-xs"><Stamp text={(s.status || "active") === "active" ? "Active" : "Inactive"} tone={(s.status || "active") === "active" ? "paid" : "overdue"} /></td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onEdit(s)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
+                    <button onClick={() => onRemove(s.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function StaffFormModal({ initial, staff, onClose, onSave }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [title, setTitle] = useState(initial?.title || "");
+  const [dob, setDob] = useState(initial?.dob || "");
+  const [gender, setGender] = useState(initial?.gender || "");
+  const [phone, setPhone] = useState(initial?.phone || "");
+  const [guardianPhone, setGuardianPhone] = useState(initial?.guardianPhone || "");
+  const [address, setAddress] = useState(initial?.address || "");
+  const [aadharNumber, setAadharNumber] = useState(initial?.aadharNumber || "");
+  const [joiningDate, setJoiningDate] = useState(initial?.joiningDate || todayStr());
+  const [salaryAmount, setSalaryAmount] = useState(initial?.salaryAmount || "");
+  const [paymentMode, setPaymentMode] = useState(initial?.paymentMode || "Bank Transfer");
+  const [status, setStatus] = useState(initial?.status || "active");
+
+  const displayStaffId = initial?.staffId || useMemo(() => generateStaffId(staff), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function submit() {
+    if (!name.trim()) return;
+    const salaryHistory = [...(initial?.salaryHistory || [])];
+    const newAmt = Number(salaryAmount) || 0;
+    const prevAmt = initial ? (Number(initial.salaryAmount) || 0) : null;
+    if (prevAmt === null || newAmt !== prevAmt) {
+      salaryHistory.push({ date: todayStr(), amount: newAmt, remarks: initial ? "Salary updated" : "Initial salary" });
+    }
+    onSave({
+      ...initial, id: initial?.id, staffId: initial?.staffId || displayStaffId,
+      name: name.trim(), title: title.trim(), dob, gender, phone: phone.trim(),
+      guardianPhone: guardianPhone.trim(), address: address.trim(), aadharNumber: aadharNumber.trim(),
+      joiningDate: joiningDate || todayStr(), salaryAmount: newAmt, paymentMode, salaryHistory, status,
+    });
+  }
+
+  return (
+    <Modal title={initial ? "Edit Staff" : "Add Staff"} onClose={onClose}>
+      <div className="flex items-center justify-between mb-3 p-2 rounded bg-[#FAF6EC] border" style={{ borderColor: "#D8CFB8" }}>
+        <span className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono">Staff ID</span>
+        <span className="text-sm font-bold text-[#12312B]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{displayStaffId}{!initial && " (auto-assigned on save)"}</span>
+      </div>
+      <Field label="Full Name"><input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Ramesh Kumar" /></Field>
+      <Field label="Title / Designation"><input className={inputCls} style={inputStyle} value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Office Assistant, Peon, Accountant" /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Date of Birth"><input type="date" className={inputCls} style={inputStyle} value={dob} onChange={e => setDob(e.target.value)} /></Field>
+        <Field label="Gender">
+          <select className={inputCls} style={inputStyle} value={gender} onChange={e => setGender(e.target.value)}>
+            <option value="">— Select —</option><option value="Male">Male</option><option value="Female">Female</option>
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Phone"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} /></Field>
+        <Field label="Emergency Contact"><input className={inputCls} style={inputStyle} value={guardianPhone} onChange={e => setGuardianPhone(e.target.value)} /></Field>
+      </div>
+      <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} /></Field>
+      <Field label="Aadhar Number"><input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} maxLength={14} /></Field>
+      <Field label="Joining Date"><input type="date" className={inputCls} style={inputStyle} value={joiningDate} onChange={e => setJoiningDate(e.target.value)} /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Current Salary (₹)"><input type="number" className={inputCls} style={inputStyle} value={salaryAmount} onChange={e => setSalaryAmount(e.target.value)} placeholder="0" /></Field>
+        <Field label="Payment Mode">
+          <select className={inputCls} style={inputStyle} value={paymentMode} onChange={e => setPaymentMode(e.target.value)}>
+            {PAYMENT_MODES.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="Status">
+        <select className={inputCls} style={inputStyle} value={status} onChange={e => setStatus(e.target.value)}>
+          <option value="active">Active</option><option value="inactive">Inactive</option>
+        </select>
+      </Field>
+      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        {initial ? "Save Changes" : "Register Staff"}
+      </button>
+    </Modal>
+  );
+}
+
+// ============================================================================
+// ATTENDANCE (batch-wise) — new sidebar tab. Sub-tabs: Mark Attendance,
+// Test Marks. See UPDATE NOTES #23. Not to be confused with the older
+// per-student Attendance sub-tab inside Academic Monitoring.
+// ============================================================================
+const ATTENDANCE_MGMT_SUB_TABS = [
+  { id: "mark", label: "Mark Attendance", icon: ClipboardCheck },
+  { id: "tests", label: "Test Marks", icon: Award },
+];
+
+function AttendanceMgmtTab({ markAttendanceTabProps, testMarksTabProps }) {
+  const [subTab, setSubTab] = useState("mark");
+  return (
+    <div>
+      <SectionHeader eyebrow="Batch Tracking" title="Attendance" />
+      <div className="text-sm text-[#6E6650] mb-4">Mark daily batch-wise attendance and record test marks, both resolved from the Batch Schedule roster.</div>
+      <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
+        {ATTENDANCE_MGMT_SUB_TABS.map((st, i) => {
+          const Icon = st.icon;
+          const active = subTab === st.id;
+          return (
+            <button key={st.id} onClick={() => setSubTab(st.id)}
+              className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+              style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+              <Icon size={13} /> {st.label}
+            </button>
+          );
+        })}
+      </div>
+      {subTab === "mark" && <MarkAttendanceTab {...markAttendanceTabProps} />}
+      {subTab === "tests" && <TestMarksTab {...testMarksTabProps} />}
+    </div>
+  );
+}
+
+function MarkAttendanceTab({ classes, subjectsList, batchSchedule, students, attendanceLog, batchesForMonth, onSave }) {
+  const [date, setDate] = useState(todayStr());
+  const [cls, setCls] = useState("");
+  const [subject, setSubject] = useState("");
+  const [userOverrode, setUserOverrode] = useState(false);
+  const [statuses, setStatuses] = useState({}); // studentId -> "Present" | "Absent"
+  const [saved, setSaved] = useState(false);
+
+  // Autofill — only for today's date, only if exactly one Batch Schedule
+  // window matches right now, and only until the user manually overrides
+  // Class/Subject themselves.
+  useEffect(() => {
+    if (date !== todayStr() || userOverrode) return;
+    const match = findAutofillBatch(batchSchedule);
+    if (match) { setCls(match.class); setSubject(match.subject); }
+  }, [date, batchSchedule, userOverrode]);
+
+  const matchedBatch = useMemo(() => batchSchedule.find(b => b.class === cls && b.subject === subject), [batchSchedule, cls, subject]);
+  const roster = useMemo(() => matchedBatch ? studentsActiveInBatch(students, matchedBatch, date, batchesForMonth) : [], [matchedBatch, students, date, batchesForMonth]);
+
+  const docKey = `${date}_${cls}_${subject}`.replace(/[^a-zA-Z0-9_-]/g, "-");
+  const existingDoc = attendanceLog.find(a => a.id === docKey);
+
+  useEffect(() => {
+    setSaved(false);
+    if (!roster.length) { setStatuses({}); return; }
+    const map = {};
+    roster.forEach(s => {
+      const existingRecord = existingDoc?.records?.find(r => r.studentId === s.id);
+      map[s.id] = existingRecord ? existingRecord.status : "Absent"; // defaults to Absent
+    });
+    setStatuses(map);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docKey, roster.length]);
+
+  function toggle(studentId) {
+    setStatuses(prev => ({ ...prev, [studentId]: prev[studentId] === "Present" ? "Absent" : "Present" }));
+  }
+
+  function handleSave() {
+    const records = roster.map(s => ({ studentId: s.id, status: statuses[s.id] || "Absent" }));
+    onSave(date, cls, subject, matchedBatch?.id || null, records);
+    setSaved(true);
+  }
+
+  return (
+    <div>
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Date</div>
+            <input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => { setDate(e.target.value); setUserOverrode(false); }} />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={cls} onChange={e => { setCls(e.target.value); setUserOverrode(true); }}>
+              <option value="">— Select —</option>
+              {classes.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Subject</div>
+            <select className={inputCls} style={inputStyle} value={subject} onChange={e => { setSubject(e.target.value); setUserOverrode(true); }}>
+              <option value="">— Select —</option>
+              {subjectsList.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+        {date === todayStr() && matchedBatch && !userOverrode && (
+          <div className="text-[10px] text-[#3F6B52] mt-2 font-medium">Auto-filled from Batch Schedule: {matchedBatch.batchName}</div>
+        )}
+      </Card>
+
+      {cls && subject && (
+        <Card>
+          {!matchedBatch ? (
+            <div className="p-6 text-center text-sm text-[#9C8F6E]">No Batch Schedule entry found for Class {cls} · {subject}. Add one under Teacher Management → Batch Schedule.</div>
+          ) : roster.length === 0 ? (
+            <div className="p-6 text-center text-sm text-[#9C8F6E]">No students enrolled in this batch for {fmtDate(date)}.</div>
+          ) : (
+            <>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                    {["Student Name", "Student ID", "Status"].map(h => (
+                      <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {roster.map(s => {
+                    const present = statuses[s.id] === "Present";
+                    return (
+                      <tr key={s.id} className="ledger-row">
+                        <td className="px-4 py-2.5 font-medium">{s.name}</td>
+                        <td className="px-4 py-2.5 text-xs font-mono">{s.studentId}</td>
+                        <td className="px-4 py-2.5">
+                          <button onClick={() => toggle(s.id)} className="px-3 py-1 text-xs font-semibold rounded-sm"
+                            style={{ background: present ? "#3F6B52" : "#A63D2F", color: "#F4EFDE" }}>
+                            {present ? "Present" : "Absent"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div className="p-3.5 flex items-center justify-between">
+                <div className="text-[11px] text-[#9C8F6E]">{saved ? "Saved." : existingDoc ? "Editing a previously saved record." : "Not yet saved."}</div>
+                <button onClick={handleSave} className="px-4 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>Save Attendance</button>
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function TestMarksTab({ classes, subjectsList, batchSchedule, students, tests, batchesForMonth, onSave }) {
+  const [cls, setCls] = useState("");
+  const [subject, setSubject] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [maxMarks, setMaxMarks] = useState("");
+  const [description, setDescription] = useState("");
+  const [marks, setMarks] = useState({}); // studentId -> marks
+  const [loadedTestId, setLoadedTestId] = useState(null); // set once user picks an existing test to edit
+  const [saved, setSaved] = useState(false);
+
+  const testId = useMemo(() => {
+    if (!cls || !subject) return "";
+    return generateTestId(tests, cls, subject, date, loadedTestId);
+  }, [tests, cls, subject, date, loadedTestId]);
+
+  const matchedBatch = useMemo(() => batchSchedule.find(b => b.class === cls && b.subject === subject), [batchSchedule, cls, subject]);
+  const roster = useMemo(() => matchedBatch ? studentsActiveInBatch(students, matchedBatch, date, batchesForMonth) : [], [matchedBatch, students, date, batchesForMonth]);
+
+  const existingTestsForCombo = useMemo(() => tests.filter(t => String(t.class) === String(cls) && t.subject === subject), [tests, cls, subject]);
+
+  useEffect(() => {
+    setSaved(false);
+    setLoadedTestId(null);
+    if (!roster.length) { setMarks({}); return; }
+    const map = {};
+    roster.forEach(s => { map[s.id] = ""; });
+    setMarks(map);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cls, subject, roster.length]);
+
+  function loadExistingTest(t) {
+    setLoadedTestId(t.testId);
+    setDate(t.date);
+    setMaxMarks(t.maxMarks);
+    setDescription(t.description || "");
+    const map = {};
+    roster.forEach(s => {
+      const sc = (t.scores || []).find(x => x.studentId === s.id);
+      map[s.id] = sc ? sc.marks : "";
+    });
+    setMarks(map);
+  }
+
+  function handleSave() {
+    const scores = roster.map(s => ({ studentId: s.id, marks: marks[s.id] === "" ? "" : Number(marks[s.id]) }));
+    onSave({ testId, class: cls, subject, date, maxMarks: Number(maxMarks) || 0, description, scores });
+    setSaved(true);
+    setLoadedTestId(testId);
+  }
+
+  return (
+    <div>
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={cls} onChange={e => setCls(e.target.value)}>
+              <option value="">— Select —</option>
+              {classes.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Subject</div>
+            <select className={inputCls} style={inputStyle} value={subject} onChange={e => setSubject(e.target.value)}>
+              <option value="">— Select —</option>
+              {subjectsList.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Date</div>
+            <input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} />
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Maximum Marks</div>
+            <input type="number" className={inputCls} style={inputStyle} value={maxMarks} onChange={e => setMaxMarks(e.target.value)} placeholder="e.g. 50" />
+          </div>
+        </div>
+        {cls && subject && (
+          <div className="flex items-center justify-between mt-3 p-2 rounded bg-[#FAF6EC] border" style={{ borderColor: "#D8CFB8" }}>
+            <span className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono">Test ID</span>
+            <span className="text-sm font-bold text-[#12312B]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{testId}</span>
+          </div>
+        )}
+        <div className="mt-3"><Field label="Description"><input className={inputCls} style={inputStyle} value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. Unit Test 1 — Chapters 1-3" /></Field></div>
+        {existingTestsForCombo.length > 0 && (
+          <div className="text-[10px] text-[#9C8F6E]">
+            Existing tests for this class/subject: {existingTestsForCombo.map(t => (
+              <button key={t.testId} onClick={() => loadExistingTest(t)} className="underline text-[#12312B] mr-2">{t.testId} ({fmtDate(t.date)})</button>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {cls && subject && (
+        <Card>
+          {!matchedBatch ? (
+            <div className="p-6 text-center text-sm text-[#9C8F6E]">No Batch Schedule entry found for Class {cls} · {subject}. Add one under Teacher Management → Batch Schedule.</div>
+          ) : roster.length === 0 ? (
+            <div className="p-6 text-center text-sm text-[#9C8F6E]">No students active in this batch as of {fmtDate(date)}.</div>
+          ) : (
+            <>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                    {["Student Name", "Student ID", "Marks"].map(h => (
+                      <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {roster.map(s => (
+                    <tr key={s.id} className="ledger-row">
+                      <td className="px-4 py-2.5 font-medium">{s.name}</td>
+                      <td className="px-4 py-2.5 text-xs font-mono">{s.studentId}</td>
+                      <td className="px-4 py-2.5">
+                        <input type="number" className={inputCls + " w-28"} style={inputStyle} value={marks[s.id] ?? ""}
+                          onChange={e => setMarks(prev => ({ ...prev, [s.id]: e.target.value }))} placeholder="0" max={maxMarks || undefined} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="p-3.5 flex items-center justify-between">
+                <div className="text-[11px] text-[#9C8F6E]">{saved ? "Saved." : "Not yet saved."}</div>
+                <button onClick={handleSave} className="px-4 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>Save Test Marks</button>
+              </div>
+            </>
+          )}
+        </Card>
+      )}
     </div>
   );
 }
