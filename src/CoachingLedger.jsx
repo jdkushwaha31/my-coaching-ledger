@@ -339,6 +339,145 @@ import {
 //      on each row in the Teachers and Staff registers (see TeachersTab /
 //      StaffTab) — those two tables' existing columns and actions are
 //      otherwise untouched.
+//
+// Changes made in this eighth update pass:
+//  25. BUG FIX — advance settled from salary not showing correctly in the
+//      statement. Root causes, confirmed by walking every place the brief
+//      flagged:
+//        a) saveSalaryPayment()'s open-advances filter matched a person by
+//           personId ALONE, unlike SalaryFormModal's outstandingAdvance
+//           preview (which also checked personType) — a real scoping gap
+//           if a teacher and a staff member ever shared a personId.
+//           Fixed by factoring the "find this person's open advances
+//           oldest-first, and apply a deduction across them" logic into
+//           two shared helpers — openAdvancesFor() and
+//           allocateAdvancePayoff() (both scoped by personId AND
+//           personType) — now used by SalaryFormModal's live preview,
+//           saveSalaryPayment()'s settlement loop, AND
+//           saveAdvanceReturn()'s settlement loop (see #26 below), so all
+//           three can never drift apart again.
+//        b) Confirmed as the strongest suspect: bankingSalaryLines only
+//           ever created a line when netPaid > 0, so a salary payment
+//           whose advance deduction fully absorbed the base salary
+//           (netPaid = 0) left NO trace anywhere in the Banking Statement
+//           — the settlement was completely invisible even though it
+//           happened. Fixed with a new bankingSalarySettlementLines feed
+//           — one "Advance Settled via Salary <slipId>" line per advance
+//           actually settled by a payment (same per-advance breakdown
+//           PersonStatementModal's settlementLines already uses, so the
+//           two always agree), created regardless of whether netPaid
+//           ended up 0. These are zero-cash-impact — kind: "memo" — the
+//           cash already moved when the advance was originally given
+//           (bankingAdvanceLines); the running-balance pass in the
+//           Banking Ledger computation now has an explicit memo branch
+//           that leaves runningCash/runningBank untouched, so nothing is
+//           ever double-counted. The existing bankingSalaryLines DEBIT
+//           line is untouched — still only created when real cash/bank
+//           actually moved (netPaid > 0).
+//        c) PersonStatementModal itself was fine internally, but the
+//           call site that builds its salaryPayments/advances props
+//           (App's render of <PersonStatementModal .../>) had the exact
+//           same personId-only filtering gap as (a) above — fixed to
+//           filter by personId AND personType, so its
+//           settlementLines/runningOutstanding can never show stale or
+//           cross-person data.
+//        d) SalaryTab's "Advance Deducted" column and the printed salary
+//           slip were AUDITED and found already correct — saveSalaryPayment
+//           always overwrites the saved record's advanceDeducted with the
+//           actual (post-clamp) amount before saving, so both already
+//           read actualDeducted/settledAdvances, never the raw requested
+//           input, including on partial settlement. No change needed
+//           there; confirming it explicitly since the brief asked for it
+//           to be checked.
+//      Added two new banking line types to BANKING_TXN_TYPE_META —
+//      advance_settled and advance_returned (the latter for #26 below) —
+//      so both show a proper label/Stamp in the Banking Statement's Type
+//      column and filter dropdown instead of falling back to the raw
+//      type string.
+//  26. NEW FEATURE — Return Advance (see AdvanceReturnFormModal /
+//      saveAdvanceReturn): a teacher/staff member can now directly return
+//      advance money (e.g. handing back cash) outside of a salary run.
+//      A new "Return Advance" button sits immediately to the left of
+//      "Give Advance" in AdvanceTab's action row, same visual weight.
+//      The new modal mirrors AdvanceFormModal (PersonPicker, Amount,
+//      Date, Payment Mode, optional Remarks) and shows the selected
+//      person's current outstanding advance total, sourced from the same
+//      openAdvancesFor() helper #25 introduced. On save, the returned
+//      amount is walked across that person's open advances oldest-first
+//      via the shared allocateAdvancePayoff() helper (the exact same one
+//      saveSalaryPayment() uses), reducing outstandingAmount and flipping
+//      status to "settled" at zero — so a salary deduction and a direct
+//      return can never disagree about how a person's advances get paid
+//      down. Stored in a new "advanceReturns" Firestore collection (own
+//      generateAdvanceReturnId() sequence, "ADR<year>####", same
+//      mechanism as generateAdvanceId), synced live via onSnapshot and
+//      fully wired into Trash/Restore (new "Deleted Advance Returns"
+//      section in TrashTab, counted in trashCount), exactly like every
+//      other collection in this file. AdvanceTab also gained a second,
+//      read-only-style "Advance Returns" history table below the existing
+//      Advances table (Date / Person / Amount Returned / Mode / Remove),
+//      so the soft-delete action actually has a button to reach it from,
+//      same as every other collection's own tab. This is real money
+//      coming back IN — a new bankingAdvanceReturnLines feed (type:
+//      "advance_returned", kind: "credit") was added, folded into
+//      bankingFeedAsc alongside every other banking line type; Dashboard's
+//      "Net Liquidity" figures pick this up automatically since they're
+//      already sourced from the same running bankingCashBalance /
+//      bankingBankBalance the Banking tab computes (see UPDATE NOTES #2),
+//      no separate Dashboard change was needed. PersonStatementModal
+//      gained a matching new timeline line kind ("advance_returned"),
+//      reducing runningOutstanding at the correct chronological point via
+//      compareChrono, same as advance_settled lines. ASSUMPTION, same one
+//      UPDATE NOTES #24 already flags for salary payments: soft-deleting
+//      an advance return does not reverse the advance settlement it made
+//      — no existing soft-delete in this file reverses side effects
+//      either — flagging this in case the office wants that changed.
+//  27. NAVIGATION — the standalone "Attendance" sidebar tab (id
+//      "attendance", AttendanceMgmtTab / ATTENDANCE_MGMT_SUB_TABS, see
+//      UPDATE NOTES #23) has been removed. Its two sub-tabs,
+//      MarkAttendanceTab ("Mark Attendance") and TestMarksTab ("Test
+//      Marks") — both batch-wise, driven off batchSchedule/attendanceLog
+//      and batchSchedule/tests respectively — are now rendered directly
+//      inside Academic Monitoring instead, REPLACING the older per-student
+//      "Attendance" and "Test Scores" sub-tabs that used to live there
+//      (AttendanceTab / TestScoresTab, reading the older "attendance" /
+//      "testScores" collections). ACADEMIC_MONITORING_SUB_TABS now reads,
+//      left to right: Mark Attendance → Test Marks → Behaviour & Conduct
+//      → Performance Report, and AcademicMonitoringTab's subTab now
+//      defaults to "mark-attendance" (the same role the old "attendance"
+//      id played as the default). AttendanceMgmtTab and
+//      ATTENDANCE_MGMT_SUB_TABS themselves have been deleted as dead code
+//      now that nothing renders them; MarkAttendanceTab and TestMarksTab
+//      are untouched, just relocated to render directly inside
+//      AcademicMonitoringTab with the same props they always took.
+//      IMPORTANT, called out per the brief's request: AttendanceTab,
+//      TestScoresTab, the "attendance" / "testScores" Firestore
+//      collections, their onSnapshot listeners, and their Trash/Restore
+//      support (softDeleteAttendance / softDeleteTestScore / restore /
+//      permanent-delete, the "Deleted Attendance" / "Deleted Test Scores"
+//      sections in TrashTab) are all completely UNTOUCHED — nothing was
+//      deleted there, exactly as instructed, since PerformanceReportTab
+//      (the "Performance Report" sub-tab) still reads attendance/
+//      testScores props sourced from those same old collections. This
+//      DOES create the visible mismatch the brief asked to be flagged
+//      rather than silently resolved: going forward, new attendance/test
+//      data entered through the visible "Mark Attendance" / "Test Marks"
+//      sub-tabs is written to the newer attendanceLog/tests collections
+//      (see UPDATE NOTES #23), NOT to the older attendance/testScores
+//      collections Performance Report reads from — so Performance
+//      Report's attendance % and test score history will progressively
+//      diverge from what "Mark Attendance"/"Test Marks" show, since
+//      nothing in the visible UI writes to attendance/testScores anymore
+//      (their only entry points, the old AttendanceTab/TestScoresTab
+//      "Add"/"Edit" buttons, are no longer rendered anywhere — the
+//      AttendanceFormModal/TestScoreFormModal components, their
+//      onAdd/onEdit/onRemove handlers, and their top-level state are ALL
+//      still fully intact and unchanged, just currently unreachable from
+//      any button). Please confirm whether Performance Report should
+//      instead be pointed at attendanceLog/tests, or whether the old
+//      Attendance/Test Scores entry forms should be restored somewhere so
+//      the two stay in sync — left as-is pending your call, per the
+//      brief's explicit instruction not to silently pick a side.
 // ============================================================================
 
 // Admin Access Password
@@ -519,6 +658,60 @@ function generateAdvanceId(allAdvances) {
     }
   });
   return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+// Same mechanism again — Advance Return IDs, own prefix/sequence. See
+// UPDATE NOTES entry for the "Return Advance" feature.
+function generateAdvanceReturnId(allAdvanceReturns) {
+  const year = new Date().getFullYear();
+  const prefix = `ADR${year}`;
+  let max = 0;
+  (allAdvanceReturns || []).forEach(r => {
+    if (r && r.returnId && r.returnId.startsWith(prefix)) {
+      const n = parseInt(r.returnId.slice(prefix.length), 10);
+      if (!isNaN(n) && n > max) max = n;
+    }
+  });
+  return `${prefix}${String(max + 1).padStart(4, "0")}`;
+}
+// Returns one person's OPEN advances (oldest-first), scoped by BOTH
+// personId and personType — a person's advance history must never be
+// matched by personId alone, since a teacher and a staff member could in
+// principle share an id space collision. Shared by the Salary form's live
+// outstanding-total preview, saveSalaryPayment()'s settlement loop, and
+// saveAdvanceReturn()'s settlement loop, so all three can never disagree
+// about which records count as "this person's open advances".
+function openAdvancesFor(advances, personId, personType) {
+  return (advances || [])
+    .filter(a => !a.deleted && a.personId === personId && a.personType === personType && (a.status || "open") === "open" && Number(a.outstandingAmount) > 0)
+    .sort((a, b) => compareChrono(a, b, 1));
+}
+// Walks a person's open advances oldest-first, applying `amount` across
+// them — a deduction taken from a salary payment, or a direct cash return
+// via the "Return Advance" form — and returns the per-advance breakdown
+// (which advance, how much of it was applied, its new outstanding/status)
+// plus how much of the requested amount actually got applied (in case more
+// was requested than was actually outstanding). This does NOT write
+// anything to Firestore itself — callers apply `applied[].newOutstanding` /
+// `newStatus` via their own setDoc calls, and use the same breakdown to
+// build their own settlement record (settledAdvances on a salary payment,
+// or on an advance return). Used by both saveSalaryPayment() and
+// saveAdvanceReturn() so the two settlement paths can never drift apart.
+function allocateAdvancePayoff(advances, personId, personType, amount) {
+  let remaining = round2(Number(amount) || 0);
+  const applied = [];
+  const openAdvances = openAdvancesFor(advances, personId, personType);
+  for (const adv of openAdvances) {
+    if (remaining <= 0) break;
+    const amt = Math.min(remaining, Number(adv.outstandingAmount) || 0);
+    if (amt <= 0) continue;
+    const newOutstanding = round2((Number(adv.outstandingAmount) || 0) - amt);
+    applied.push({
+      advanceId: adv.id, advanceRefId: adv.advanceId, date: adv.date, amount: round2(amt),
+      newOutstanding, newStatus: newOutstanding <= 0 ? "settled" : "open",
+    });
+    remaining = round2(remaining - amt);
+  }
+  return { applied, actualApplied: round2((Number(amount) || 0) - remaining), remaining };
 }
 // Merges Teachers and Staff — two separate Firestore collections today —
 // into one flat, selectable list for the Salary/Advance pickers, tagging
@@ -879,6 +1072,11 @@ export default function CoachingLedger() {
   // soft-delete pattern as teachers/staff above (see UPDATE NOTES #24).
   const [salaryPayments, setSalaryPayments] = useState([]);
   const [advances, setAdvances] = useState([]);
+  // Advance Returns — a teacher/staff member directly handing back advance
+  // money outside of a salary run. Same live-sync + soft-delete pattern as
+  // every other collection above. See the new UPDATE NOTES entry for the
+  // "Return Advance" feature.
+  const [advanceReturns, setAdvanceReturns] = useState([]);
 
   const [showStudentForm, setShowStudentForm] = useState(false);
   const [showDepositForm, setShowDepositForm] = useState(false);
@@ -919,6 +1117,7 @@ export default function CoachingLedger() {
   const [showSalaryForm, setShowSalaryForm] = useState(false);
   const [salarySlipData, setSalarySlipData] = useState(null); // salaryPayments record to print/reprint
   const [showAdvanceForm, setShowAdvanceForm] = useState(false);
+  const [showAdvanceReturnForm, setShowAdvanceReturnForm] = useState(false);
   const [showPersonStatement, setShowPersonStatement] = useState(null); // { personId, personType }
 
   const handleLogin = (e) => {
@@ -1019,6 +1218,11 @@ export default function CoachingLedger() {
       const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
       setAdvances(data);
     });
+    // Advance Returns — same live-sync pattern as every collection above.
+    const unsubAdvanceReturns = onSnapshot(collection(db, "advanceReturns"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, deleted: false, ...doc.data() }));
+      setAdvanceReturns(data);
+    });
     const unsubBatchSchedule = onSnapshot(collection(db, "batchSchedule"), (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setBatchSchedule(data);
@@ -1074,7 +1278,7 @@ export default function CoachingLedger() {
       unsubStudents(); unsubDeposits(); unsubCharges(); unsubExpenses(); unsubBankTxns();
       unsubCreditTxns(); unsubInterestPayments(); unsubNotes();
       unsubAttendance(); unsubTestScores(); unsubBehaviourNotes();
-      unsubTeachers(); unsubStaff(); unsubSalaryPayments(); unsubAdvances(); unsubBatchSchedule(); unsubAttendanceLog(); unsubTests();
+      unsubTeachers(); unsubStaff(); unsubSalaryPayments(); unsubAdvances(); unsubAdvanceReturns(); unsubBatchSchedule(); unsubAttendanceLog(); unsubTests();
       unsubFee(); unsubClasses(); unsubSubjects(); unsubStreams();
     };
   }, [isAuthenticated]);
@@ -1255,6 +1459,9 @@ export default function CoachingLedger() {
   const trashedSalaryPayments = salaryPayments.filter(p => p.deleted);
   const visibleAdvances = advances.filter(a => !a.deleted);
   const trashedAdvances = advances.filter(a => a.deleted);
+  // Advance Returns — same visible/trashed split as every other collection.
+  const visibleAdvanceReturns = advanceReturns.filter(r => !r.deleted);
+  const trashedAdvanceReturns = advanceReturns.filter(r => r.deleted);
 
   const totalWithdrawals = round2(visibleBankTxns.filter(t => t.type === "withdrawal").reduce((a, t) => a + Number(t.amount || 0), 0));
   const totalBankDeposits = round2(visibleBankTxns.filter(t => t.type === "deposit").reduce((a, t) => a + Number(t.amount || 0), 0));
@@ -1333,8 +1540,10 @@ export default function CoachingLedger() {
   // Salary payments — money actually handed over right now (baseAmount
   // minus whatever was already deducted as an advance settlement). If the
   // full base salary was absorbed by an advance deduction, netPaid is 0
-  // and no cash/bank actually moved, so no banking line is created for
-  // that payment (see UPDATE NOTES #24).
+  // and no cash/bank actually moved, so no DEBIT line is created for that
+  // payment (see UPDATE NOTES #24) — but see bankingSalarySettlementLines
+  // just below, which makes sure the settlement itself is still visible
+  // even then (see UPDATE NOTES entry for the advance-settlement fix).
   const bankingSalaryLines = visibleSalaryPayments.filter(p => Number(p.netPaid) > 0).map(p => {
     const isCash = (p.mode || "Cash") === "Cash";
     return {
@@ -1345,6 +1554,27 @@ export default function CoachingLedger() {
       remarks: p.remarks || "", amount: round2(p.netPaid), mode: p.mode || "Cash",
     };
   });
+
+  // BUG FIX — a salary payment that settled an advance (whether or not it
+  // left any cash actually changing hands, i.e. even when netPaid is 0 and
+  // no bankingSalaryLines debit is created above) previously left no trace
+  // at all in the Banking Statement. One "memo" line per advance actually
+  // settled by a salary payment (matches PersonStatementModal's
+  // settlementLines breakdown exactly, so the two always agree), kind:
+  // "memo" — the cash movement already happened when the advance was
+  // originally given (bankingAdvanceLines), so this line must NOT move
+  // runningCash/runningBank again; see the memo branch in the running-
+  // balance pass below. See UPDATE NOTES entry for the advance-settlement
+  // fix.
+  const bankingSalarySettlementLines = visibleSalaryPayments.flatMap(p =>
+    (p.settledAdvances || []).map((s, idx) => ({
+      id: `${p.id}-salary-settle-${idx}`, refId: p.slipId, source: "salary", salaryPaymentId: p.id,
+      type: "advance_settled", kind: "memo", bucket: (p.mode || "Cash") === "Cash" ? "cash" : "bank",
+      date: p.date || todayStr(), createdAt: p.createdAt || "",
+      label: `Advance Settled via Salary ${p.slipId}${s.advanceRefId ? ` (${s.advanceRefId})` : ""} — ${fmtINR(s.amount)}`,
+      remarks: p.remarks || "", amount: round2(s.amount), mode: p.mode || "Cash",
+    }))
+  );
 
   // Advances given — always money OUT, the moment the advance is given.
   const bankingAdvanceLines = visibleAdvances.map(a => {
@@ -1358,10 +1588,24 @@ export default function CoachingLedger() {
     };
   });
 
+  // Advances returned — real money coming back IN, the opposite direction
+  // of bankingAdvanceLines above. See UPDATE NOTES entry for the new
+  // "Return Advance" feature.
+  const bankingAdvanceReturnLines = visibleAdvanceReturns.map(r => {
+    const isCash = (r.mode || "Cash") === "Cash";
+    return {
+      id: `${r.id}-advreturn`, refId: r.returnId, source: "advanceReturn", advanceReturnId: r.id,
+      type: "advance_returned", kind: "credit", bucket: isCash ? "cash" : "bank",
+      date: r.date || todayStr(), createdAt: r.createdAt || "",
+      label: `Advance Returned — ${r.personName || "Unknown"}`,
+      remarks: r.remarks || "", amount: round2(r.amount), mode: r.mode || "Cash",
+    };
+  });
+
   // Ascending pass (oldest first) to compute the running Cash / Bank balance
   // at each line — this is what makes "two balances with every transaction"
   // work correctly regardless of what order the statement is displayed in.
-  const bankingFeedAsc = [...bankingDepositLines, ...bankingExpenseLines, ...bankingTransferLines, ...bankingCreditLines, ...bankingInterestLines, ...bankingSalaryLines, ...bankingAdvanceLines]
+  const bankingFeedAsc = [...bankingDepositLines, ...bankingExpenseLines, ...bankingTransferLines, ...bankingCreditLines, ...bankingInterestLines, ...bankingSalaryLines, ...bankingSalarySettlementLines, ...bankingAdvanceLines, ...bankingAdvanceReturnLines]
     .sort((a, b) => compareChrono(a, b, 1) || (a.kind === "credit" ? -1 : 1));
 
   let runningCash = 0, runningBank = 0;
@@ -1369,6 +1613,11 @@ export default function CoachingLedger() {
     if (t.kind === "transfer") {
       runningCash = round2(runningCash + t.cashDelta);
       runningBank = round2(runningBank + t.bankDelta);
+    } else if (t.kind === "memo") {
+      // Zero-cash-impact line (e.g. an advance settled via salary) — the
+      // cash movement already happened elsewhere, so runningCash/
+      // runningBank are deliberately left untouched here; the line still
+      // shows the same running balance value in and out.
     } else if (t.bucket === "cash") {
       runningCash = round2(runningCash + (t.kind === "credit" ? t.amount : -t.amount));
     } else {
@@ -1610,30 +1859,27 @@ export default function CoachingLedger() {
   // requested deduction is exhausted — see UPDATE NOTES #24. netPaid is
   // what actually leaves Cash/Bank right now (baseAmount minus whatever
   // was deducted), which is what bankingSalaryLines reads.
+  // BUG FIX — this used to filter open advances by personId alone, not
+  // personType, unlike SalaryFormModal's outstandingAdvance preview (which
+  // did check personType) — a correctness gap if a teacher and a staff
+  // member ever shared a personId. Now uses the shared
+  // allocateAdvancePayoff() helper (scoped by personId AND personType),
+  // the same helper SalaryFormModal's preview and saveAdvanceReturn() use,
+  // so all three can never drift apart again. See UPDATE NOTES entry for
+  // the advance-settlement fix.
   async function saveSalaryPayment(data) {
     const id = uid();
     const slipId = generateSalaryId(salaryPayments);
-    let remainingToDeduct = round2(Number(data.advanceDeducted) || 0);
-    const settledAdvances = [];
-    if (remainingToDeduct > 0) {
-      const openAdvances = advances
-        .filter(a => !a.deleted && a.personId === data.personId && (a.status || "open") === "open" && Number(a.outstandingAmount) > 0)
-        .sort((a, b) => compareChrono(a, b, 1));
-      for (const adv of openAdvances) {
-        if (remainingToDeduct <= 0) break;
-        const applied = Math.min(remainingToDeduct, Number(adv.outstandingAmount) || 0);
-        if (applied <= 0) continue;
-        const newOutstanding = round2((Number(adv.outstandingAmount) || 0) - applied);
-        await setDoc(doc(db, "advances", adv.id), {
-          ...adv, outstandingAmount: newOutstanding, status: newOutstanding <= 0 ? "settled" : "open",
-        });
-        settledAdvances.push({ advanceId: adv.id, advanceRefId: adv.advanceId, date: adv.date, amount: round2(applied) });
-        remainingToDeduct = round2(remainingToDeduct - applied);
-      }
+    const { applied, actualApplied } = allocateAdvancePayoff(advances, data.personId, data.personType, data.advanceDeducted);
+    for (const a of applied) {
+      const adv = advances.find(x => x.id === a.advanceId);
+      if (!adv) continue;
+      await setDoc(doc(db, "advances", a.advanceId), { ...adv, outstandingAmount: a.newOutstanding, status: a.newStatus });
     }
+    const settledAdvances = applied.map(a => ({ advanceId: a.advanceId, advanceRefId: a.advanceRefId, date: a.date, amount: a.amount }));
     // If the office asked to deduct more than is actually outstanding,
     // only what was really available gets applied.
-    const actualDeducted = round2((Number(data.advanceDeducted) || 0) - remainingToDeduct);
+    const actualDeducted = actualApplied;
     const netPaid = round2((Number(data.baseAmount) || 0) - actualDeducted);
     const record = {
       ...data, id, slipId, advanceDeducted: actualDeducted, netPaid, settledAdvances,
@@ -1684,6 +1930,50 @@ export default function CoachingLedger() {
   async function permanentlyDeleteAdvance(id) {
     if (!window.confirm("Permanently delete this advance? This cannot be undone.")) return;
     await deleteDoc(doc(db, "advances", id));
+  }
+
+  // ---- Advance Return ----
+  // Records a teacher/staff member directly returning advance money (e.g.
+  // handing back cash) outside of a salary run. Applies the returned
+  // amount across that person's open advances oldest-first, using the
+  // exact same allocateAdvancePayoff() helper saveSalaryPayment() uses, so
+  // the two settlement paths can never disagree. Real money coming back
+  // IN — see bankingAdvanceReturnLines (kind: "credit"), the opposite
+  // direction of bankingAdvanceLines. ASSUMPTION, same as UPDATE NOTES #24
+  // already flags for salary payments: soft-deleting an advance return does
+  // not reverse the advance settlement it made — no existing soft-delete in
+  // this file reverses side effects either.
+  async function saveAdvanceReturn(data) {
+    const id = uid();
+    const returnId = generateAdvanceReturnId(advanceReturns);
+    const amount = round2(Number(data.amount) || 0);
+    const { applied } = allocateAdvancePayoff(advances, data.personId, data.personType, amount);
+    for (const a of applied) {
+      const adv = advances.find(x => x.id === a.advanceId);
+      if (!adv) continue;
+      await setDoc(doc(db, "advances", a.advanceId), { ...adv, outstandingAmount: a.newOutstanding, status: a.newStatus });
+    }
+    const settledAdvances = applied.map(a => ({ advanceId: a.advanceId, advanceRefId: a.advanceRefId, date: a.date, amount: a.amount }));
+    await setDoc(doc(db, "advanceReturns", id), {
+      ...data, id, returnId, amount, settledAdvances,
+      deleted: false, createdAt: nowStamp(),
+    });
+    setShowAdvanceReturnForm(false);
+  }
+  async function softDeleteAdvanceReturn(id) {
+    const r = advanceReturns.find(x => x.id === id);
+    if (!r) return;
+    if (!window.confirm("Move this advance return to Trash? It can be restored later.")) return;
+    await setDoc(doc(db, "advanceReturns", id), { ...r, deleted: true, deletedAt: todayStr() });
+  }
+  async function restoreAdvanceReturn(id) {
+    const r = advanceReturns.find(x => x.id === id);
+    if (!r) return;
+    await setDoc(doc(db, "advanceReturns", id), { ...r, deleted: false, deletedAt: null });
+  }
+  async function permanentlyDeleteAdvanceReturn(id) {
+    if (!window.confirm("Permanently delete this advance return? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "advanceReturns", id));
   }
 
   // ---- Batch Schedule ----
@@ -2041,20 +2331,22 @@ export default function CoachingLedger() {
     // and the printable Performance Report, grouped under one sidebar
     // entry with its own internal pill row (see AcademicMonitoringTab /
     // ACADEMIC_MONITORING_SUB_TABS), same pattern as Student Management.
+    // Attendance (batch-wise, roster + autofill) and Test Marks used to be
+    // their own top-level "Attendance" sidebar entry (AttendanceMgmtTab /
+    // ATTENDANCE_MGMT_SUB_TABS, see UPDATE NOTES #23). That standalone tab
+    // has been removed and folded into Academic Monitoring below as its
+    // "Mark Attendance" / "Test Marks" sub-tabs, replacing the older
+    // per-student Attendance / Test Scores sub-tabs there — see the new
+    // UPDATE NOTES entry for this change and AcademicMonitoringTab /
+    // ACADEMIC_MONITORING_SUB_TABS.
     { id: "academic-monitoring", label: "Academic Monitoring", icon: GraduationCap },
-    // Attendance (batch-wise, roster + autofill) and Test Marks, grouped
-    // under one sidebar entry with its own internal pill row — see
-    // AttendanceMgmtTab / ATTENDANCE_MGMT_SUB_TABS and UPDATE NOTES #23.
-    // Not to be confused with the older per-student Attendance sub-tab
-    // inside Academic Monitoring above, which is untouched.
-    { id: "attendance", label: "Attendance", icon: ClipboardList },
     { id: "expenses", label: "Expenses Log", icon: CreditCard },
     { id: "banking", label: "Banking", icon: Landmark },
     { id: "notes", label: "Notes", icon: BookOpen },
     { id: "trash", label: "Trash / Restore", icon: Archive },
   ];
 
-  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length + trashedAttendance.length + trashedTestScores.length + trashedBehaviourNotes.length + trashedTeachers.length + trashedStaff.length + trashedSalaryPayments.length + trashedAdvances.length;
+  const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length + trashedAttendance.length + trashedTestScores.length + trashedBehaviourNotes.length + trashedTeachers.length + trashedStaff.length + trashedSalaryPayments.length + trashedAdvances.length + trashedAdvanceReturns.length;
 
   return (
     <div className="min-h-screen flex" style={{ background: "#FAF6EC", fontFamily: "'Inter', sans-serif", color: "#26231D" }}>
@@ -2184,6 +2476,10 @@ export default function CoachingLedger() {
             onAddBehaviour={() => { setEditingBehaviour(null); setShowBehaviourForm(true); }}
             onEditBehaviour={(b) => { setEditingBehaviour(b); setShowBehaviourForm(true); }}
             onRemoveBehaviour={softDeleteBehaviourNote}
+            subjectsList={subjectsList} batchSchedule={batchSchedule}
+            attendanceLog={attendanceLog} batchesForMonth={batchesForMonth}
+            onSaveAttendanceLog={saveAttendanceLog}
+            tests={tests} onSaveTest={saveTest}
           />
         )}
         {tab === "teacher-management" && (
@@ -2219,22 +2515,12 @@ export default function CoachingLedger() {
               onStatement: (personId, personType) => setShowPersonStatement({ personId, personType }),
             }}
             advanceTabProps={{
-              advances: visibleAdvances, persons: mergeStaffAndTeachers(visibleTeachers, visibleStaff),
+              advances: visibleAdvances, advanceReturns: visibleAdvanceReturns, persons: mergeStaffAndTeachers(visibleTeachers, visibleStaff),
               onAdd: () => setShowAdvanceForm(true),
+              onReturn: () => setShowAdvanceReturnForm(true),
               onRemove: softDeleteAdvance,
+              onRemoveReturn: softDeleteAdvanceReturn,
               onStatement: (personId, personType) => setShowPersonStatement({ personId, personType }),
-            }}
-          />
-        )}
-        {tab === "attendance" && (
-          <AttendanceMgmtTab
-            markAttendanceTabProps={{
-              classes, subjectsList, batchSchedule, students: visibleStudents,
-              attendanceLog, batchesForMonth, onSave: saveAttendanceLog,
-            }}
-            testMarksTabProps={{
-              classes, subjectsList, batchSchedule, students: visibleStudents,
-              tests, batchesForMonth, onSave: saveTest,
             }}
           />
         )}
@@ -2293,7 +2579,7 @@ export default function CoachingLedger() {
             trashedBankTxns={trashedBankTxns} trashedCreditTxns={trashedCreditTxns} trashedInterestPayments={trashedInterestPayments}
             trashedAttendance={trashedAttendance} trashedTestScores={trashedTestScores} trashedBehaviourNotes={trashedBehaviourNotes}
             trashedTeachers={trashedTeachers} trashedStaff={trashedStaff}
-            trashedSalaryPayments={trashedSalaryPayments} trashedAdvances={trashedAdvances}
+            trashedSalaryPayments={trashedSalaryPayments} trashedAdvances={trashedAdvances} trashedAdvanceReturns={trashedAdvanceReturns}
             studentById={studentById}
             onRestoreStudent={restoreStudent} onDeleteStudent={permanentlyDeleteStudent}
             onRestoreDeposit={restoreDeposit} onDeleteDeposit={permanentlyDeleteDeposit}
@@ -2309,6 +2595,7 @@ export default function CoachingLedger() {
             onRestoreStaff={restoreStaffMember} onDeleteStaff={permanentlyDeleteStaffMember}
             onRestoreSalaryPayment={restoreSalaryPayment} onDeleteSalaryPayment={permanentlyDeleteSalaryPayment}
             onRestoreAdvance={restoreAdvance} onDeleteAdvance={permanentlyDeleteAdvance}
+            onRestoreAdvanceReturn={restoreAdvanceReturn} onDeleteAdvanceReturn={permanentlyDeleteAdvanceReturn}
           />
         )}
       </main>
@@ -2390,12 +2677,17 @@ export default function CoachingLedger() {
         <AdvanceFormModal persons={mergeStaffAndTeachers(visibleTeachers, visibleStaff)}
           onClose={() => setShowAdvanceForm(false)} onSave={saveAdvance} />
       )}
+      {showAdvanceReturnForm && (
+        <AdvanceReturnFormModal persons={mergeStaffAndTeachers(visibleTeachers, visibleStaff)} advances={visibleAdvances}
+          onClose={() => setShowAdvanceReturnForm(false)} onSave={saveAdvanceReturn} />
+      )}
       {showPersonStatement && (
         <PersonStatementModal
           person={showPersonStatement.personType === "teacher" ? teacherById[showPersonStatement.personId] : staffById[showPersonStatement.personId]}
           personType={showPersonStatement.personType}
-          salaryPayments={visibleSalaryPayments.filter(p => p.personId === showPersonStatement.personId)}
-          advances={visibleAdvances.filter(a => a.personId === showPersonStatement.personId)}
+          salaryPayments={visibleSalaryPayments.filter(p => p.personId === showPersonStatement.personId && p.personType === showPersonStatement.personType)}
+          advances={visibleAdvances.filter(a => a.personId === showPersonStatement.personId && a.personType === showPersonStatement.personType)}
+          advanceReturns={visibleAdvanceReturns.filter(r => r.personId === showPersonStatement.personId && r.personType === showPersonStatement.personType)}
           onClose={() => setShowPersonStatement(null)}
           onViewSlip={(p) => setSalarySlipData(p)}
         />
@@ -3395,20 +3687,29 @@ function ChargesTab({ chargeLines, students, classes, onAdd, onRemove, onOpenRec
 // its own Firestore collection (attendance / testScores / behaviourNotes),
 // with full soft-delete + Trash/Restore support wired into TrashTab.
 // ============================================================================
+// UPDATE — "Attendance" and "Test Scores" used to be the older per-student
+// sub-tabs here (AttendanceTab / TestScoresTab, reading the "attendance" /
+// "testScores" collections). They've been replaced by "Mark Attendance"
+// and "Test Marks" — the same batch-wise, roster-driven components
+// (MarkAttendanceTab / TestMarksTab) that used to live under their own
+// standalone "Attendance" sidebar tab (removed — see the new UPDATE NOTES
+// entry). AttendanceTab / TestScoresTab and the "attendance" / "testScores"
+// collections themselves are untouched below — PerformanceReportTab still
+// reads from them, see the note on that component.
 const ACADEMIC_MONITORING_SUB_TABS = [
-  { id: "attendance", label: "Attendance", icon: CalendarCheck },
-  { id: "test-scores", label: "Test Scores", icon: ClipboardCheck },
+  { id: "mark-attendance", label: "Mark Attendance", icon: ClipboardCheck },
+  { id: "test-marks", label: "Test Marks", icon: Award },
   { id: "behaviour", label: "Behaviour & Conduct", icon: MessageSquare },
   { id: "report", label: "Performance Report", icon: FileBarChart2 },
 ];
 
 function AcademicMonitoringTab({
   students, classes, attendance, testScores, behaviourNotes,
-  onAddAttendance, onEditAttendance, onRemoveAttendance,
-  onAddTestScore, onEditTestScore, onRemoveTestScore,
   onAddBehaviour, onEditBehaviour, onRemoveBehaviour,
+  subjectsList, batchSchedule, attendanceLog, batchesForMonth, onSaveAttendanceLog,
+  tests, onSaveTest,
 }) {
-  const [subTab, setSubTab] = useState("attendance");
+  const [subTab, setSubTab] = useState("mark-attendance");
 
   return (
     <div>
@@ -3430,13 +3731,13 @@ function AcademicMonitoringTab({
         })}
       </div>
 
-      {subTab === "attendance" && (
-        <AttendanceTab students={students} classes={classes} attendance={attendance}
-          onAdd={onAddAttendance} onEdit={onEditAttendance} onRemove={onRemoveAttendance} />
+      {subTab === "mark-attendance" && (
+        <MarkAttendanceTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
+          attendanceLog={attendanceLog} batchesForMonth={batchesForMonth} onSave={onSaveAttendanceLog} />
       )}
-      {subTab === "test-scores" && (
-        <TestScoresTab students={students} classes={classes} testScores={testScores}
-          onAdd={onAddTestScore} onEdit={onEditTestScore} onRemove={onRemoveTestScore} />
+      {subTab === "test-marks" && (
+        <TestMarksTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
+          tests={tests} batchesForMonth={batchesForMonth} onSave={onSaveTest} />
       )}
       {subTab === "behaviour" && (
         <BehaviourTab students={students} classes={classes} behaviourNotes={behaviourNotes}
@@ -4413,6 +4714,10 @@ const BANKING_TXN_TYPE_META = {
   credit_taken: { label: "Credit Taken (Borrowed)", tone: "carried" },
   credit_given: { label: "Credit Given (Lent)", tone: "overdue" },
   interest_payment: { label: "Interest Paid", tone: "break" },
+  // New types added for the advance-settlement fix / Return Advance
+  // feature — see the relevant UPDATE NOTES entries.
+  advance_settled: { label: "Advance Settled (via Salary)", tone: "paid" },
+  advance_returned: { label: "Advance Returned", tone: "paid" },
 };
 
 // The four Banking sub-tabs — Banking Statement, Cash ⇄ Bank Transfer
@@ -5101,7 +5406,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
   );
 }
 
-function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, trashedCreditTxns, trashedInterestPayments, trashedAttendance, trashedTestScores, trashedBehaviourNotes, trashedTeachers, trashedStaff, trashedSalaryPayments, trashedAdvances, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn, onRestoreCredit, onDeleteCredit, onRestoreInterest, onDeleteInterest, onRestoreAttendance, onDeleteAttendance, onRestoreTestScore, onDeleteTestScore, onRestoreBehaviour, onDeleteBehaviour, onRestoreTeacher, onDeleteTeacher, onRestoreStaff, onDeleteStaff, onRestoreSalaryPayment, onDeleteSalaryPayment, onRestoreAdvance, onDeleteAdvance }) {
+function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExpenses, trashedBankTxns, trashedCreditTxns, trashedInterestPayments, trashedAttendance, trashedTestScores, trashedBehaviourNotes, trashedTeachers, trashedStaff, trashedSalaryPayments, trashedAdvances, trashedAdvanceReturns, studentById, onRestoreStudent, onDeleteStudent, onRestoreDeposit, onDeleteDeposit, onRestoreCharge, onDeleteCharge, onRestoreExpense, onDeleteExpense, onRestoreBankTxn, onDeleteBankTxn, onRestoreCredit, onDeleteCredit, onRestoreInterest, onDeleteInterest, onRestoreAttendance, onDeleteAttendance, onRestoreTestScore, onDeleteTestScore, onRestoreBehaviour, onDeleteBehaviour, onRestoreTeacher, onDeleteTeacher, onRestoreStaff, onDeleteStaff, onRestoreSalaryPayment, onDeleteSalaryPayment, onRestoreAdvance, onDeleteAdvance, onRestoreAdvanceReturn, onDeleteAdvanceReturn }) {
   return (
     <div>
       <SectionHeader eyebrow="Recycle Bin" title="Trash / Restore" />
@@ -5433,7 +5738,7 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
       </Card>
 
       <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Advances</span></div>
-      <Card>
+      <Card className="mb-6">
         {(!trashedAdvances || trashedAdvances.length === 0) ? (
           <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted advances.</div>
         ) : (
@@ -5448,6 +5753,30 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
                   <td className="px-4 py-2.5 text-right whitespace-nowrap">
                     <button onClick={() => onRestoreAdvance(a.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
                     <button onClick={() => onDeleteAdvance(a.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      <div className="mb-3 mt-6" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Deleted Advance Returns</span></div>
+      <Card>
+        {(!trashedAdvanceReturns || trashedAdvanceReturns.length === 0) ? (
+          <div className="p-6 text-center text-sm text-[#9C8F6E]">No deleted advance returns.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <tbody>
+              {trashedAdvanceReturns.map(r => (
+                <tr key={r.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(r.date)}</td>
+                  <td className="px-4 py-2.5 font-medium">{r.personName} <span className="text-[10px] text-[#9C8F6E] font-mono">{r.returnId}</span></td>
+                  <td className="px-4 py-2.5 text-xs font-mono font-semibold text-[#3F6B52]">{fmtINR(r.amount)}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#9C8F6E] font-mono whitespace-nowrap">Deleted {r.deletedAt ? fmtDate(r.deletedAt) : ""}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRestoreAdvanceReturn(r.id)} className="text-xs text-[#3F6B52] font-semibold underline mr-3 inline-flex items-center gap-1"><RotateCcw size={11} /> Restore</button>
+                    <button onClick={() => onDeleteAdvanceReturn(r.id)} className="text-xs text-[#A63D2F] underline">Delete Permanently</button>
                   </td>
                 </tr>
               ))}
@@ -6211,10 +6540,11 @@ function SalaryFormModal({ persons, advances, onClose, onSave }) {
     setAdvanceDeductInput("");
   }, [personKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Sourced from the same shared openAdvancesFor() helper saveSalaryPayment()
+  // uses, so this live preview and the actual settlement can never disagree.
   const outstandingAdvance = useMemo(() => {
     if (!selected) return 0;
-    return round2((advances || [])
-      .filter(a => a.personId === selected.personId && a.personType === selected.personType && (a.status || "open") === "open")
+    return round2(openAdvancesFor(advances, selected.personId, selected.personType)
       .reduce((sum, a) => sum + (Number(a.outstandingAmount) || 0), 0));
   }, [advances, selected]);
 
@@ -6353,16 +6683,24 @@ function SalarySlipModal({ payment, onClose }) {
   );
 }
 
-function AdvanceTab({ advances, persons, onAdd, onRemove, onStatement }) {
+function AdvanceTab({ advances, advanceReturns, persons, onAdd, onReturn, onRemove, onRemoveReturn, onStatement }) {
   const sorted = useMemo(() => [...advances].sort((a, b) => compareChrono(a, b, -1)), [advances]);
+  // Advance Returns history — same sort convention as the Advances table
+  // above. See UPDATE NOTES entry for the "Return Advance" feature.
+  const sortedReturns = useMemo(() => [...(advanceReturns || [])].sort((a, b) => compareChrono(a, b, -1)), [advanceReturns]);
   return (
     <div>
       <SectionHeader eyebrow="Payroll" title="Advance" action={
-        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
-          <Plus size={15} /> Give Advance
-        </button>
+        <div className="flex gap-2">
+          <button onClick={onReturn} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+            <Undo2 size={15} /> Return Advance
+          </button>
+          <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+            <Plus size={15} /> Give Advance
+          </button>
+        </div>
       } />
-      <Card>
+      <Card className="mb-6">
         {sorted.length === 0 ? (
           <div className="p-8 text-center text-sm text-[#9C8F6E]">No advances recorded yet.</div>
         ) : (
@@ -6398,6 +6736,44 @@ function AdvanceTab({ advances, persons, onAdd, onRemove, onStatement }) {
                   </tr>
                 );
               })}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {/* Advance Returns history — direct cash-back records, separate from
+          the settlements made via Salary deductions above. See UPDATE
+          NOTES entry for the "Return Advance" feature. */}
+      <div className="mb-3" style={{ fontFamily: "'Zilla Slab', serif" }}><span className="text-lg font-semibold">Advance Returns</span></div>
+      <Card>
+        {sortedReturns.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No advance returns recorded yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["Date", "Person", "Amount Returned", "Mode", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedReturns.map(r => (
+                <tr key={r.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{fmtDate(r.date)}</td>
+                  <td className="px-4 py-2.5 font-medium">
+                    {onStatement ? (
+                      <button onClick={() => onStatement(r.personId, r.personType)} className="underline hover:text-[#3F6B52]">{r.personName}</button>
+                    ) : r.personName}
+                    <div className="text-[10px] text-[#9C8F6E]">{r.personRole}{r.personType === "teacher" ? " · Teacher" : " · Staff"} · {r.returnId}</div>
+                  </td>
+                  <td className="px-4 py-2.5 text-xs font-mono text-[#3F6B52]">{fmtINR(r.amount)}</td>
+                  <td className="px-4 py-2.5 text-xs">{r.mode || "Cash"}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onRemoveReturn(r.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         )}
@@ -6449,12 +6825,73 @@ function AdvanceFormModal({ persons, onClose, onSave }) {
   );
 }
 
+// Records a teacher/staff member directly returning advance money (e.g.
+// handing back cash) outside of a salary run — styled/structured like
+// AdvanceFormModal/SalaryFormModal. Shows the person's current outstanding
+// advance total once picked, same pattern as SalaryFormModal's
+// outstandingAdvance preview (sourced from the same shared
+// openAdvancesFor() helper, so the two can never disagree).
+function AdvanceReturnFormModal({ persons, advances, onClose, onSave }) {
+  const [personKey, setPersonKey] = useState(persons[0] ? `${persons[0].personType}:${persons[0].personId}` : "");
+  const selected = persons.find(p => `${p.personType}:${p.personId}` === personKey);
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [mode, setMode] = useState("Cash");
+  const [remarks, setRemarks] = useState("");
+
+  const outstandingAdvance = useMemo(() => {
+    if (!selected) return 0;
+    return round2(openAdvancesFor(advances, selected.personId, selected.personType)
+      .reduce((sum, a) => sum + (Number(a.outstandingAmount) || 0), 0));
+  }, [advances, selected]);
+
+  function submit() {
+    if (!selected || !(Number(amount) > 0)) return;
+    onSave({
+      personId: selected.personId, personType: selected.personType, personName: selected.name, personRole: selected.role,
+      amount: Number(amount) || 0, date, mode, remarks: remarks.trim(),
+    });
+  }
+
+  return (
+    <Modal title="Return Advance" onClose={onClose}>
+      <Field label="Select Teacher / Staff Member">
+        <PersonPicker persons={persons} value={personKey} onChange={setPersonKey} />
+      </Field>
+      {selected && (
+        <div className="text-xs text-[#6E6650] mb-3 flex justify-between">
+          <span>Current Outstanding Advance:</span>
+          <strong className={outstandingAdvance > 0 ? "text-[#A63D2F]" : "text-[#3F6B52]"}>{fmtINR(outstandingAdvance)}</strong>
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Amount Returned (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" max={outstandingAdvance || undefined} /></Field>
+        <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
+      </div>
+      <Field label="Payment Mode">
+        <div className="flex gap-2 flex-wrap">
+          {PAYMENT_MODES.map(m => (
+            <button key={m} type="button" onClick={() => setMode(m)} className="px-3 py-1.5 text-xs rounded-sm border font-semibold"
+              style={{ background: mode === m ? "#12312B" : "white", color: mode === m ? "#F4EFDE" : "#4A4636", borderColor: "#D8CFB8" }}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </Field>
+      <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any note for this return" /></Field>
+      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Record Advance Return
+      </button>
+    </Modal>
+  );
+}
+
 // Per-person Statement — combined chronological (compareChrono) history of
 // every salary payment and every advance given/settled for one teacher or
 // staff member, with a running Advance Outstanding total. Modeled directly
 // on StudentStatementModal. Reachable from Salary/Advance history rows and
 // from the "Statement" action on the Teachers/Staff registers.
-function PersonStatementModal({ person, personType, salaryPayments, advances, onClose, onViewSlip }) {
+function PersonStatementModal({ person, personType, salaryPayments, advances, advanceReturns, onClose, onViewSlip }) {
   if (!person) return null;
 
   const timeline = useMemo(() => {
@@ -6475,14 +6912,25 @@ function PersonStatementModal({ person, personType, salaryPayments, advances, on
         label: `Advance Settled (${s.advanceRefId || ""}) via Salary ${p.slipId}`, amount: s.amount, ref: p.slipId, raw: p,
       }))
     );
-    const merged = [...salaryLines, ...advanceGivenLines, ...settlementLines].sort((a, b) => compareChrono(a, b, 1));
+    // One line per advance actually settled by a direct "Return Advance"
+    // record — same breakdown pattern as settlementLines above, and the
+    // same reduction to runningOutstanding, just via a return instead of a
+    // salary deduction. See the new UPDATE NOTES entry for the "Return
+    // Advance" feature.
+    const returnLines = (advanceReturns || []).flatMap(r =>
+      (r.settledAdvances || []).map(s => ({
+        kind: "advance_returned", date: r.date, createdAt: r.createdAt,
+        label: `Advance Returned (${s.advanceRefId || ""}) — ${r.returnId}`, amount: s.amount, ref: r.returnId, raw: r,
+      }))
+    );
+    const merged = [...salaryLines, ...advanceGivenLines, ...settlementLines, ...returnLines].sort((a, b) => compareChrono(a, b, 1));
     let runningOutstanding = 0;
     return merged.map(l => {
       if (l.kind === "advance_given") runningOutstanding = round2(runningOutstanding + l.amount);
-      if (l.kind === "advance_settled") runningOutstanding = round2(runningOutstanding - l.amount);
+      if (l.kind === "advance_settled" || l.kind === "advance_returned") runningOutstanding = round2(runningOutstanding - l.amount);
       return { ...l, runningOutstanding };
     }).sort((a, b) => compareChrono(a, b, -1));
-  }, [salaryPayments, advances]);
+  }, [salaryPayments, advances, advanceReturns]);
 
   const totalSalaryPaid = round2((salaryPayments || []).reduce((sum, p) => sum + (Number(p.netPaid) || 0), 0));
   const totalAdvanceGiven = round2((advances || []).reduce((sum, a) => sum + (Number(a.amount) || 0), 0));
@@ -6538,40 +6986,15 @@ function PersonStatementModal({ person, personType, salaryPayments, advances, on
 }
 
 // ============================================================================
-// ATTENDANCE (batch-wise) — new sidebar tab. Sub-tabs: Mark Attendance,
-// Test Marks. See UPDATE NOTES #23. Not to be confused with the older
-// per-student Attendance sub-tab inside Academic Monitoring.
+// ATTENDANCE (batch-wise) — MarkAttendanceTab / TestMarksTab. These used to
+// live under their own standalone "Attendance" sidebar tab
+// (AttendanceMgmtTab / ATTENDANCE_MGMT_SUB_TABS, see UPDATE NOTES #23);
+// that wrapper tab has been removed and these two components are now
+// rendered directly as sub-tabs inside AcademicMonitoringTab instead — see
+// the new UPDATE NOTES entry. Not to be confused with the older per-student
+// Attendance sub-tab that used to live inside Academic Monitoring, which
+// these have now replaced there.
 // ============================================================================
-const ATTENDANCE_MGMT_SUB_TABS = [
-  { id: "mark", label: "Mark Attendance", icon: ClipboardCheck },
-  { id: "tests", label: "Test Marks", icon: Award },
-];
-
-function AttendanceMgmtTab({ markAttendanceTabProps, testMarksTabProps }) {
-  const [subTab, setSubTab] = useState("mark");
-  return (
-    <div>
-      <SectionHeader eyebrow="Batch Tracking" title="Attendance" />
-      <div className="text-sm text-[#6E6650] mb-4">Mark daily batch-wise attendance and record test marks, both resolved from the Batch Schedule roster.</div>
-      <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
-        {ATTENDANCE_MGMT_SUB_TABS.map((st, i) => {
-          const Icon = st.icon;
-          const active = subTab === st.id;
-          return (
-            <button key={st.id} onClick={() => setSubTab(st.id)}
-              className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
-              style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
-              <Icon size={13} /> {st.label}
-            </button>
-          );
-        })}
-      </div>
-      {subTab === "mark" && <MarkAttendanceTab {...markAttendanceTabProps} />}
-      {subTab === "tests" && <TestMarksTab {...testMarksTabProps} />}
-    </div>
-  );
-}
-
 function MarkAttendanceTab({ classes, subjectsList, batchSchedule, students, attendanceLog, batchesForMonth, onSave }) {
   const [date, setDate] = useState(todayStr());
   const [cls, setCls] = useState("");
