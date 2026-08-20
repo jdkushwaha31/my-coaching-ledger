@@ -588,27 +588,6 @@ function compareChrono(a, b, dir = 1) {
   const av = chronoKey(a), bv = chronoKey(b);
   return av < bv ? -dir : av > bv ? dir : 0;
 }
-
-// Generates a deterministic, stable ISO timestamp from a seed string.
-// Used for auto-generated charges (opening balance, monthly fees) that don't
-// have a real createdAt, so they sort consistently across renders.
-function deterministicTimestamp(seed) {
-  // Simple hash to generate a pseudo-random but deterministic time component
-  let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    hash = ((hash << 5) - hash) + seed.charCodeAt(i);
-    hash |= 0; // 32-bit int
-  }
-  const hour = Math.abs(hash % 24);
-  const minute = Math.abs((hash * 7) % 60);
-  const second = Math.abs((hash * 13) % 60);
-  const time = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}`;
-  // Use a fixed base date (year 2000) so only time differs — the actual date
-  // comes from the transaction's `date` field. This ensures charges on the
-  // same date sort by this deterministic time, while different dates still
-  // sort by date first.
-  return `2000-01-01T${time}`;
-}
 // Human-readable, unique Student ID — separate from the internal Firestore
 // doc `id` (which stays exactly as-is so nothing already saved ever breaks).
 // Format: STU<year><4-digit sequence>, e.g. STU20260007. Sequence is derived
@@ -913,7 +892,7 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
   if (Number(student.previousDues) > 0) {
     chargeLines.push({
       id: `opening-${student.id}`, chargeId: `CHG-OPN${shortId(student.id)}`, type: "opening",
-      date: `${student.admissionMonth || curMonth}-01`, month: null, createdAt: deterministicTimestamp(`opening-${student.id}`),
+      date: `${student.admissionMonth || curMonth}-01`, month: null,
       label: "Opening Balance (Carried Forward)", amount: round2(student.previousDues), remarks: "", ref: "",
     });
   }
@@ -931,7 +910,7 @@ function computeStudentLedger(student, deposits, charges, batchesForMonth, expec
       if (expected > 0) {
         const lineId = `fee-${student.id}-${m}`;
         chargeLines.push({
-          id: lineId, chargeId: `CHG-${shortId(lineId)}`, type: "monthly_fee", date: `${m}-01`, month: m, createdAt: deterministicTimestamp(lineId),
+          id: lineId, chargeId: `CHG-${shortId(lineId)}`, type: "monthly_fee", date: `${m}-01`, month: m,
           label: `Tuition Fee — ${monthLabel(m)}${batches.length ? " (" + batches.join(", ") + ")" : ""}`,
           amount: round2(expected), remarks: "", ref: "",
         });
