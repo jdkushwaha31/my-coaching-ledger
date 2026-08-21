@@ -2370,7 +2370,7 @@ export default function CoachingLedger() {
         .joining-form-doc .sign-line { border-top: 1px solid #12312B; padding-top: 6px; width: 200px; text-align: center; color: #4A4636; }
       `}</style>
 
-      <aside className="w-60 shrink-0 flex flex-col justify-between" style={{ background: "#12312B" }}>
+      <aside className="w-60 shrink-0 flex flex-col justify-between sticky top-0 h-screen overflow-y-auto" style={{ background: "#12312B" }}>
         <div>
           <div className="px-5 pt-6 pb-5" style={{ borderBottom: "1px solid #24473F" }}>
             <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#F4EFDE] leading-tight">Batch<br/>Ledger Pro</div>
