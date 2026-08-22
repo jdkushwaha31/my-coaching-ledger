@@ -478,6 +478,40 @@ import {
 //      Attendance/Test Scores entry forms should be restored somewhere so
 //      the two stay in sync — left as-is pending your call, per the
 //      brief's explicit instruction not to silently pick a side.
+//
+// Changes made in this fourth update pass:
+//  28. Academic Monitoring → the "Mark Attendance" sub-tab is renamed
+//      "Attendance" and now has its own inner pill row with two panels:
+//      "Mark Attendance" (unchanged — still MarkAttendanceTab, the
+//      existing batch-wise fill form) and a new "View Attendance" panel
+//      (new component ViewAttendanceTab) to browse/search previously
+//      saved attendanceLog sessions — filter by class/subject/date, free-
+//      text search by class/subject/student name/Student ID, expand a
+//      session to see the roster, and edit + re-save statuses in place.
+//      Both panels read/write the exact same attendanceLog collection via
+//      the same onSave (saveAttendanceLog, same date_class_subject upsert
+//      key), so an edit made in View Attendance is immediately reflected
+//      if that same session is reopened in Mark Attendance, and vice
+//      versa. New wrapper component AttendanceSectionTab hosts the inner
+//      pill row and switches between the two; ACADEMIC_MONITORING_SUB_TABS'
+//      "mark-attendance" entry now routes to it instead of directly to
+//      MarkAttendanceTab (id kept as "mark-attendance" so nothing else
+//      referencing that id needed to change).
+//  29. Academic Monitoring → the "Test Marks" sub-tab is renamed "Scores"
+//      and, same pattern as #28, now has its own inner pill row: "Fill
+//      Marks" (unchanged — still TestMarksTab) and a new "View & Search
+//      Scores" panel (new component ViewScoresTab) to browse the "tests"
+//      collection with filters (class/subject/date) plus free-text search
+//      across Test ID, description, class, subject, and student name/
+//      Student ID. Expanding a test reveals its full score table with an
+//      optional "Sort: Top Scorers" toggle (ranks students by marks,
+//      highest first, with a #1/#2/... badge) and lets you edit Max
+//      Marks, Description, and any student's marks, saving through the
+//      same onSave (saveTest, upserts by testId) TestMarksTab already
+//      uses — so nothing about how tests are stored changed, this only
+//      adds a second way to reach and edit the same records. New wrapper
+//      component ScoresSectionTab hosts the inner pill row; the
+//      "test-marks" sub-tab id is unchanged.
 // ============================================================================
 
 // Admin Access Password
@@ -2721,6 +2755,67 @@ export default function CoachingLedger() {
   );
 }
 
+// ---- "Attendance" sub-tab wrapper — hosts its own inner pill row with two
+// panels: "Mark Attendance" (the existing batch-wise fill form,
+// MarkAttendanceTab, untouched) and "View Attendance" (new — browse/search
+// previously saved attendanceLog sessions and edit them in place, see
+// ViewAttendanceTab below). Both read/write the same attendanceLog
+// collection via the same onSave (saveAttendanceLog), so anything edited in
+// View Attendance shows up immediately if reopened in Mark Attendance. ----
+function AttendanceSectionTab({ classes, subjectsList, batchSchedule, students, attendanceLog, batchesForMonth, onSave }) {
+  const [inner, setInner] = useState("mark");
+  return (
+    <div>
+      <div className="flex border rounded-sm overflow-hidden mb-4 w-fit" style={{ borderColor: "#12312B" }}>
+        <button onClick={() => setInner("mark")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+          style={{ background: inner === "mark" ? "#12312B" : "white", color: inner === "mark" ? "#F4EFDE" : "#12312B" }}>
+          <ClipboardCheck size={13} /> Mark Attendance
+        </button>
+        <button onClick={() => setInner("view")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+          style={{ background: inner === "view" ? "#12312B" : "white", color: inner === "view" ? "#F4EFDE" : "#12312B", borderLeft: "1px solid #12312B" }}>
+          <Search size={13} /> View Attendance
+        </button>
+      </div>
+      {inner === "mark" ? (
+        <MarkAttendanceTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
+          attendanceLog={attendanceLog} batchesForMonth={batchesForMonth} onSave={onSave} />
+      ) : (
+        <ViewAttendanceTab attendanceLog={attendanceLog} students={students} classes={classes} subjectsList={subjectsList} onSave={onSave} />
+      )}
+    </div>
+  );
+}
+
+// ---- "Scores" sub-tab wrapper — same pattern as AttendanceSectionTab:
+// "Fill Marks" (the existing TestMarksTab, untouched) and "View & Search
+// Scores" (new — search/filter saved tests by class, subject, date, test ID,
+// description, or student, sort by top scorers, and edit marks in place, see
+// ViewScoresTab below). Both read/write the same "tests" collection via the
+// same onSave (saveTest). ----
+function ScoresSectionTab({ classes, subjectsList, batchSchedule, students, tests, batchesForMonth, onSave }) {
+  const [inner, setInner] = useState("fill");
+  return (
+    <div>
+      <div className="flex border rounded-sm overflow-hidden mb-4 w-fit" style={{ borderColor: "#12312B" }}>
+        <button onClick={() => setInner("fill")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+          style={{ background: inner === "fill" ? "#12312B" : "white", color: inner === "fill" ? "#F4EFDE" : "#12312B" }}>
+          <Award size={13} /> Fill Marks
+        </button>
+        <button onClick={() => setInner("view")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+          style={{ background: inner === "view" ? "#12312B" : "white", color: inner === "view" ? "#F4EFDE" : "#12312B", borderLeft: "1px solid #12312B" }}>
+          <Search size={13} /> View & Search Scores
+        </button>
+      </div>
+      {inner === "fill" ? (
+        <TestMarksTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
+          tests={tests} batchesForMonth={batchesForMonth} onSave={onSave} />
+      ) : (
+        <ViewScoresTab tests={tests} students={students} classes={classes} subjectsList={subjectsList} onSave={onSave} />
+      )}
+    </div>
+  );
+}
+
 function StatCard({ label, value, sub, tone }) {
   const toneColor = { good: "#3F6B52", warn: "#B8862B", bad: "#A63D2F", neutral: "#1B1810" }[tone || "neutral"];
   return (
@@ -3697,8 +3792,8 @@ function ChargesTab({ chargeLines, students, classes, onAdd, onRemove, onOpenRec
 // collections themselves are untouched below — PerformanceReportTab still
 // reads from them, see the note on that component.
 const ACADEMIC_MONITORING_SUB_TABS = [
-  { id: "mark-attendance", label: "Mark Attendance", icon: ClipboardCheck },
-  { id: "test-marks", label: "Test Marks", icon: Award },
+  { id: "mark-attendance", label: "Attendance", icon: ClipboardCheck },
+  { id: "test-marks", label: "Scores", icon: Award },
   { id: "behaviour", label: "Behaviour & Conduct", icon: MessageSquare },
   { id: "report", label: "Performance Report", icon: FileBarChart2 },
 ];
@@ -3732,11 +3827,11 @@ function AcademicMonitoringTab({
       </div>
 
       {subTab === "mark-attendance" && (
-        <MarkAttendanceTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
+        <AttendanceSectionTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
           attendanceLog={attendanceLog} batchesForMonth={batchesForMonth} onSave={onSaveAttendanceLog} />
       )}
       {subTab === "test-marks" && (
-        <TestMarksTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
+        <ScoresSectionTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
           tests={tests} batchesForMonth={batchesForMonth} onSave={onSaveTest} />
       )}
       {subTab === "behaviour" && (
@@ -7243,6 +7338,302 @@ function TestMarksTab({ classes, subjectsList, batchSchedule, students, tests, b
             </>
           )}
         </Card>
+      )}
+    </div>
+  );
+}
+
+// ---- View Attendance — browse/search previously saved attendanceLog
+// sessions (one doc per date+class+subject) and edit them in place. Reuses
+// the same upsert onSave (saveAttendanceLog) MarkAttendanceTab uses, keyed
+// off the same date_class_subject id, so editing here overwrites the exact
+// same document instead of creating a duplicate. ----
+function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onSave }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [subjectFilter, setSubjectFilter] = useState("all");
+  const [dateFilter, setDateFilter] = useState("");
+  const [expandedId, setExpandedId] = useState(null);
+  const [editStatuses, setEditStatuses] = useState({});
+  const [savedId, setSavedId] = useState(null);
+
+  const studentById = useMemo(() => { const m = {}; students.forEach(s => { m[s.id] = s; }); return m; }, [students]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return attendanceLog
+      .filter(a => classFilter === "all" || a.class === classFilter)
+      .filter(a => subjectFilter === "all" || a.subject === subjectFilter)
+      .filter(a => !dateFilter || a.date === dateFilter)
+      .filter(a => {
+        if (!q) return true;
+        if (String(a.class).toLowerCase().includes(q) || String(a.subject).toLowerCase().includes(q)) return true;
+        return (a.records || []).some(r => { const s = studentById[r.studentId]; return s && (s.name.toLowerCase().includes(q) || (s.studentId || "").toLowerCase().includes(q)); });
+      })
+      .sort((a, b) => compareChrono(a, b, -1));
+  }, [attendanceLog, classFilter, subjectFilter, dateFilter, search, studentById]);
+
+  function startEdit(a) {
+    setExpandedId(expandedId === a.id ? null : a.id);
+    setSavedId(null);
+    if (expandedId === a.id) return;
+    const map = {};
+    (a.records || []).forEach(r => { map[r.studentId] = r.status; });
+    setEditStatuses(map);
+  }
+
+  function toggleStatus(studentId) {
+    setEditStatuses(prev => ({ ...prev, [studentId]: prev[studentId] === "Present" ? "Absent" : "Present" }));
+  }
+
+  function saveEdit(a) {
+    const records = (a.records || []).map(r => ({ studentId: r.studentId, status: editStatuses[r.studentId] || "Absent" }));
+    onSave(a.date, a.class, a.subject, a.batchId || null, records);
+    setSavedId(a.id);
+  }
+
+  return (
+    <div>
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[180px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Class, subject, or student..." />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {classes.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Subject</div>
+            <select className={inputCls} style={inputStyle} value={subjectFilter} onChange={e => setSubjectFilter(e.target.value)}>
+              <option value="all">All Subjects</option>
+              {subjectsList.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Date</div>
+            <input type="date" className={inputCls} style={inputStyle} value={dateFilter} onChange={e => setDateFilter(e.target.value)} />
+          </div>
+        </div>
+      </Card>
+
+      {filtered.length === 0 ? (
+        <Card className="p-6 text-center text-sm text-[#9C8F6E]">No saved attendance sessions match.</Card>
+      ) : (
+        <div className="space-y-3">
+          {filtered.map(a => {
+            const total = (a.records || []).length;
+            const present = (a.records || []).filter(r => r.status === "Present").length;
+            const expanded = expandedId === a.id;
+            return (
+              <Card key={a.id} className="overflow-hidden">
+                <button onClick={() => startEdit(a)} className="w-full flex items-center justify-between px-4 py-3 text-left">
+                  <div>
+                    <div className="text-sm font-semibold text-[#12312B]">{a.class} · {a.subject}</div>
+                    <div className="text-[11px] text-[#9C8F6E]">{fmtDate(a.date)} · {present}/{total} present</div>
+                  </div>
+                  <span className="text-xs text-[#9C8F6E]">{expanded ? "▾" : "▸"}</span>
+                </button>
+                {expanded && (
+                  <div className="border-t" style={{ borderColor: "#D8CFB8" }}>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                          {["Student Name", "Student ID", "Status"].map(h => (
+                            <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(a.records || []).map(r => {
+                          const s = studentById[r.studentId];
+                          const isPresent = editStatuses[r.studentId] === "Present";
+                          return (
+                            <tr key={r.studentId} className="ledger-row">
+                              <td className="px-4 py-2.5 font-medium">{s ? s.name : "Unknown Student"}</td>
+                              <td className="px-4 py-2.5 text-xs font-mono">{s ? s.studentId : "—"}</td>
+                              <td className="px-4 py-2.5">
+                                <button onClick={() => toggleStatus(r.studentId)} className="px-3 py-1 text-xs font-semibold rounded-sm"
+                                  style={{ background: isPresent ? "#3F6B52" : "#A63D2F", color: "#F4EFDE" }}>
+                                  {isPresent ? "Present" : "Absent"}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <div className="p-3.5 flex items-center justify-between">
+                      <div className="text-[11px] text-[#9C8F6E]">{savedId === a.id ? "Saved." : "Editing — toggle status, then save."}</div>
+                      <button onClick={() => saveEdit(a)} className="px-4 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>Save Changes</button>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- View & Search Scores — browse saved tests (the "tests" collection
+// TestMarksTab writes to) with search across test ID / description / class /
+// subject / student, plus class/subject/date filters, an optional "Top
+// Scorers" sort on the expanded test's marks, and inline editing that saves
+// through the same onSave (saveTest, upserts by testId) TestMarksTab uses.
+function ViewScoresTab({ tests, students, classes, subjectsList, onSave }) {
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [subjectFilter, setSubjectFilter] = useState("all");
+  const [dateFilter, setDateFilter] = useState("");
+  const [expandedId, setExpandedId] = useState(null);
+  const [editMarks, setEditMarks] = useState({});
+  const [editMeta, setEditMeta] = useState({ maxMarks: "", description: "" });
+  const [sortTop, setSortTop] = useState(false);
+  const [savedId, setSavedId] = useState(null);
+
+  const studentById = useMemo(() => { const m = {}; students.forEach(s => { m[s.id] = s; }); return m; }, [students]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return tests
+      .filter(t => classFilter === "all" || String(t.class) === classFilter)
+      .filter(t => subjectFilter === "all" || t.subject === subjectFilter)
+      .filter(t => !dateFilter || t.date === dateFilter)
+      .filter(t => {
+        if (!q) return true;
+        if ((t.testId || "").toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q) ||
+          String(t.class).toLowerCase().includes(q) || (t.subject || "").toLowerCase().includes(q)) return true;
+        return (t.scores || []).some(sc => { const s = studentById[sc.studentId]; return s && (s.name.toLowerCase().includes(q) || (s.studentId || "").toLowerCase().includes(q)); });
+      })
+      .sort((a, b) => compareChrono(a, b, -1));
+  }, [tests, classFilter, subjectFilter, dateFilter, search, studentById]);
+
+  function startEdit(t) {
+    setExpandedId(expandedId === t.id ? null : t.id);
+    setSavedId(null);
+    setSortTop(false);
+    if (expandedId === t.id) return;
+    const map = {};
+    (t.scores || []).forEach(sc => { map[sc.studentId] = sc.marks === "" || sc.marks == null ? "" : sc.marks; });
+    setEditMarks(map);
+    setEditMeta({ maxMarks: t.maxMarks ?? "", description: t.description || "" });
+  }
+
+  function orderedScores(t) {
+    const list = [...(t.scores || [])];
+    if (!sortTop) return list;
+    return list.sort((a, b) => (Number(editMarks[b.studentId]) || 0) - (Number(editMarks[a.studentId]) || 0));
+  }
+
+  function saveEdit(t) {
+    const scores = (t.scores || []).map(sc => ({ studentId: sc.studentId, marks: editMarks[sc.studentId] === "" ? "" : Number(editMarks[sc.studentId]) }));
+    onSave({ testId: t.testId, class: t.class, subject: t.subject, date: t.date, maxMarks: Number(editMeta.maxMarks) || 0, description: editMeta.description, scores });
+    setSavedId(t.id);
+  }
+
+  return (
+    <div>
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[180px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Test ID, description, class, subject, or student..." />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {classes.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Subject</div>
+            <select className={inputCls} style={inputStyle} value={subjectFilter} onChange={e => setSubjectFilter(e.target.value)}>
+              <option value="all">All Subjects</option>
+              {subjectsList.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Date</div>
+            <input type="date" className={inputCls} style={inputStyle} value={dateFilter} onChange={e => setDateFilter(e.target.value)} />
+          </div>
+        </div>
+      </Card>
+
+      {filtered.length === 0 ? (
+        <Card className="p-6 text-center text-sm text-[#9C8F6E]">No saved tests match.</Card>
+      ) : (
+        <div className="space-y-3">
+          {filtered.map(t => {
+            const count = (t.scores || []).length;
+            const avg = count ? round2((t.scores || []).reduce((sum, sc) => sum + (Number(sc.marks) || 0), 0) / count) : 0;
+            const expanded = expandedId === t.id;
+            return (
+              <Card key={t.id} className="overflow-hidden">
+                <button onClick={() => startEdit(t)} className="w-full flex items-center justify-between px-4 py-3 text-left">
+                  <div>
+                    <div className="text-sm font-semibold text-[#12312B]">{t.testId} — {t.class} · {t.subject}</div>
+                    <div className="text-[11px] text-[#9C8F6E]">{fmtDate(t.date)} · {t.description || "No description"} · Avg {avg}/{t.maxMarks || 0}</div>
+                  </div>
+                  <span className="text-xs text-[#9C8F6E]">{expanded ? "▾" : "▸"}</span>
+                </button>
+                {expanded && (
+                  <div className="border-t" style={{ borderColor: "#D8CFB8" }}>
+                    <div className="p-3.5 flex flex-wrap items-end gap-3" style={{ background: "#FAF6EC" }}>
+                      <Field label="Maximum Marks"><input type="number" className={inputCls + " w-28"} style={inputStyle} value={editMeta.maxMarks} onChange={e => setEditMeta(prev => ({ ...prev, maxMarks: e.target.value }))} /></Field>
+                      <Field label="Description"><input className={inputCls} style={inputStyle} value={editMeta.description} onChange={e => setEditMeta(prev => ({ ...prev, description: e.target.value }))} /></Field>
+                      <button onClick={() => setSortTop(v => !v)} className="px-3 py-2 text-xs font-semibold rounded-sm flex items-center gap-1.5"
+                        style={{ background: sortTop ? "#B8862B" : "white", color: sortTop ? "#F4EFDE" : "#12312B", border: "1px solid #12312B" }}>
+                        <Award size={13} /> {sortTop ? "Sorted: Top Scorers" : "Sort: Top Scorers"}
+                      </button>
+                    </div>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                          {["Student Name", "Student ID", "Marks"].map(h => (
+                            <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {orderedScores(t).map((sc, i) => {
+                          const s = studentById[sc.studentId];
+                          return (
+                            <tr key={sc.studentId} className="ledger-row">
+                              <td className="px-4 py-2.5 font-medium">{sortTop && <span className="text-[#9C8F6E] mr-1.5">#{i + 1}</span>}{s ? s.name : "Unknown Student"}</td>
+                              <td className="px-4 py-2.5 text-xs font-mono">{s ? s.studentId : "—"}</td>
+                              <td className="px-4 py-2.5">
+                                <input type="number" className={inputCls + " w-28"} style={inputStyle} value={editMarks[sc.studentId] ?? ""}
+                                  onChange={e => setEditMarks(prev => ({ ...prev, [sc.studentId]: e.target.value }))} placeholder="0" max={editMeta.maxMarks || undefined} />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <div className="p-3.5 flex items-center justify-between">
+                      <div className="text-[11px] text-[#9C8F6E]">{savedId === t.id ? "Saved." : "Editing — change marks/max/description, then save."}</div>
+                      <button onClick={() => saveEdit(t)} className="px-4 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>Save Changes</button>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+        </div>
       )}
     </div>
   );
