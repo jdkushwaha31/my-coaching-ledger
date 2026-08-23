@@ -657,6 +657,24 @@ import {
 //      are exactly what they were before — this is a pure re-layout, no
 //      restore/delete behavior changed and TrashTab's own prop signature
 //      (and therefore its call site) is untouched.
+//
+// Changes made in this ninth update pass:
+//  44. Recycle Bin's category pill row (#43) — fixed two visual bugs seen
+//      in production: (a) the row was one bordered strip with internal
+//      left-border dividers between pills, which broke apart into an
+//      orphan box with a stray border whenever it wrapped to a new line
+//      (visible with 15 categories on a normal-width screen); and (b)
+//      the "empty category" text/icon color (#B8AF95) was so washed out
+//      that on a fresh install — where every category is empty — the
+//      entire row looked disabled/unreadable. Replaced with individual
+//      chip buttons (each with its own border + rounded corners, so
+//      wrapping is always clean) and swapped the empty-category color for
+//      #9C8F6E, the same muted tone already used for secondary text
+//      everywhere else in the app, so it stays legible. Icons follow the
+//      same color automatically (lucide icons use currentColor) — no
+//      separate icon-color fix needed. Non-empty / active states, the
+//      count badges, and everything else about how the pill row behaves
+//      are unchanged.
 // ============================================================================
 
 // Admin Access Password
@@ -5862,26 +5880,30 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
       <SectionHeader eyebrow="Recycle Bin" title="Trash / Restore" />
       <div className="text-sm text-[#6E6650] mb-5">Deleted students, receipts, and charges land here first — nothing is gone for good until you permanently delete it. Restoring brings back the exact record with no data lost. {totalTrashed} item{totalTrashed === 1 ? "" : "s"} in the bin across every category.</div>
 
-      {/* Same bordered pill-row pattern as Academic Monitoring / Structure —
-          one category active at a time, its table fills the panel below.
-          Categories with nothing in them are still shown (greyed, not
-          hidden) so it's obvious at a glance what's empty vs. what isn't. */}
-      <div className="flex border rounded-sm overflow-hidden mb-4 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
-        {TRASH_CATEGORIES.map((c, i) => {
+      {/* Individual chip buttons (not one bordered strip with internal
+          dividers) — each has its own border and rounded corners, so
+          wrapping to a new line never leaves an orphan box with a stray
+          border, unlike a single flex-wrap pill-row would. Categories with
+          nothing in them use the app's existing muted text color (#9C8F6E,
+          same as every other secondary/disabled-ish label in the app)
+          rather than a separate, more washed-out grey — stays legible even
+          when every category is empty (e.g. right after setup). */}
+      <div className="flex flex-wrap gap-2 mb-4">
+        {TRASH_CATEGORIES.map(c => {
           const Icon = c.icon;
           const active = cat === c.id;
           const count = dataByCat[c.id].length;
           const empty = count === 0;
           return (
             <button key={c.id} onClick={() => { setCat(c.id); setSearch(""); }}
-              className="px-3.5 py-2 text-xs font-semibold flex items-center gap-1.5"
+              className="px-3.5 py-2 text-xs font-semibold flex items-center gap-1.5 rounded-sm border"
               style={{
                 background: active ? "#12312B" : "white",
-                color: active ? "#F4EFDE" : (empty ? "#B8AF95" : "#12312B"),
-                borderLeft: i === 0 ? "none" : "1px solid #12312B",
+                color: active ? "#F4EFDE" : (empty ? "#9C8F6E" : "#12312B"),
+                borderColor: active ? "#12312B" : (empty ? "#D8CFB8" : "#12312B"),
               }}>
               <Icon size={13} /> {c.label}
-              <span className="text-[10px] font-mono" style={{ opacity: active ? 0.85 : 0.7 }}>({count})</span>
+              <span className="text-[10px] font-mono" style={{ opacity: active ? 0.85 : 0.75 }}>({count})</span>
             </button>
           );
         })}
