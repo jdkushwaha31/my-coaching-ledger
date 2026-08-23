@@ -303,6 +303,206 @@ import {
 //      (kind: "debit", bucket by mode) so it lands in the Banking
 //      Statement's running Cash/Bank balance exactly like an expense —
 //      see bankingSalaryLines, folded into bankingFeedAsc alongside
+//      banking//      date the moment the form opens (not just silently at save time as
+//      before) — office staff see it pre-filled and can change it to
+//      backdate a student if needed; if they don't touch it, today's date
+//      is what gets saved (see the joiningDate useState in
+//      StudentFormModal).
+//  14. Student Statement → Description column no longer shows the small
+//      "Unpaid" stamp next to an outstanding charge line. The Debit /
+//      Credit / running Balance columns already show exactly what's owed,
+//      so the stamp was redundant clutter (see StudentStatementModal).
+//  15. Every date shown anywhere in the app now displays as "D Month
+//      YYYY" (e.g. "17 August 2026") instead of "DD-MM-YYYY" — this is a
+//      one-line change to the shared fmtDate() helper, so it applies
+//      everywhere at once: Students Register, Student/Center/Banking
+//      Statements, all receipts & slips, the Joining Form, Trash tab,
+//      credit/interest logs, everywhere. Storage format (YYYY-MM-DD),
+//      <input type="date"/"month">, filtering, and sorting are completely
+//      untouched — only the last-mile display formatter changed.
+//  16. Printable Statement (Student Statement, Center Statement, Banking
+//      Statement) — the "Print / Export" button used to clone the on-
+//      screen preview's HTML into a bare popup window that never loaded
+//      the app's Tailwind styling or fonts, so everything printed as
+//      unstyled black text with no layout, colors, or letterhead — even
+//      though the on-screen preview looked correct. Each of these three
+//      print windows now loads the same Google Fonts import and the
+//      Tailwind CDN the live app effectively relies on, plus a proper A4
+//      @page rule, a bordered letterhead document wrapper matching the
+//      Joining Form's professional look, and print-safe table rules (no
+//      row splitting across pages, repeating header). The on-screen
+//      preview markup itself is unchanged — only what the popup window
+//      loads before printing it changed.
+//
+// Changes made in this fourth update pass:
+//  17. NEW FEATURE — Notes: a simple internal notepad tab (sidebar, right
+//      above Trash / Restore) completely separate from the financial
+//      ledger. Add / edit / pin / delete free-text notes (title + body),
+//      cloud-synced like everything else via a new "notes" Firestore
+//      collection. Pinned notes float to the top. Nothing here touches
+//      any student, deposit, charge, or balance (see NotesTab,
+//      NoteFormModal, saveNote / toggleNotePin / deleteNote).
+//  18. BUG FIX — Statement dates wrapping onto 3 lines (DD on one line,
+//      Month on the next, YYYY on the last): fmtDate() itself always
+//      produced a correct single-line "D Month YYYY" string — the actual
+//      bug was that the narrow table cells showing it had no
+//      `whitespace-nowrap`, so the browser wrapped the string wherever it
+//      ran out of column width. Added `whitespace-nowrap` to every date
+//      cell across every statement/log table (Deposits, Charges,
+//      Expenses, Center Statement, Banking Statement, Cash⇄Bank Transfer
+//      Logs, Credit & Loan Ledger, Interest Payments Log, Trash tab,
+//      Student Statement) — dates now always render on one line.
+//  19. Banking tab reorganized into four separate, professional pill-tab
+//      panels — Banking Statement, Cash ⇄ Bank Transfer Logs, Credit &
+//      Loan Ledger, Interest Payments Log — instead of one long stacked
+//      scroll, using the same sub-tab pattern already used by Fee &
+//      Class Structure (see StructureTab). Every feature that existed
+//      before (search & filters on the main statement, print/export,
+//      add/delete on each log, expand a credit entry's interest-payment
+//      history, Pay Interest) is fully intact — this only changes how
+//      the four sections are navigated, not what they do (see
+//      BankingTab, BANKING_SUB_TABS).
+//  20. BUG FIX — a student saved with ZERO subjects/batches selected was
+//      being silently charged the 1-subject Fee Matrix rate every month,
+//      because both computeStudentLedger() and the dashboard's
+//      forecastForMonth() did `batches.length || 1`, and expectedFeeFor()
+//      itself also forced any falsy batch count up to 1. A batch count of
+//      0 is falsy in JavaScript, so "no subjects chosen" was
+//      indistinguishable from "1 subject chosen" and got billed as if
+//      the student had taken a single subject they were never actually
+//      enrolled in. expectedFeeFor() now returns ₹0 immediately for a
+//      batch count of 0 (before ever consulting the fee matrix), and
+//      both call sites no longer force that fallback to 1 — a
+//      subject-less student now correctly accrues ₹0 tuition instead of
+//      the 1-subject rate. Students with 1+ subjects are billed exactly
+//      as before.
+//
+// Changes made in this fifth update pass:
+//  21. NAVIGATION — the six sidebar tabs Students Register, Pending Dues,
+//      Deposits Log, Charges, Center Statement, and Fee & Class Structure
+//      are now one sidebar entry, "Student Management" (id
+//      "students-management"), with an internal bordered pill row of six
+//      sub-tabs in that exact left-to-right order — same pattern already
+//      used by Fee & Class Structure's own 3-way pill row and Banking's
+//      4-way pill row. This is purely a navigation regroup: StudentsTab,
+//      DuesTab, DepositsTab, ChargesTab, CenterStatementTab, and
+//      StructureTab are all reused completely unchanged, wired with the
+//      exact same props (search boxes, filters, Add Student / Add Charge
+//      / Record Deposit / Print-Export buttons, receipts, modals,
+//      add/edit/delete/restore actions) they had as standalone tabs — none
+//      of that behavior changed. See StudentManagementTab and
+//      STUDENT_MANAGEMENT_SUB_TABS. Fee & Class Structure's own internal
+//      3-way pill row (Fee Matrix Pricing / Class & Subject List / Manage
+//      Streams) is untouched and still lives one level down, inside the
+//      new "Fee & Class Structure" sub-tab. Expenses Log and Banking are
+//      unaffected and remain separate sidebar tabs, exactly as before.
+//
+// Changes made in this sixth update pass:
+//  22. NEW FEATURE — Academic Monitoring: a new sidebar tab (id
+//      "academic-monitoring", right after Student Management) tracking
+//      student academic performance, for internal use and for
+//      parent-facing printouts. Uses the exact same bordered pill-tab
+//      pattern as Fee & Class Structure / Student Management (see
+//      AcademicMonitoringTab / ACADEMIC_MONITORING_SUB_TABS), with four
+//      sub-tabs in this order: Attendance (mark daily/class-wise
+//      Present/Absent/Late per student, date filter, per-student
+//      attendance % summary — see AttendanceTab), Test Scores (test name,
+//      subject, date, marks, remarks per student, with per-student score
+//      history and class-wise averages — see TestScoresTab), Behaviour &
+//      Conduct (dated notes tagged positive / neutral / needs-attention —
+//      see BehaviourTab), and Performance Report (a printable A4,
+//      parent-facing summary combining attendance %, recent test scores,
+//      and behaviour notes for one student, reusing the same Tailwind CDN
+//      + Google Fonts print-popup pattern as the Joining Form / Center
+//      Statement — see PerformanceReportTab). Each of Attendance, Test
+//      Scores, and Behaviour & Conduct has its own Firestore collection
+//      ("attendance", "testScores", "behaviourNotes" respectively), synced
+//      live via onSnapshot exactly like every other collection in this
+//      file, and each fully supports soft-delete + Trash/Restore +
+//      permanent delete, wired into the existing TrashTab and trashCount
+//      (see AttendanceFormModal / TestScoreFormModal / BehaviourFormModal
+//      and the saveAttendance / saveTestScore / saveBehaviourNote +
+//      soft/restore/permanent-delete functions below). Nothing about any
+//      existing tab, collection, or handler changed.
+//
+// Changes made in this seventh update pass:
+//  23. NEW FEATURE — Teacher Management, Batch Schedule, Staff, Teacher
+//      Performance, Attendance (batch-wise), and Test Marks. Five new
+//      Firestore collections, synced live via onSnapshot exactly like
+//      every other collection in this file: "teachers", "staff",
+//      "batchSchedule", "attendanceLog", "tests".
+//      NOTE on naming: the brief asked for a Firestore collection named
+//      "attendance" for the new batch-wise marking feature, but this file
+//      already has a per-student "attendance" collection powering the
+//      existing Academic Monitoring → Attendance sub-tab (see change #22
+//      above). That collection is untouched — this pass uses a
+//      differently-named collection, "attendanceLog", for the new
+//      roster/date/subject-based marking feature so the two never collide
+//      or get mixed up. Flagging this rename since it wasn't explicitly
+//      asked for.
+//    - Teacher Management (new sidebar tab, right after Student
+//      Management): sub-tabs Teachers (register/list/expand-row, mirrors
+//      StudentsTab + StudentFormModal — see TeachersTab /
+//      TeacherFormModal), Performance (see computeTeacherPerformance /
+//      TeacherPerformanceTab), Batch Schedule (see BatchScheduleTab /
+//      BatchScheduleFormModal), and Staff (reuses the Teacher form shell
+//      minus expertise/batch fields, plus a free-text Title — see
+//      StaffTab / StaffFormModal). Batch Schedule and Staff were placed
+//      here as sub-tabs rather than their own sidebar entries, to keep
+//      the sidebar from getting crowded — flagged as a judgment call per
+//      the brief, easy to promote to top-level nav later if preferred.
+//    - Attendance (new sidebar tab): sub-tabs "Mark Attendance" (date +
+//      class + subject, autofill from Batch Schedule only when the date
+//      is today and exactly one schedule window matches the current
+//      time, defaults everyone to Absent, idempotent upsert keyed by
+//      date+class+subject — see MarkAttendanceTab) and "Test Marks"
+//      (auto-generated Test ID {class}{subject}{YY}{seq}, roster pulled
+//      from the matching Batch Schedule record — see TestMarksTab). Test
+//      Marks was placed under Attendance rather than its own sidebar
+//      entry, same sidebar-crowding judgment call as above.
+//    - Teacher Performance is intentionally NOT hardcoded to one
+//      weighting formula — see computeTeacherPerformance(), an isolated,
+//      clearly-commented function with the attendance/test-score weights
+//      called out as the one thing to confirm/tune. The Performance
+//      sub-tab shows the computed summary AND the batch-level numbers it
+//      was built from, so it's auditable rather than a black box.
+//    - "Student active in a batch as of date X" (Test Marks roster) reuses
+//      the same batchHistory-by-month logic batchesForMonth() already
+//      uses for fee calculation (matched on the selected test date's
+//      month) — see studentsActiveInBatch(). Flagged: this checks the
+//      student's CURRENT class against the batch's class, since class
+//      itself isn't tracked with per-date history the way subjects/
+//      batches are (only the latest class change is snapshotted via
+//      Promote). Worth confirming if that's precise enough.
+//    - Trash/Restore: Teachers and Staff are fully wired into the
+//      existing Trash tab (soft delete / restore / permanent delete),
+//      same as students. Batch Schedule entries use a simple confirm +
+//      permanent delete (no trash bin) since they're setup/config
+//      records, not financial or attendance history. Attendance and Test
+//      Marks records save as one upserted document per key (date+class+
+//      subject, or the generated Test ID) exactly as specified, so
+//      re-opening the same combination edits in place rather than
+//      creating a duplicate to trash.
+//      Nothing about any existing tab, collection, component, or handler
+//      changed.
+//
+// Changes made in this fourth update pass:
+//  24. Teacher Management → renamed to "Institute Management" in the
+//      sidebar label and the tab's own SectionHeader/eyebrow text only —
+//      the internal id stays "teacher-management" so nothing that already
+//      referenced it (routing, trashCount, etc.) broke. Subtitle reworded
+//      to mention Salary and Advance now living here too.
+//      NEW FEATURE — Salary (see SalaryTab / SalaryFormModal /
+//      SalarySlipModal): a new sub-tab, right after "Staff", for paying
+//      teachers and other staff. The picker merges visibleTeachers and
+//      visibleStaff into one list (see mergeStaffAndTeachers()) with a
+//      personType flag ("teacher"|"staff") carried through everywhere.
+//      Pay Salary writes a `salaryPayments` record (own generateSalaryId()
+//      sequence, "SAL<year>####", same mechanism as generateStaffId) and,
+//      when the net amount paid is > 0, a matching banking feed line
+//      (kind: "debit", bucket by mode) so it lands in the Banking
+//      Statement's running Cash/Bank balance exactly like an expense —
+//      see bankingSalaryLines, folded into bankingFeedAsc alongside
 //      bankingExpenseLines. A printable salary slip (ChargeReceiptModal's
 //      print-window pattern) is shown after saving and can be reopened
 //      from the Salary history table.
