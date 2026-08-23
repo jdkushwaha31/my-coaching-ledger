@@ -609,6 +609,27 @@ import {
 //      batch's saved name when opening it to edit — only applies to a
 //      genuinely untouched name, whether on a new batch or after
 //      clearing an existing one.
+//
+// Changes made in this seventh update pass:
+//  40. View Attendance / View & Search Scores — the "#" row badge is now
+//      dynamic: it's the row's position within whatever is currently
+//      displayed (i.e. after search/class/subject/date filters, and —
+//      for a test's marks table — after the "Sort: Top Scorers" toggle),
+//      so it renumbers live as you filter/search/sort instead of showing
+//      a fixed lifetime session/test number. The fixed sessionNumberById
+//      / testNumberById lookups from update #37/#38 are removed — the
+//      "Showing X of Y" line and the header running totals (from #37/#38)
+//      are untouched and still reflect the true lifetime totals.
+//  41. Add/Edit Batch modal — Class and Subject now render above Batch
+//      Name (previously Batch Name was first). Pure reorder of the JSX —
+//      same fields, same state, same auto-fill-from-Class+Subject
+//      behavior from #39, nothing about how the form works changed.
+//  42. Batch Schedule (Teacher Management → Batch Schedule) gained a
+//      search box (matches batch name, class, subject, teacher/
+//      substitute name, or day) plus Class/Subject filter dropdowns —
+//      same Card/filter pattern used everywhere else in the app — a
+//      "Showing X of Y batches" line, and a dynamic "#" numbering column
+//      (position within the filtered list, same as #40) on the table.
 // ============================================================================
 
 // Admin Access Password
@@ -6472,6 +6493,25 @@ function TeacherPerformanceTab({ teachers, batches, attendanceRecords, tests }) 
 
 function BatchScheduleTab({ batchSchedule, teachers, classes, subjectsList, onAdd, onEdit, onRemove }) {
   const teacherById = Object.fromEntries(teachers.map(t => [t.id, t]));
+  const [search, setSearch] = useState("");
+  const [classFilter, setClassFilter] = useState("all");
+  const [subjectFilter, setSubjectFilter] = useState("all");
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return batchSchedule
+      .filter(b => classFilter === "all" || String(b.class) === classFilter)
+      .filter(b => subjectFilter === "all" || b.subject === subjectFilter)
+      .filter(b => {
+        if (!q) return true;
+        const teacher = teacherById[b.teacherId];
+        const sub = teacherById[b.substituteTeacherId];
+        const haystack = [b.batchName, b.class, b.subject, teacher?.name, sub?.name, ...(b.daysOfWeek || [])].filter(Boolean).join(" ").toLowerCase();
+        return haystack.includes(q);
+      });
+  }, [batchSchedule, classFilter, subjectFilter, search, teacherById]);
+  const isFiltered = search || classFilter !== "all" || subjectFilter !== "all";
+
   return (
     <div>
       <SectionHeader eyebrow="Scheduling" title="Batch Schedule" action={
@@ -6479,21 +6519,58 @@ function BatchScheduleTab({ batchSchedule, teachers, classes, subjectsList, onAd
           <Plus size={15} /> Add Batch
         </button>
       } />
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[180px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Batch name, teacher, or day..." />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Class</div>
+            <select className={inputCls} style={inputStyle} value={classFilter} onChange={e => setClassFilter(e.target.value)}>
+              <option value="all">All Classes</option>
+              {classes.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Subject</div>
+            <select className={inputCls} style={inputStyle} value={subjectFilter} onChange={e => setSubjectFilter(e.target.value)}>
+              <option value="all">All Subjects</option>
+              {subjectsList.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setClassFilter("all"); setSubjectFilter("all"); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
+      {batchSchedule.length > 0 && (
+        <div className="text-xs text-[#6E6650] mb-3">Showing {filtered.length} of {batchSchedule.length} batch{batchSchedule.length === 1 ? "" : "es"}</div>
+      )}
+
       <Card>
         {batchSchedule.length === 0 ? (
           <div className="p-8 text-center text-sm text-[#9C8F6E]">No batches scheduled yet.</div>
+        ) : filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No batches match these filters.</div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["Batch", "Class", "Subject", "Days", "Time", "Teacher", "Actions"].map(h => (
+                {["#", "Batch", "Class", "Subject", "Days", "Time", "Teacher", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {batchSchedule.map(b => (
+              {filtered.map((b, i) => (
                 <tr key={b.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-xs font-mono text-[#9C8F6E]">{i + 1}</td>
                   <td className="px-4 py-2.5 font-medium">{b.batchName}</td>
                   <td className="px-4 py-2.5 text-xs">{b.class}</td>
                   <td className="px-4 py-2.5 text-xs">{b.subject}</td>
@@ -6563,8 +6640,6 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
 
   return (
     <Modal title={initial ? "Edit Batch" : "Add Batch"} onClose={onClose}>
-      <Field label="Batch Name"><input className={inputCls} style={inputStyle} value={batchName} onChange={e => { setBatchName(e.target.value); setNameTouched(true); }} placeholder="e.g. Morning Physics Batch" /></Field>
-      {!nameTouched && <div className="text-[10px] text-[#9C8F6E] -mt-2.5 mb-3">Auto-filled from Class + Subject — type here to set a custom name.</div>}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Class">
           <select className={inputCls} style={inputStyle} value={cls} onChange={e => setCls(e.target.value)}>
@@ -6577,6 +6652,8 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
           </select>
         </Field>
       </div>
+      <Field label="Batch Name"><input className={inputCls} style={inputStyle} value={batchName} onChange={e => { setBatchName(e.target.value); setNameTouched(true); }} placeholder="e.g. Morning Physics Batch" /></Field>
+      {!nameTouched && <div className="text-[10px] text-[#9C8F6E] -mt-2.5 mb-3">Auto-filled from Class + Subject — type here to set a custom name.</div>}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Start Time"><input type="time" className={inputCls} style={inputStyle} value={startTime} onChange={e => setStartTime(e.target.value)} /></Field>
         <Field label="End Time"><input type="time" className={inputCls} style={inputStyle} value={endTime} onChange={e => setEndTime(e.target.value)} /></Field>
@@ -7627,17 +7704,6 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
 
   const studentById = useMemo(() => { const m = {}; students.forEach(s => { m[s.id] = s; }); return m; }, [students]);
 
-  // Overall sequence number for each session — "Session #1" is the very
-  // first attendance ever recorded, ascending from there — so a row shows
-  // exactly how many classes' worth of attendance have been filled by that
-  // point, and the header count above shows the running total.
-  const sessionNumberById = useMemo(() => {
-    const ascending = [...attendanceLog].sort((a, b) => compareChrono(a, b, 1));
-    const map = {};
-    ascending.forEach((a, i) => { map[a.id] = i + 1; });
-    return map;
-  }, [attendanceLog]);
-
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return attendanceLog
@@ -7722,7 +7788,7 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
       ) : (
         <div className="space-y-3">
           <div className="text-xs text-[#6E6650]">Showing {filtered.length} of {attendanceLog.length} attendance session{attendanceLog.length === 1 ? "" : "s"}</div>
-          {filtered.map(a => {
+          {filtered.map((a, i) => {
             const total = (a.records || []).length;
             const present = (a.records || []).filter(r => r.status === "Present").length;
             const expanded = expandedId === a.id;
@@ -7732,7 +7798,7 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
                 <div className="w-full flex items-center justify-between px-4 py-3">
                   <button onClick={() => toggleView(a)} className="flex-1 text-left">
                     <div className="text-sm font-semibold text-[#12312B]">
-                      <span className="text-[10px] font-mono text-[#9C8F6E] mr-2">Session #{sessionNumberById[a.id]}</span>
+                      <span className="text-[10px] font-mono text-[#9C8F6E] mr-2">#{i + 1}</span>
                       {a.class} · {a.subject}
                     </div>
                     <div className="text-[11px] text-[#9C8F6E]">
@@ -7851,17 +7917,6 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
 
   const studentById = useMemo(() => { const m = {}; students.forEach(s => { m[s.id] = s; }); return m; }, [students]);
 
-  // Overall sequence number for each test — "Test #1" is the very first
-  // test ever conducted, ascending from there — so a row shows exactly how
-  // many tests had been completed by that point, and the header count
-  // above shows the running total.
-  const testNumberById = useMemo(() => {
-    const ascending = [...tests].sort((a, b) => compareChrono(a, b, 1));
-    const map = {};
-    ascending.forEach((t, i) => { map[t.id] = i + 1; });
-    return map;
-  }, [tests]);
-
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return tests
@@ -7949,7 +8004,7 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
       ) : (
         <div className="space-y-3">
           <div className="text-xs text-[#6E6650]">Showing {filtered.length} of {tests.length} test{tests.length === 1 ? "" : "s"}</div>
-          {filtered.map(t => {
+          {filtered.map((t, i) => {
             const count = (t.scores || []).length;
             const avg = count ? round2((t.scores || []).reduce((sum, sc) => sum + (Number(sc.marks) || 0), 0) / count) : 0;
             const expanded = expandedId === t.id;
@@ -7959,7 +8014,7 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
                 <div className="w-full flex items-center justify-between px-4 py-3">
                   <button onClick={() => toggleView(t)} className="flex-1 text-left">
                     <div className="text-sm font-semibold text-[#12312B]">
-                      <span className="text-[10px] font-mono text-[#9C8F6E] mr-2">Test #{testNumberById[t.id]}</span>
+                      <span className="text-[10px] font-mono text-[#9C8F6E] mr-2">#{i + 1}</span>
                       {t.testId} — {t.class} · {t.subject}
                     </div>
                     <div className="text-[11px] text-[#9C8F6E]">{fmtDate(t.date)} · {t.description || "No description"} · {count} student{count === 1 ? "" : "s"} appeared · Avg {avg}/{t.maxMarks || 0}</div>
