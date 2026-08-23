@@ -11,7 +11,7 @@ import {
   BookOpen, Send, Printer, Award, ArrowUpRight, History, Tag, Undo2, Archive, RotateCcw, 
   ClipboardList, Percent, FileText, Search, Banknote, Landmark, CreditCard,
   GraduationCap, CalendarCheck, ClipboardCheck, MessageSquare, FileBarChart2,
-  UserCog, Clock, BadgeCheck
+  UserCog, Clock, BadgeCheck, Settings
 } from "lucide-react";
 
 // ============================================================================
@@ -675,6 +675,63 @@ import {
 //      separate icon-color fix needed. Non-empty / active states, the
 //      count badges, and everything else about how the pill row behaves
 //      are unchanged.
+//
+// Changes made in this tenth update pass:
+//  45. Teachers — added a dedicated Deactivate / Reactivate action
+//      (separate "Status History" panel on the teacher's expanded row,
+//      Option 1 from discussion) replacing the old plain Status dropdown
+//      in the Add/Edit Teacher form, which recorded neither a date nor a
+//      reason. Every transition now requires a date + remarks (new
+//      TeacherStatusModal) and is appended to a new `statusLog` array on
+//      the teacher doc (same append-only pattern as `salaryHistory`), so
+//      full activation history is preserved. New changeTeacherStatus()
+//      function; Performance (TeacherPerformanceTab) is completely
+//      untouched, exactly as planned.
+//  46. Dashboard gained an "Institute Snapshot" row (Overview → Institute
+//      Snapshot → Financial Health) with a Month/Year toggle: Institute
+//      Attendance % and Institute Avg Score % (derived from
+//      attendanceLog/tests — the same batch-wise collections Performance
+//      Report was just repointed at), plus Active Teachers and Active
+//      Staff counts. Purely additive; nothing else on the Dashboard
+//      changed.
+//  47. Settings — new "Settings" button just above "Lock Portal" opens a
+//      Institute Info form (Name, Tagline, Address, Phone, GST/
+//      Registration Number — text only per decision, logo deferred until
+//      Firebase Storage is confirmed set up). Backed by a new
+//      settings/institute Firestore doc, same live-sync pattern as
+//      classList/subjectList/streamList. Bigger win found while
+//      implementing: all 12 printed documents (receipts, slips,
+//      statements, the joining form) had "COACHING CLASSES" hardcoded as
+//      a duplicated literal — replaced with one shared InstituteHeader
+//      component (fed via InstituteSettingsContext) so setting the
+//      institute name here now updates every printout at once. Falls
+//      back to the same "COACHING CLASSES" placeholder text until
+//      Settings is filled in, so nothing looks broken pre-setup. The
+//      app's own product branding ("Batch Ledger Pro" in the sidebar) is
+//      untouched — this only governs the institute's own identity shown
+//      on documents.
+//  48. Add/Edit Batch modal gained a Room Number field (free text, per
+//      decision — Infrastructure Management's own room names are meant
+//      to be kept consistent with what's typed here, upgradeable to a
+//      dropdown later). Shown as a new "Room" column in the Batch
+//      Schedule table and included in its search.
+//  49. New "Infrastructure Management" sub-tab in Institute Management,
+//      right after "Advance" — a campus rooms/areas registry (Name,
+//      Category from the specified list, Capacity, Floor/Location,
+//      Remarks) with the same search/filter/numbering pattern as Batch
+//      Schedule (#42). New `infrastructure` Firestore collection, same
+//      simple upsert/hard-delete as tests/attendanceLog (no Trash
+//      support, same rationale as those two).
+//  50. Banking reorganization (per direct request): "Expenses Log" is no
+//      longer its own sidebar tab — it's now a Banking sub-tab, right
+//      after "Banking Statement". Salary, Advance, and Deposits Log are
+//      now ALSO reachable inside Banking (right before "Cash ⇄ Bank
+//      Transfer Logs"), alongside their original tabs in Student
+//      Management / Institute Management — true reuse, not a duplicate:
+//      depositsTabProps/expensesTabProps/salaryTabProps/advanceTabProps
+//      were pulled out into local consts (computed once) so both
+//      locations render the exact same component with the exact same
+//      data/handlers. Nothing about how any of the four behave changed.
 // ============================================================================
 
 // Admin Access Password
@@ -1248,6 +1305,35 @@ function SectionHeader({ eyebrow, title, action }) {
   );
 }
 
+// ---- Institute Settings — a single Firestore doc (settings/institute)
+// holding the institute's own display identity (Name, Tagline, Address,
+// Phone, GST/Registration Number), separate from the app's own product
+// branding ("Batch Ledger Pro" in the sidebar, which is unrelated and
+// untouched). Exposed via Context so every print template below can read
+// it without threading a prop through every intermediate component.
+const DEFAULT_INSTITUTE_SETTINGS = { instituteName: "COACHING CLASSES", tagline: "", address: "", phone: "", gstNumber: "" };
+const InstituteSettingsContext = React.createContext(DEFAULT_INSTITUTE_SETTINGS);
+
+// Shared header block for every printable document (receipts, slips,
+// statements, forms) — previously each of the 12 print templates had its
+// own hardcoded "COACHING CLASSES" <h2> + subtitle <p>, duplicated
+// verbatim. Now one component, reading institute name/address/phone from
+// Settings (falling back to the same "COACHING CLASSES" placeholder if
+// nothing's been set yet, so nothing looks broken pre-setup).
+function InstituteHeader({ subtitle, large }) {
+  const settings = React.useContext(InstituteSettingsContext);
+  return (
+    <>
+      <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className={`${large ? "text-2xl" : "text-xl"} font-bold text-[#12312B]`}>{settings.instituteName || "COACHING CLASSES"}</h2>
+      {settings.tagline && <p className="text-[10px] text-[#6E6650]">{settings.tagline}</p>}
+      <p className={`${large ? "text-[11px]" : "text-[10px]"} uppercase tracking-wider text-[#9C8F6E]`} style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{subtitle}</p>
+      {(settings.address || settings.phone) && (
+        <p className="text-[10px] text-[#9C8F6E] mt-0.5">{[settings.address, settings.phone].filter(Boolean).join(" · ")}</p>
+      )}
+    </>
+  );
+}
+
 export default function CoachingLedger() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => sessionStorage.getItem("ledger_auth") === "true");
   const [passInput, setPassInput] = useState("");
@@ -1294,6 +1380,7 @@ export default function CoachingLedger() {
   const [batchSchedule, setBatchSchedule] = useState([]);
   const [attendanceLog, setAttendanceLog] = useState([]);
   const [tests, setTests] = useState([]);
+  const [infrastructure, setInfrastructure] = useState([]);
   // Salary / Advance — two new Firestore collections, same live-sync +
   // soft-delete pattern as teachers/staff above (see UPDATE NOTES #24).
   const [salaryPayments, setSalaryPayments] = useState([]);
@@ -1327,10 +1414,15 @@ export default function CoachingLedger() {
   const [editingBehaviour, setEditingBehaviour] = useState(null);
   const [showTeacherForm, setShowTeacherForm] = useState(false);
   const [editingTeacher, setEditingTeacher] = useState(null);
+  // { teacher, newStatus } while the dedicated Deactivate/Reactivate modal
+  // (date + remarks) is open — separate from the Add/Edit Teacher form.
+  const [showTeacherStatusModal, setShowTeacherStatusModal] = useState(null);
   const [showStaffForm, setShowStaffForm] = useState(false);
   const [editingStaffMember, setEditingStaffMember] = useState(null);
   const [showBatchScheduleForm, setShowBatchScheduleForm] = useState(false);
   const [editingBatchSchedule, setEditingBatchSchedule] = useState(null);
+  const [showInfrastructureForm, setShowInfrastructureForm] = useState(false);
+  const [editingInfrastructure, setEditingInfrastructure] = useState(null);
   const [editingStudent, setEditingStudent] = useState(null);
   const [receiptData, setReceiptData] = useState(null);
   const [expenseReceiptData, setExpenseReceiptData] = useState(null);
@@ -1345,6 +1437,8 @@ export default function CoachingLedger() {
   const [showAdvanceForm, setShowAdvanceForm] = useState(false);
   const [showAdvanceReturnForm, setShowAdvanceReturnForm] = useState(false);
   const [showPersonStatement, setShowPersonStatement] = useState(null); // { personId, personType }
+  const [instituteSettings, setInstituteSettings] = useState(DEFAULT_INSTITUTE_SETTINGS);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   const handleLogin = (e) => {
     e.preventDefault();
@@ -1461,6 +1555,14 @@ export default function CoachingLedger() {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setTests(data);
     });
+    // Infrastructure Management — rooms/areas registry (Institute
+    // Management → Infrastructure Management). Same live-sync pattern as
+    // batchSchedule/tests above; no soft-delete/Trash for this collection,
+    // same as those two.
+    const unsubInfrastructure = onSnapshot(collection(db, "infrastructure"), (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setInfrastructure(data);
+    });
 
     const unsubFee = onSnapshot(doc(db, "settings", "feeStructure"), (docSnap) => {
       if (docSnap.exists()) {
@@ -1500,12 +1602,25 @@ export default function CoachingLedger() {
       }
     });
 
+    // Institute Settings — Name/Tagline/Address/Phone/GST shown on every
+    // printed document (see InstituteHeader / InstituteSettingsContext).
+    // Same settings/<key> doc pattern as classList/subjectList/streamList
+    // above; falls back to DEFAULT_INSTITUTE_SETTINGS (the same
+    // placeholder every print template already showed) until set.
+    const unsubInstituteSettings = onSnapshot(doc(db, "settings", "institute"), (docSnap) => {
+      if (docSnap.exists()) {
+        setInstituteSettings({ ...DEFAULT_INSTITUTE_SETTINGS, ...docSnap.data() });
+      } else {
+        setInstituteSettings(DEFAULT_INSTITUTE_SETTINGS);
+      }
+    });
+
     return () => {
       unsubStudents(); unsubDeposits(); unsubCharges(); unsubExpenses(); unsubBankTxns();
       unsubCreditTxns(); unsubInterestPayments(); unsubNotes();
       unsubAttendance(); unsubTestScores(); unsubBehaviourNotes();
-      unsubTeachers(); unsubStaff(); unsubSalaryPayments(); unsubAdvances(); unsubAdvanceReturns(); unsubBatchSchedule(); unsubAttendanceLog(); unsubTests();
-      unsubFee(); unsubClasses(); unsubSubjects(); unsubStreams();
+      unsubTeachers(); unsubStaff(); unsubSalaryPayments(); unsubAdvances(); unsubAdvanceReturns(); unsubBatchSchedule(); unsubAttendanceLog(); unsubTests(); unsubInfrastructure();
+      unsubFee(); unsubClasses(); unsubSubjects(); unsubStreams(); unsubInstituteSettings();
     };
   }, [isAuthenticated]);
 
@@ -2038,6 +2153,22 @@ export default function CoachingLedger() {
     setShowTeacherForm(false);
     setEditingTeacher(null);
   }
+  // ---- Dedicated Deactivate / Reactivate action for teachers — replaces
+  // the old plain "Status" dropdown in the Add/Edit Teacher form, which
+  // could flip active/inactive with no date and no reason on record. Every
+  // transition requires a date + remarks and is appended to `statusLog`
+  // (same append-only pattern as `salaryHistory` already uses), so a
+  // teacher's full activation history is preserved — nothing overwrites a
+  // past entry. Shown as its own "Status History" panel on the teacher's
+  // expanded row, kept separate from the existing Performance tab (which
+  // is completely untouched by this).
+  async function changeTeacherStatus(teacher, newStatus, date, remarks) {
+    const statusLog = [...(teacher.statusLog || []), {
+      type: newStatus === "inactive" ? "deactivated" : "reactivated",
+      date, remarks: remarks || "", loggedAt: nowStamp(),
+    }];
+    await setDoc(doc(db, "teachers", teacher.id), { ...teacher, status: newStatus, statusLog });
+  }
   async function softDeleteTeacher(id) {
     const t = teacherById[id];
     if (!t) return;
@@ -2290,6 +2421,18 @@ export default function CoachingLedger() {
     await deleteDoc(doc(db, "tests", id));
   }
 
+  // ---- Infrastructure Management — rooms/areas registry. Same simple
+  // upsert/hard-delete pattern as saveTest/deleteTest above (no Trash for
+  // this collection either).
+  async function saveInfrastructure(data) {
+    const id = data.id || uid();
+    await setDoc(doc(db, "infrastructure", id), { ...data, id });
+  }
+  async function deleteInfrastructure(id) {
+    if (!window.confirm("Delete this room/area entry? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "infrastructure", id));
+  }
+
   async function softDeleteDeposit(id) {
     const d = deposits.find(x => x.id === id);
     if (!d) return;
@@ -2483,6 +2626,11 @@ export default function CoachingLedger() {
     setStreams(updatedList);
     await setDoc(doc(db, "settings", "streamList"), { list: updatedList });
   }
+  async function saveInstituteSettings(data) {
+    setInstituteSettings(data);
+    await setDoc(doc(db, "settings", "institute"), data);
+    setShowSettingsModal(false);
+  }
 
   async function saveDeposit(data) {
     const id = uid();
@@ -2619,7 +2767,11 @@ export default function CoachingLedger() {
     // UPDATE NOTES entry for this change and AcademicMonitoringTab /
     // ACADEMIC_MONITORING_SUB_TABS.
     { id: "academic-monitoring", label: "Academic Monitoring", icon: GraduationCap },
-    { id: "expenses", label: "Expenses Log", icon: CreditCard },
+    // "Expenses Log" used to be its own sidebar entry here. It's now a
+    // Banking sub-tab instead (right after "Banking Statement") — see
+    // BANKING_SUB_TABS / BankingTab and the matching UPDATE NOTES entry.
+    // The ExpensesTab component, expensesTabProps, and softDeleteExpense
+    // are all unchanged; only where the tab is reachable from changed.
     { id: "banking", label: "Banking", icon: Landmark },
     { id: "notes", label: "Notes", icon: BookOpen },
     { id: "trash", label: "Trash / Restore", icon: Archive },
@@ -2627,7 +2779,42 @@ export default function CoachingLedger() {
 
   const trashCount = trashedStudents.length + trashedDeposits.length + trashedCharges.length + trashedExpenses.length + trashedBankTxns.length + trashedCreditTxns.length + trashedInterestPayments.length + trashedAttendance.length + trashedTestScores.length + trashedBehaviourNotes.length + trashedTeachers.length + trashedStaff.length + trashedSalaryPayments.length + trashedAdvances.length + trashedAdvanceReturns.length;
 
+  // These four prop objects used to be built inline, once each, right where
+  // their one consumer tab was rendered. They're now local consts instead —
+  // same exact shape, same exact values — so Banking's three new sub-tabs
+  // (#7: Salary, Advance, Deposits Log copies, plus #6: Expenses Log moved
+  // in) can be handed the identical object their original tab uses. Same
+  // data, same onAdd/onRemove/onStatement handlers, single source of truth
+  // — nothing about how any of these four behave changed, they're just
+  // reachable from two places now instead of one.
+  const depositsTabProps = {
+    deposits: visibleDeposits, students: visibleStudents, classes, studentDues: studentDuesMap,
+    onAdd: () => setShowDepositForm(true), onRemove: softDeleteDeposit,
+    onOpenReceipt: (dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] }),
+  };
+  const expensesTabProps = {
+    expenses: visibleExpenses,
+    onAdd: () => setShowExpenseForm(true), onRemove: softDeleteExpense,
+    onOpenReceipt: (exp) => setExpenseReceiptData(exp),
+  };
+  const salaryTabProps = {
+    salaryPayments: visibleSalaryPayments, persons: mergeStaffAndTeachers(visibleTeachers, visibleStaff),
+    onAdd: () => setShowSalaryForm(true),
+    onViewSlip: (p) => setSalarySlipData(p),
+    onRemove: softDeleteSalaryPayment,
+    onStatement: (personId, personType) => setShowPersonStatement({ personId, personType }),
+  };
+  const advanceTabProps = {
+    advances: visibleAdvances, advanceReturns: visibleAdvanceReturns, persons: mergeStaffAndTeachers(visibleTeachers, visibleStaff),
+    onAdd: () => setShowAdvanceForm(true),
+    onReturn: () => setShowAdvanceReturnForm(true),
+    onRemove: softDeleteAdvance,
+    onRemoveReturn: softDeleteAdvanceReturn,
+    onStatement: (personId, personType) => setShowPersonStatement({ personId, personType }),
+  };
+
   return (
+    <InstituteSettingsContext.Provider value={instituteSettings}>
     <div className="min-h-screen flex" style={{ background: "#FAF6EC", fontFamily: "'Inter', sans-serif", color: "#26231D" }}>
       <style>{`${FONT_IMPORT}
         .ledger-row:nth-child(even) { background: #F5F0E1; }
@@ -2674,6 +2861,9 @@ export default function CoachingLedger() {
           </nav>
         </div>
         <div style={{ borderTop: "1px solid #24473F" }}>
+          <button onClick={() => setShowSettingsModal(true)} className="w-full flex items-center gap-2 px-5 py-3 text-xs font-medium text-[#8FAE9F] hover:text-[#F4EFDE] transition-colors" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
+            <Settings size={14} /> Settings
+          </button>
           <button onClick={handleLogout} className="w-full flex items-center gap-2 px-5 py-3 text-xs font-medium text-[#8FAE9F] hover:text-[#F4EFDE] transition-colors" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
             <LogOut size={14} /> Lock Portal
           </button>
@@ -2692,6 +2882,7 @@ export default function CoachingLedger() {
             studentDues={studentDuesMap} forecastForMonth={forecastForMonth}
             totalCashBalance={totalCashBalance} totalOnlineBalance={totalOnlineBalance}
             cashExpensesTotal={cashExpensesTotal} onlineExpensesTotal={onlineExpensesTotal} totalExpenses={totalExpenses}
+            attendanceLog={attendanceLog} tests={tests} teachers={visibleTeachers} staff={visibleStaff}
             onOpenReceipt={(dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] })}
             onStatement={(s) => setShowStatementModal(s)}
           />
@@ -2714,11 +2905,7 @@ export default function CoachingLedger() {
               students: visibleStudents, ledgers, totalOutstanding, classes,
               onStatement: (s) => setShowStatementModal(s),
             }}
-            depositsTabProps={{
-              deposits: visibleDeposits, students: visibleStudents, classes, studentDues: studentDuesMap,
-              onAdd: () => setShowDepositForm(true), onRemove: softDeleteDeposit,
-              onOpenReceipt: (dep) => setReceiptData({ deposit: dep, student: studentById[dep.studentId] }),
-            }}
+            depositsTabProps={depositsTabProps}
             chargesTabProps={{
               chargeLines: allChargeLines, students: visibleStudents, classes,
               onAdd: () => setShowChargeModal({ student: null }), onRemove: softDeleteCharge,
@@ -2773,6 +2960,7 @@ export default function CoachingLedger() {
               onEdit: (t) => { setEditingTeacher(t); setShowTeacherForm(true); },
               onRemove: softDeleteTeacher,
               onStatement: (t) => setShowPersonStatement({ personId: t.id, personType: "teacher" }),
+              onChangeStatus: (t, newStatus) => setShowTeacherStatusModal({ teacher: t, newStatus }),
             }}
             performanceTabProps={{
               teachers: visibleTeachers, batches: batchSchedule, attendanceRecords: attendanceLog, tests,
@@ -2790,28 +2978,14 @@ export default function CoachingLedger() {
               onRemove: softDeleteStaffMember,
               onStatement: (s) => setShowPersonStatement({ personId: s.id, personType: "staff" }),
             }}
-            salaryTabProps={{
-              salaryPayments: visibleSalaryPayments, persons: mergeStaffAndTeachers(visibleTeachers, visibleStaff),
-              onAdd: () => setShowSalaryForm(true),
-              onViewSlip: (p) => setSalarySlipData(p),
-              onRemove: softDeleteSalaryPayment,
-              onStatement: (personId, personType) => setShowPersonStatement({ personId, personType }),
+            salaryTabProps={salaryTabProps}
+            advanceTabProps={advanceTabProps}
+            infrastructureTabProps={{
+              infrastructure,
+              onAdd: () => { setEditingInfrastructure(null); setShowInfrastructureForm(true); },
+              onEdit: (r) => { setEditingInfrastructure(r); setShowInfrastructureForm(true); },
+              onRemove: deleteInfrastructure,
             }}
-            advanceTabProps={{
-              advances: visibleAdvances, advanceReturns: visibleAdvanceReturns, persons: mergeStaffAndTeachers(visibleTeachers, visibleStaff),
-              onAdd: () => setShowAdvanceForm(true),
-              onReturn: () => setShowAdvanceReturnForm(true),
-              onRemove: softDeleteAdvance,
-              onRemoveReturn: softDeleteAdvanceReturn,
-              onStatement: (personId, personType) => setShowPersonStatement({ personId, personType }),
-            }}
-          />
-        )}
-        {tab === "expenses" && (
-          <ExpensesTab
-            expenses={visibleExpenses}
-            onAdd={() => setShowExpenseForm(true)} onRemove={softDeleteExpense}
-            onOpenReceipt={(exp) => setExpenseReceiptData(exp)}
           />
         )}
         {tab === "banking" && (
@@ -2819,6 +2993,8 @@ export default function CoachingLedger() {
             feed={bankingFeed} totals={bankingTotals}
             bankTxns={visibleBankTxns} creditTxns={visibleCreditTxns} interestPayments={visibleInterestPayments}
             interestPaidByCreditId={interestPaidByCreditId} students={visibleStudents}
+            expensesTabProps={expensesTabProps} depositsTabProps={depositsTabProps}
+            salaryTabProps={salaryTabProps} advanceTabProps={advanceTabProps}
             onAdd={() => setShowBankTxnForm(true)}
             onAddCredit={() => setShowCreditForm(true)}
             onPayInterest={(creditTxn) => setShowPayInterestModal(creditTxn)}
@@ -2941,6 +3117,11 @@ export default function CoachingLedger() {
         <TeacherFormModal subjectsList={subjectsList} initial={editingTeacher} teachers={visibleTeachers}
           onClose={() => { setShowTeacherForm(false); setEditingTeacher(null); }} onSave={saveTeacher} />
       )}
+      {showTeacherStatusModal && (
+        <TeacherStatusModal teacher={showTeacherStatusModal.teacher} newStatus={showTeacherStatusModal.newStatus}
+          onClose={() => setShowTeacherStatusModal(null)}
+          onSave={(date, remarks) => { changeTeacherStatus(showTeacherStatusModal.teacher, showTeacherStatusModal.newStatus, date, remarks); setShowTeacherStatusModal(null); }} />
+      )}
       {showStaffForm && (
         <StaffFormModal initial={editingStaffMember} staff={visibleStaff}
           onClose={() => { setShowStaffForm(false); setEditingStaffMember(null); }} onSave={saveStaffMember} />
@@ -2948,6 +3129,10 @@ export default function CoachingLedger() {
       {showBatchScheduleForm && (
         <BatchScheduleFormModal classes={classes} subjectsList={subjectsList} teachers={visibleTeachers} initial={editingBatchSchedule}
           onClose={() => { setShowBatchScheduleForm(false); setEditingBatchSchedule(null); }} onSave={saveBatchScheduleEntry} />
+      )}
+      {showInfrastructureForm && (
+        <InfrastructureFormModal initial={editingInfrastructure}
+          onClose={() => { setShowInfrastructureForm(false); setEditingInfrastructure(null); }} onSave={saveInfrastructure} />
       )}
       {showSalaryForm && (
         <SalaryFormModal persons={mergeStaffAndTeachers(visibleTeachers, visibleStaff)} advances={visibleAdvances}
@@ -3000,7 +3185,11 @@ export default function CoachingLedger() {
       {interestReceiptData && (
         <InterestReceiptModal payment={interestReceiptData.payment} creditTxn={interestReceiptData.creditTxn} onClose={() => setInterestReceiptData(null)} />
       )}
+      {showSettingsModal && (
+        <SettingsModal initial={instituteSettings} onClose={() => setShowSettingsModal(false)} onSave={saveInstituteSettings} />
+      )}
     </div>
+    </InstituteSettingsContext.Provider>
   );
 }
 
@@ -3184,13 +3373,44 @@ function DashSectionLabel({ children }) {
   );
 }
 
-function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMonthExpected, totalOutstanding, trend, classStrength, recentDeposits, studentById, curMonth, classes, studentDues, forecastForMonth, totalCashBalance, totalOnlineBalance, cashExpensesTotal, onlineExpensesTotal, totalExpenses, onOpenReceipt, onStatement }) {
+function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMonthExpected, totalOutstanding, trend, classStrength, recentDeposits, studentById, curMonth, classes, studentDues, forecastForMonth, totalCashBalance, totalOnlineBalance, cashExpensesTotal, onlineExpensesTotal, totalExpenses, attendanceLog, tests, teachers, staff, onOpenReceipt, onStatement }) {
   const collectionRate = thisMonthExpected > 0 ? Math.round((thisMonthCollected / thisMonthExpected) * 100) : 0;
   // Net Liquidity = Cash Balance + Online/Bank Balance, both now sourced
   // straight from the Banking ledger's running totals (see the "Dashboard
   // Net Liquidity" fix note where totalCashBalance / totalOnlineBalance are
   // computed), so this figure always matches the Banking tab exactly.
   const netLiquidity = round2(totalCashBalance + totalOnlineBalance);
+
+  // ---- Institute Snapshot — Attendance %, Avg Test Score %, and Active
+  // Teachers/Staff counts, for either the currently selected month (same
+  // curMonth the rest of the Dashboard already uses) or that whole year.
+  // Attendance/Score % are computed straight from attendanceLog/tests
+  // (the same batch-wise collections Performance Report now uses too —
+  // see that bugfix), filtered to the chosen period.
+  const [snapshotPeriod, setSnapshotPeriod] = useState("month");
+  const snapshotYear = curMonth.slice(0, 4);
+  const inPeriod = (dateStr) => {
+    if (!dateStr) return false;
+    return snapshotPeriod === "month" ? dateStr.slice(0, 7) === curMonth : dateStr.slice(0, 4) === snapshotYear;
+  };
+  const periodAttendance = (attendanceLog || []).filter(a => inPeriod(a.date));
+  const attendanceRecordCount = periodAttendance.reduce((n, a) => n + (a.records || []).length, 0);
+  const attendancePresentCount = periodAttendance.reduce((n, a) => n + (a.records || []).filter(r => r.status === "Present").length, 0);
+  const institutePresencePct = attendanceRecordCount > 0 ? round2((attendancePresentCount / attendanceRecordCount) * 100) : null;
+
+  const periodTests = (tests || []).filter(t => inPeriod(t.date));
+  const scoreTotals = periodTests.reduce((acc, t) => {
+    (t.scores || []).forEach(sc => {
+      if (sc.marks === "" || sc.marks == null) return;
+      acc.obtained += Number(sc.marks) || 0;
+      acc.max += Number(t.maxMarks) || 0;
+    });
+    return acc;
+  }, { obtained: 0, max: 0 });
+  const institutePerformancePct = scoreTotals.max > 0 ? round2((scoreTotals.obtained / scoreTotals.max) * 100) : null;
+
+  const activeTeacherCount = (teachers || []).filter(t => (t.status || "active") === "active").length;
+  const activeStaffCount = (staff || []).filter(s => (s.status || "active") === "active").length;
 
   // NEW: Top Outstanding Dues — quick at-a-glance list of whoever owes the
   // most right now, without leaving the Dashboard to open the Dues tab.
@@ -3213,6 +3433,30 @@ function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMo
         <StatCard label="Collected this month" value={fmtINR(thisMonthCollected)} sub={`of ${fmtINR(thisMonthExpected)} expected`} tone="good" />
         <StatCard label="Collection rate" value={`${collectionRate}%`} tone={collectionRate >= 80 ? "good" : collectionRate >= 50 ? "warn" : "bad"} />
         <StatCard label="Total Dues Balance" value={fmtINR(totalOutstanding)} sub={thisMonthWriteOffs > 0 ? `${fmtINR(thisMonthWriteOffs)} written off this month` : "includes carried-over dues"} tone={totalOutstanding > 0 ? "bad" : "good"} />
+      </div>
+
+      {/* ===== INSTITUTE SNAPSHOT ===== */}
+      <div className="flex items-center justify-between mb-2">
+        <DashSectionLabel>Institute Snapshot</DashSectionLabel>
+        <div className="flex border rounded-sm overflow-hidden mb-2" style={{ borderColor: "#12312B" }}>
+          {["month", "year"].map((p, i) => (
+            <button key={p} onClick={() => setSnapshotPeriod(p)}
+              className="px-3 py-1 text-[11px] font-semibold"
+              style={{ background: snapshotPeriod === p ? "#12312B" : "white", color: snapshotPeriod === p ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+              {p === "month" ? monthLabel(curMonth) : snapshotYear}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="grid grid-cols-4 gap-4 mb-4">
+        <StatCard label="Institute Attendance" value={institutePresencePct == null ? "—" : `${institutePresencePct}%`}
+          sub={attendanceRecordCount > 0 ? `${attendancePresentCount}/${attendanceRecordCount} present` : "No attendance marked yet"}
+          tone={institutePresencePct == null ? undefined : institutePresencePct >= 80 ? "good" : institutePresencePct >= 60 ? "warn" : "bad"} />
+        <StatCard label="Institute Avg Score" value={institutePerformancePct == null ? "—" : `${institutePerformancePct}%`}
+          sub={periodTests.length > 0 ? `${periodTests.length} test${periodTests.length === 1 ? "" : "s"} conducted` : "No tests conducted yet"}
+          tone={institutePerformancePct == null ? undefined : institutePerformancePct >= 60 ? "good" : institutePerformancePct >= 40 ? "warn" : "bad"} />
+        <StatCard label="Active Teachers" value={activeTeacherCount} sub={`of ${(teachers || []).length} total`} />
+        <StatCard label="Active Staff" value={activeStaffCount} sub={`of ${(staff || []).length} total`} />
       </div>
 
       {/* ===== FINANCIAL HEALTH ===== */}
@@ -4691,8 +4935,7 @@ function PerformanceReportTab({ students, attendanceLog, tests, behaviourNotes }
           style={{ border: "1.5px solid #B8862B", borderRadius: "4px", boxShadow: "0 1px 3px rgba(18,49,43,0.08)" }}
         >
           <div className="text-center pb-3 mb-4" style={{ borderBottom: "2px dashed #12312B" }}>
-            <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-            <p className="text-[11px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Student Performance Report</p>
+            <InstituteHeader subtitle={`Student Performance Report`} large={true} />
           </div>
 
           <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm mb-5">
@@ -5120,6 +5363,17 @@ const BANKING_TXN_TYPE_META = {
 // pill-row inside BankingTab, same pattern as StructureTab's sub-tabs.
 const BANKING_SUB_TABS = [
   { id: "statement", label: "Banking Statement", icon: FileText },
+  // Expenses Log moved here from its own sidebar entry (see UPDATE NOTES) —
+  // right after Banking Statement, per request.
+  { id: "expenses", label: "Expenses Log", icon: Wallet },
+  // Salary, Advance, and Deposits Log — not new tabs of their own, just the
+  // exact same SalaryTab/AdvanceTab/DepositsTab components Institute
+  // Management / Student Management already render, reachable here too so
+  // Banking is a complete picture of money movement in one place. Placed
+  // right before Cash ⇄ Bank Transfer Logs, per request.
+  { id: "salary", label: "Salary", icon: Banknote },
+  { id: "advance", label: "Advance", icon: ArrowUpRight },
+  { id: "deposits", label: "Deposits Log", icon: Receipt },
   { id: "transfers", label: "Cash ⇄ Bank Transfer Logs", icon: ArrowUpRight },
   { id: "credit", label: "Credit & Loan Ledger", icon: CreditCard },
   { id: "interest", label: "Interest Payments Log", icon: Percent },
@@ -5265,8 +5519,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
       <Card>
         <div ref={statementRef}>
           <div className="stmt-header text-center pb-3 mb-1 px-4 pt-4 border-b-2 border-dashed border-[#12312B]">
-            <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-            <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Center-Wide Master Statement — Generated {generatedOn}</p>
+            <InstituteHeader subtitle={`Center-Wide Master Statement — Generated ${generatedOn}`} large={false} />
           </div>
           {filtered.length === 0 ? (
             <div className="p-8 text-center text-sm text-[#9C8F6E]">No transactions match these filters.</div>
@@ -5350,7 +5603,7 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
 // side by side, so the two balances are always auditable transaction-by-
 // transaction.
 // ============================================================================
-function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, interestPaidByCreditId, students, onAdd, onAddCredit, onPayInterest, onViewReceipt, onViewExpense, onViewBankTxn, onViewCredit, onViewInterest, onRemoveBankTxn, onRemoveCredit, onRemoveInterest }) {
+function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, interestPaidByCreditId, students, expensesTabProps, depositsTabProps, salaryTabProps, advanceTabProps, onAdd, onAddCredit, onPayInterest, onViewReceipt, onViewExpense, onViewBankTxn, onViewCredit, onViewInterest, onRemoveBankTxn, onRemoveCredit, onRemoveInterest }) {
   const statementRef = useRef();
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -5528,8 +5781,7 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
       <Card>
         <div ref={statementRef}>
           <div className="stmt-header text-center pb-3 mb-1 px-4 pt-4 border-b-2 border-dashed border-[#12312B]">
-            <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-            <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Banking Statement — Generated {generatedOn}</p>
+            <InstituteHeader subtitle={`Banking Statement — Generated ${generatedOn}`} large={false} />
           </div>
           {filtered.length === 0 ? (
             <div className="p-8 text-center text-sm text-[#9C8F6E]">No banking transactions match these filters.</div>
@@ -5596,6 +5848,11 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
       </Card>
       </>
       )}
+
+      {subTab === "expenses" && <ExpensesTab {...expensesTabProps} />}
+      {subTab === "salary" && <SalaryTab {...salaryTabProps} />}
+      {subTab === "advance" && <AdvanceTab {...advanceTabProps} />}
+      {subTab === "deposits" && <DepositsTab {...depositsTabProps} />}
 
       {subTab === "transfers" && (
       <>
@@ -6351,14 +6608,15 @@ const TEACHER_MANAGEMENT_SUB_TABS = [
   { id: "staff", label: "Staff", icon: Users },
   { id: "salary", label: "Salary", icon: Wallet },
   { id: "advance", label: "Advance", icon: Banknote },
+  { id: "infrastructure", label: "Infrastructure Management", icon: Landmark },
 ];
 
-function TeacherManagementTab({ teachersTabProps, performanceTabProps, batchScheduleTabProps, staffTabProps, salaryTabProps, advanceTabProps }) {
+function TeacherManagementTab({ teachersTabProps, performanceTabProps, batchScheduleTabProps, staffTabProps, salaryTabProps, advanceTabProps, infrastructureTabProps }) {
   const [subTab, setSubTab] = useState("teachers");
   return (
     <div>
       <SectionHeader eyebrow="Staffing" title="Institute Management" />
-      <div className="text-sm text-[#6E6650] mb-4">Teacher register, performance, batch allotment, other staff, and Salary & Advance payments — in one place.</div>
+      <div className="text-sm text-[#6E6650] mb-4">Teacher register, performance, batch allotment, other staff, Salary & Advance payments, and campus infrastructure — in one place.</div>
 
       <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
         {TEACHER_MANAGEMENT_SUB_TABS.map((st, i) => {
@@ -6380,11 +6638,12 @@ function TeacherManagementTab({ teachersTabProps, performanceTabProps, batchSche
       {subTab === "staff" && <StaffTab {...staffTabProps} />}
       {subTab === "salary" && <SalaryTab {...salaryTabProps} />}
       {subTab === "advance" && <AdvanceTab {...advanceTabProps} />}
+      {subTab === "infrastructure" && <InfrastructureTab {...infrastructureTabProps} />}
     </div>
   );
 }
 
-function TeachersTab({ teachers, subjectsList, batchSchedule, onAdd, onEdit, onRemove, onStatement }) {
+function TeachersTab({ teachers, subjectsList, batchSchedule, onAdd, onEdit, onRemove, onStatement, onChangeStatus }) {
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState({});
 
@@ -6445,6 +6704,10 @@ function TeachersTab({ teachers, subjectsList, batchSchedule, onAdd, onEdit, onR
                       <td className="px-4 py-2.5 text-xs"><Stamp text={(t.status || "active") === "active" ? "Active" : "Inactive"} tone={(t.status || "active") === "active" ? "paid" : "overdue"} /></td>
                       <td className="px-4 py-2.5 text-right whitespace-nowrap">
                         {onStatement && <button onClick={() => onStatement(t)} className="text-xs text-[#8A6420] underline mr-3">Statement</button>}
+                        <button onClick={() => onChangeStatus(t, (t.status || "active") === "active" ? "inactive" : "active")}
+                          className="text-xs underline mr-3" style={{ color: (t.status || "active") === "active" ? "#A63D2F" : "#3F6B52" }}>
+                          {(t.status || "active") === "active" ? "Deactivate" : "Reactivate"}
+                        </button>
                         <button onClick={() => onEdit(t)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
                         <button onClick={() => onRemove(t.id)} className="text-xs text-[#A63D2F] underline">Remove</button>
                       </td>
@@ -6481,6 +6744,20 @@ function TeachersTab({ teachers, subjectsList, batchSchedule, onAdd, onEdit, onR
                                 <div key={b.id}>{b.batchName} — Class {b.class} · {b.subject} ({(b.daysOfWeek || []).join("/")}, {b.startTime}–{b.endTime}){b.substituteTeacherId === t.id ? " [Substitute]" : ""}</div>
                               ))}
                             </div>
+                            {(t.statusLog || []).length > 0 && (
+                              <div>
+                                <span className="text-[#9C8F6E] block font-mono text-[10px] uppercase mb-1">Status History</span>
+                                {[...t.statusLog].sort((a, b) => compareChrono(a, b, -1)).map((s, i) => (
+                                  <div key={i} className="flex items-center gap-1.5">
+                                    <span className="font-semibold" style={{ color: s.type === "deactivated" ? "#A63D2F" : "#3F6B52" }}>
+                                      {s.type === "deactivated" ? "Deactivated" : "Reactivated"}
+                                    </span>
+                                    <span className="text-[#9C8F6E]">{fmtDate(s.date)}</span>
+                                    {s.remarks && <span>— {s.remarks}</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -6508,7 +6785,6 @@ function TeacherFormModal({ subjectsList, initial, teachers, onClose, onSave }) 
   const [expertiseSubjects, setExpertiseSubjects] = useState(initial?.expertiseSubjects || []);
   const [salaryAmount, setSalaryAmount] = useState(initial?.salaryAmount || "");
   const [paymentMode, setPaymentMode] = useState(initial?.paymentMode || "Bank Transfer");
-  const [status, setStatus] = useState(initial?.status || "active");
   const [qualifications, setQualifications] = useState(initial?.qualifications || []);
   const [parallelProfessions, setParallelProfessions] = useState(initial?.parallelProfessions || []);
 
@@ -6537,7 +6813,7 @@ function TeacherFormModal({ subjectsList, initial, teachers, onClose, onSave }) 
       name: name.trim(), dob, gender, phone: phone.trim(), guardianPhone: guardianPhone.trim(),
       address: address.trim(), aadharNumber: aadharNumber.trim(), joiningDate: joiningDate || todayStr(),
       qualifications, parallelProfessions, expertiseSubjects,
-      salaryAmount: newAmt, paymentMode, salaryHistory, status,
+      salaryAmount: newAmt, paymentMode, salaryHistory, status: initial?.status || "active",
     });
   }
 
@@ -6617,16 +6893,85 @@ function TeacherFormModal({ subjectsList, initial, teachers, onClose, onSave }) 
       {initial?.salaryHistory?.length > 0 && (
         <div className="text-[10px] text-[#9C8F6E] mb-3">Salary history: {initial.salaryHistory.map((h, i) => `${fmtDate(h.date)} — ${fmtINR(h.amount)}`).join(" · ")}</div>
       )}
-      <Field label="Status">
-        <select className={inputCls} style={inputStyle} value={status} onChange={e => setStatus(e.target.value)}>
-          <option value="active">Active</option><option value="inactive">Inactive</option>
-        </select>
-      </Field>
+      {initial && (
+        <div className="text-[10px] text-[#9C8F6E] mb-3">
+          Status: <span className="font-semibold" style={{ color: (initial.status || "active") === "active" ? "#3F6B52" : "#A63D2F" }}>{(initial.status || "active") === "active" ? "Active" : "Inactive"}</span> — use the Deactivate / Reactivate button on the teacher's row to change this (requires a date and remarks).
+        </div>
+      )}
 
       <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
         {initial ? "Save Changes" : "Register Teacher"}
       </button>
     </WideModal>
+  );
+}
+
+// ---- Dedicated Deactivate / Reactivate modal — requires a date and
+// remarks for every status transition (unlike the old plain Status
+// dropdown, which recorded neither). Every submission is appended to the
+// teacher's statusLog, never overwritten — see changeTeacherStatus() and
+// the "Status History" panel in TeachersTab.
+function TeacherStatusModal({ teacher, newStatus, onClose, onSave }) {
+  const [date, setDate] = useState(todayStr());
+  const [remarks, setRemarks] = useState("");
+  const activating = newStatus === "active";
+
+  return (
+    <Modal title={`${activating ? "Reactivate" : "Deactivate"} ${teacher.name}`} onClose={onClose}>
+      <div className="text-sm text-[#6E6650] mb-3">
+        {activating
+          ? "Record when this teacher is returning to active duty, and why."
+          : "Record when this teacher stopped active duty, and why. This doesn't remove them or their history — Performance and Batches stay exactly as they are."}
+      </div>
+      <Field label={activating ? "Reactivation Date" : "Inactive Date"}>
+        <input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} />
+      </Field>
+      <Field label="Remarks">
+        <input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)}
+          placeholder={activating ? "e.g. Returned from leave" : "e.g. Extended leave, resigned, on-hold"} />
+      </Field>
+      <button onClick={() => onSave(date, remarks)} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium"
+        style={{ background: activating ? "#3F6B52" : "#A63D2F", color: "#F4EFDE" }}>
+        {activating ? "Confirm Reactivation" : "Confirm Deactivation"}
+      </button>
+    </Modal>
+  );
+}
+
+// ---- Settings — Institute Name/Tagline/Address/Phone/GST (text only, per
+// decision — logo is a later addition once Firebase Storage is set up).
+// This is the institute's own business identity shown on every printed
+// document via InstituteHeader (see DEFAULT_INSTITUTE_SETTINGS /
+// InstituteSettingsContext) — separate from "Batch Ledger Pro", the app's
+// own product branding in the sidebar, which this does not touch.
+function SettingsModal({ initial, onClose, onSave }) {
+  const [instituteName, setInstituteName] = useState(initial?.instituteName || "");
+  const [tagline, setTagline] = useState(initial?.tagline || "");
+  const [address, setAddress] = useState(initial?.address || "");
+  const [phone, setPhone] = useState(initial?.phone || "");
+  const [gstNumber, setGstNumber] = useState(initial?.gstNumber || "");
+
+  function submit() {
+    onSave({
+      instituteName: instituteName.trim() || "COACHING CLASSES",
+      tagline: tagline.trim(), address: address.trim(), phone: phone.trim(), gstNumber: gstNumber.trim(),
+    });
+  }
+
+  return (
+    <Modal title="Settings — Institute Info" onClose={onClose}>
+      <div className="text-sm text-[#6E6650] mb-3">This appears on every printed receipt, slip, and statement in place of the default "COACHING CLASSES" placeholder.</div>
+      <Field label="Institute Name"><input className={inputCls} style={inputStyle} value={instituteName} onChange={e => setInstituteName(e.target.value)} placeholder="e.g. Horizon Coaching Classes" /></Field>
+      <Field label="Tagline (optional)"><input className={inputCls} style={inputStyle} value={tagline} onChange={e => setTagline(e.target.value)} placeholder="e.g. Excellence in JEE & NEET Coaching" /></Field>
+      <Field label="Address (optional)"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="Street / area / city" /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Phone (optional)"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} /></Field>
+        <Field label="GST / Registration No. (optional)"><input className={inputCls} style={inputStyle} value={gstNumber} onChange={e => setGstNumber(e.target.value)} /></Field>
+      </div>
+      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        Save Settings
+      </button>
+    </Modal>
   );
 }
 
@@ -6707,7 +7052,7 @@ function BatchScheduleTab({ batchSchedule, teachers, classes, subjectsList, onAd
         if (!q) return true;
         const teacher = teacherById[b.teacherId];
         const sub = teacherById[b.substituteTeacherId];
-        const haystack = [b.batchName, b.class, b.subject, teacher?.name, sub?.name, ...(b.daysOfWeek || [])].filter(Boolean).join(" ").toLowerCase();
+        const haystack = [b.batchName, b.class, b.subject, b.roomNumber, teacher?.name, sub?.name, ...(b.daysOfWeek || [])].filter(Boolean).join(" ").toLowerCase();
         return haystack.includes(q);
       });
   }, [batchSchedule, classFilter, subjectFilter, search, teacherById]);
@@ -6763,7 +7108,7 @@ function BatchScheduleTab({ batchSchedule, teachers, classes, subjectsList, onAd
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                {["#", "Batch", "Class", "Subject", "Days", "Time", "Teacher", "Actions"].map(h => (
+                {["#", "Batch", "Class", "Subject", "Room", "Days", "Time", "Teacher", "Actions"].map(h => (
                   <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                 ))}
               </tr>
@@ -6775,6 +7120,7 @@ function BatchScheduleTab({ batchSchedule, teachers, classes, subjectsList, onAd
                   <td className="px-4 py-2.5 font-medium">{b.batchName}</td>
                   <td className="px-4 py-2.5 text-xs">{b.class}</td>
                   <td className="px-4 py-2.5 text-xs">{b.subject}</td>
+                  <td className="px-4 py-2.5 text-xs">{b.roomNumber || "—"}</td>
                   <td className="px-4 py-2.5 text-xs">{(b.daysOfWeek || []).join(", ")}</td>
                   <td className="px-4 py-2.5 text-xs font-mono whitespace-nowrap">{b.startTime}–{b.endTime}{b.duration ? ` (${b.duration})` : ""}</td>
                   <td className="px-4 py-2.5 text-xs">
@@ -6806,6 +7152,7 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
   const [daysOfWeek, setDaysOfWeek] = useState(initial?.daysOfWeek || []);
   const [teacherId, setTeacherId] = useState(initial?.teacherId || "");
   const [substituteTeacherId, setSubstituteTeacherId] = useState(initial?.substituteTeacherId || "");
+  const [roomNumber, setRoomNumber] = useState(initial?.roomNumber || "");
   // Batch Name auto-fills from Class + Subject (e.g. Class "12" + Subject
   // "Physics" -> "12 Physics"; Class "JEE" + Subject "Mathematics" -> "JEE
   // Mathematics") for as long as the user hasn't typed into the field
@@ -6835,7 +7182,7 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
     onSave({
       ...initial, id: initial?.id, batchName: batchName.trim(), class: cls, subject,
       startTime, endTime, duration: durationLabel(), daysOfWeek, teacherId,
-      substituteTeacherId: substituteTeacherId || null,
+      substituteTeacherId: substituteTeacherId || null, roomNumber: roomNumber.trim(),
     });
   }
 
@@ -6855,6 +7202,7 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
       </div>
       <Field label="Batch Name"><input className={inputCls} style={inputStyle} value={batchName} onChange={e => { setBatchName(e.target.value); setNameTouched(true); }} placeholder="e.g. Morning Physics Batch" /></Field>
       {!nameTouched && <div className="text-[10px] text-[#9C8F6E] -mt-2.5 mb-3">Auto-filled from Class + Subject — type here to set a custom name.</div>}
+      <Field label="Room Number"><input className={inputCls} style={inputStyle} value={roomNumber} onChange={e => setRoomNumber(e.target.value)} placeholder="e.g. Room 204, Lab 2 — matches Infrastructure Management" /></Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Start Time"><input type="time" className={inputCls} style={inputStyle} value={startTime} onChange={e => setStartTime(e.target.value)} /></Field>
         <Field label="End Time"><input type="time" className={inputCls} style={inputStyle} value={endTime} onChange={e => setEndTime(e.target.value)} /></Field>
@@ -7260,8 +7608,7 @@ function SalarySlipModal({ payment, onClose }) {
     <Modal title="Salary Slip" onClose={onClose}>
       <div className="p-4 border bg-white rounded-sm mb-4" ref={slipRef} style={{ borderColor: "#12312B" }}>
         <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Salary Slip</p>
+          <InstituteHeader subtitle={`Official Salary Slip`} large={false} />
         </div>
         <div className="space-y-2 text-xs">
           <div className="flex justify-between text-[#6E6650]">
@@ -7501,6 +7848,143 @@ function AdvanceReturnFormModal({ persons, advances, onClose, onSave }) {
       <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any note for this return" /></Field>
       <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
         Record Advance Return
+      </button>
+    </Modal>
+  );
+}
+
+// ---- Infrastructure Management — campus rooms/areas registry (Institute
+// Management → Infrastructure Management, right after Advance). Category
+// list exactly as specified: academic spaces, admin offices, common areas,
+// and campus-wide facilities (Parking, Sports Ground, Main Entry Gate) all
+// in one registry, same search/filter/numbering pattern as Batch Schedule.
+const INFRASTRUCTURE_CATEGORIES = [
+  "Class Room", "Laboratories", "Lecture Hall", "Workshops & Studios", "Library",
+  "Auditorium", "Exam Halls", "Principal / Director / Registrar Office", "Accounts",
+  "Registrar", "Faculty & Staff Rooms", "Conference Rooms", "Indoor Sports Room",
+  "Gymnasium", "Cafeteria", "Server & IT Room", "Storage", "Computer Center",
+  "Parking", "Sports Ground", "Main Entry Gate", "Other",
+];
+
+function InfrastructureTab({ infrastructure, onAdd, onEdit, onRemove }) {
+  const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return (infrastructure || [])
+      .filter(r => categoryFilter === "all" || r.category === categoryFilter)
+      .filter(r => {
+        if (!q) return true;
+        const haystack = [r.name, r.category, r.location, r.remarks].filter(Boolean).join(" ").toLowerCase();
+        return haystack.includes(q);
+      });
+  }, [infrastructure, search, categoryFilter]);
+  const isFiltered = search || categoryFilter !== "all";
+
+  // Categories actually in use, so the filter dropdown isn't 22 options
+  // deep when only a handful are ever used at a given institute.
+  const categoriesInUse = useMemo(() => Array.from(new Set((infrastructure || []).map(r => r.category))).filter(Boolean).sort(), [infrastructure]);
+
+  return (
+    <div>
+      <SectionHeader eyebrow="Campus" title="Infrastructure Management" action={
+        <button onClick={onAdd} className="flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>
+          <Plus size={15} /> Add Room / Area
+        </button>
+      } />
+      <div className="text-sm text-[#6E6650] mb-4">Every classroom, lab, office, and campus facility — with capacity, location, and remarks — in one registry. Batch Schedule's Room Number is free text today; keeping names consistent here makes it easy to cross-check which room a batch is actually in.</div>
+
+      <Card className="p-3.5 mb-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex-1 min-w-[180px]">
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Name, category, location, or remarks..." />
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Category</div>
+            <select className={inputCls} style={inputStyle} value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}>
+              <option value="all">All Categories</option>
+              {categoriesInUse.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          {isFiltered && (
+            <button onClick={() => { setSearch(""); setCategoryFilter("all"); }} className="text-xs text-[#A63D2F] underline pb-2.5">Clear filters</button>
+          )}
+        </div>
+      </Card>
+
+      {(infrastructure || []).length > 0 && (
+        <div className="text-xs text-[#6E6650] mb-3">Showing {filtered.length} of {infrastructure.length} entr{infrastructure.length === 1 ? "y" : "ies"}</div>
+      )}
+
+      <Card>
+        {(infrastructure || []).length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No rooms or areas registered yet.</div>
+        ) : filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[#9C8F6E]">No entries match these filters.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                {["#", "Name", "Category", "Capacity", "Location", "Remarks", "Actions"].map(h => (
+                  <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((r, i) => (
+                <tr key={r.id} className="ledger-row">
+                  <td className="px-4 py-2.5 text-xs font-mono text-[#9C8F6E]">{i + 1}</td>
+                  <td className="px-4 py-2.5 font-medium">{r.name}</td>
+                  <td className="px-4 py-2.5 text-xs">{r.category}</td>
+                  <td className="px-4 py-2.5 text-xs font-mono">{r.capacity || "—"}</td>
+                  <td className="px-4 py-2.5 text-xs">{r.location || "—"}</td>
+                  <td className="px-4 py-2.5 text-xs text-[#6E6650]">{r.remarks || "—"}</td>
+                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                    <button onClick={() => onEdit(r)} className="text-xs text-[#12312B] underline mr-3">Edit</button>
+                    <button onClick={() => onRemove(r.id)} className="text-xs text-[#A63D2F] underline">Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function InfrastructureFormModal({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [category, setCategory] = useState(initial?.category || INFRASTRUCTURE_CATEGORIES[0]);
+  const [capacity, setCapacity] = useState(initial?.capacity || "");
+  const [location, setLocation] = useState(initial?.location || "");
+  const [remarks, setRemarks] = useState(initial?.remarks || "");
+
+  function submit() {
+    if (!name.trim()) return;
+    onSave({ ...initial, id: initial?.id, name: name.trim(), category, capacity: capacity.trim(), location: location.trim(), remarks: remarks.trim() });
+  }
+
+  return (
+    <Modal title={initial ? "Edit Room / Area" : "Add Room / Area"} onClose={onClose}>
+      <Field label="Name"><input className={inputCls} style={inputStyle} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Room 204, Physics Lab, Main Gate" /></Field>
+      <Field label="Category">
+        <select className={inputCls} style={inputStyle} value={category} onChange={e => setCategory(e.target.value)}>
+          {INFRASTRUCTURE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Capacity (optional)"><input className={inputCls} style={inputStyle} value={capacity} onChange={e => setCapacity(e.target.value)} placeholder="e.g. 40 students" /></Field>
+        <Field label="Floor / Location (optional)"><input className={inputCls} style={inputStyle} value={location} onChange={e => setLocation(e.target.value)} placeholder="e.g. 2nd Floor, East Wing" /></Field>
+      </div>
+      <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any additional notes" /></Field>
+      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
+        {initial ? "Save Changes" : "Add to Registry"}
       </button>
     </Modal>
   );
@@ -9032,8 +9516,7 @@ function StudentStatementModal({ student, ledger, onClose, onViewReceipt, onView
       <div ref={statementRef}>
         {/* Letterhead — mirrors the official receipt so the statement reads as one professional record system */}
         <div className="text-center pb-3 mb-4 border-b-2 border-dashed border-[#12312B]">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Account Statement — All Recorded Transactions</p>
+          <InstituteHeader subtitle={`Official Account Statement — All Recorded Transactions`} large={false} />
         </div>
 
         {/* Student / account details */}
@@ -9365,8 +9848,7 @@ function ReceiptModal({ deposit, student, totalRemainingDue, onClose }) {
     <Modal title="Official Fee Receipt" onClose={onClose}>
       <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
         <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Payment Receipt</p>
+          <InstituteHeader subtitle={`Official Payment Receipt`} large={false} />
         </div>
         <div className="space-y-2 text-xs">
           <div className="flex justify-between text-[#6E6650]">
@@ -9537,8 +10019,7 @@ function BankTxnReceiptModal({ txn, onClose }) {
     <Modal title="Bank Transaction Slip" onClose={onClose}>
       <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
         <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Internal Banking Transaction Slip</p>
+          <InstituteHeader subtitle={`Internal Banking Transaction Slip`} large={false} />
         </div>
         <div className="space-y-2 text-xs">
           <div className="flex justify-between text-[#6E6650]">
@@ -9716,8 +10197,7 @@ function CreditReceiptModal({ txn, onClose }) {
     <Modal title="Credit / Loan Slip" onClose={onClose}>
       <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
         <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Credit / Loan Ledger Slip</p>
+          <InstituteHeader subtitle={`Credit / Loan Ledger Slip`} large={false} />
         </div>
         <div className="space-y-2 text-xs">
           <div className="flex justify-between text-[#6E6650]">
@@ -9856,8 +10336,7 @@ function InterestReceiptModal({ payment, creditTxn, onClose }) {
     <Modal title="Interest Payment Slip" onClose={onClose}>
       <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
         <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Interest Payment Slip</p>
+          <InstituteHeader subtitle={`Interest Payment Slip`} large={false} />
         </div>
         <div className="space-y-2 text-xs">
           <div className="flex justify-between text-[#6E6650]">
@@ -9918,8 +10397,7 @@ function ExpenseReceiptModal({ expense, onClose }) {
     <Modal title="Expense Receipt" onClose={onClose}>
       <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
         <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Expense Receipt</p>
+          <InstituteHeader subtitle={`Official Expense Receipt`} large={false} />
         </div>
         <div className="space-y-2 text-xs">
           <div className="flex justify-between text-[#6E6650]">
@@ -10014,8 +10492,7 @@ function JoiningFormModal({ student, deposits, onClose }) {
       >
         <div className="text-right font-mono text-[11px] mb-1" style={{ color: "#8A6420", letterSpacing: "0.06em" }}>{admissionNo}</div>
         <div className="header">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[11px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Student Joining / Admission Form</p>
+          <InstituteHeader subtitle={`Student Joining / Admission Form`} large={true} />
         </div>
 
         <div className="section-title">Student Details</div>
@@ -10105,8 +10582,7 @@ function ChargeReceiptModal({ line, student, onClose }) {
     <Modal title="Charge Receipt" onClose={onClose}>
       <div className="p-4 border bg-white rounded-sm mb-4" ref={receiptRef} style={{ borderColor: "#12312B" }}>
         <div className="text-center pb-3 mb-3 border-b-2 border-dashed border-[#12312B]">
-          <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#12312B]">COACHING CLASSES</h2>
-          <p className="text-[10px] uppercase tracking-wider text-[#9C8F6E]" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Official Charge Receipt — {typeLabel}</p>
+          <InstituteHeader subtitle={`Official Charge Receipt — ${typeLabel}`} large={false} />
         </div>
         <div className="space-y-2 text-xs">
           <div className="flex justify-between text-[#6E6650]">
