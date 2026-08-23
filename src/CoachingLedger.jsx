@@ -512,6 +512,68 @@ import {
 //      adds a second way to reach and edit the same records. New wrapper
 //      component ScoresSectionTab hosts the inner pill row; the
 //      "test-marks" sub-tab id is unchanged.
+//
+// Changes made in this fifth update pass:
+//  30. Test ID generation (generateTestId) no longer includes the literal
+//      word "Class" when the class field itself is stored as e.g. "Class
+//      12" — a new classCodeForId() strips a leading "Class" (any casing)
+//      before building the ID, so "Class 12Mathematics2601" becomes
+//      "12Mathematics2601". This only changes the generated ID string;
+//      the actual `class` field/value everywhere else (display, filters,
+//      Firestore storage) is completely untouched.
+//  31. Attendance — saveAttendanceLog now also captures `time` (HH:MM,
+//      auto-captured once at first save via nowTimeStr(), shown via the
+//      new fmtTime() helper) and `remarks` (free text, entered in Mark
+//      Attendance). Both are new fields on the attendanceLog doc,
+//      additive — old records without them just render with no time/
+//      remarks shown, nothing breaks.
+//  32. Attendance/View Attendance — new dedicated Edit and Delete buttons
+//      on every row (visible without expanding first). Clicking a row
+//      still only opens a READ-ONLY roster view (this used to be
+//      editable directly — that accidental-edit path is now closed).
+//      "Edit" opens a separate panel with Date, Time, and Remarks inputs
+//      plus per-student status toggles, saved through the new
+//      editAttendanceLog() (deletes+recreates the doc under the new
+//      date_class_subject key if the date changed, so nothing is
+//      duplicated or orphaned; class/subject aren't editable here since
+//      that would change which batch the session belongs to — out of
+//      scope of "edit the date and time"). "Delete" calls the new
+//      deleteAttendanceLog() (window.confirm, then a hard delete — no
+//      Trash/restore for this collection; see the existing note above
+//      about the attendanceLog/tests vs. old attendance/testScores Trash
+//      mismatch — flagging this as the same kind of assumption rather
+//      than silently building out full Trash support for it).
+//  33. Scores/View & Search Scores — same pattern as #32: dedicated Edit
+//      and Delete buttons on every row; expanding a row is READ-ONLY
+//      (also gained its own "Sort: Top Scorers" toggle, independent of
+//      Edit mode, so you can rank without entering edit). "Edit" opens a
+//      panel where Class, Subject, Date, Maximum Marks, Description, and
+//      every student's marks are all editable, saved through the new
+//      editTest() — writes to the same Firestore doc id (stable since
+//      creation) rather than looking up by testId, and regenerates the
+//      testId via generateTestId() if class/subject/date changed, so
+//      editing those fields renames/moves the test in place instead of
+//      creating a duplicate or leaving the old testId as an orphan (a UI
+//      hint appears when class/subject/date differ from the saved values
+//      to make that clear). "Delete" calls the new deleteTest() (confirm
+//      + hard delete, same rationale as #32).
+//  34. BUGFIX — Performance Report (Academic Monitoring → Performance
+//      Report) was reading the old, no-longer-written-to `attendance` /
+//      `testScores` props, so it always showed "No data" / stale numbers
+//      no matter how much was marked in Mark Attendance / Fill Marks —
+//      this was flagged as a known risk in update #27 and is now fixed.
+//      PerformanceReportTab is repointed at `attendanceLog` / `tests`
+//      (the same batch-wise collections everything else already uses)
+//      and derives each student's attendance % / recent scores by
+//      scanning those collections for that student's own record/score on
+//      each saved session/test. AcademicMonitoringTab's "report" sub-tab
+//      now passes attendanceLog/tests instead of attendance/testScores;
+//      the old attendance/testScores props are left wired through
+//      unchanged (per convention) even though this tab no longer reads
+//      them. "X day(s) recorded" is relabelled "X session(s) recorded"
+//      to match what's actually being counted (one per saved
+//      date+class+subject session the student appears in, not one per
+//      calendar day).
 // ============================================================================
 
 // Admin Access Password
@@ -588,6 +650,25 @@ function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
 function todayStr() { return new Date().toISOString().slice(0, 10); }
 function nowStamp() { return new Date().toISOString(); }
+// Current local clock time as "HH:MM" (24-hour), used to auto-capture "what
+// time was this attendance taken" on Mark Attendance / View Attendance —
+// distinct from `createdAt` (the row's own audit/creation timestamp used
+// only internally for chronoKey sort ordering, never shown).
+function nowTimeStr() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+// Formats a stored "HH:MM" (24-hour) time string as "h:mm AM/PM" for display.
+function fmtTime(t) {
+  if (!t) return "";
+  const m = String(t).match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return t;
+  let h = Number(m[1]);
+  const min = m[2];
+  const period = h >= 12 ? "PM" : "AM";
+  h = h % 12; if (h === 0) h = 12;
+  return `${h}:${min} ${period}`;
+}
 // Converts a stored YYYY-MM-DD (or full ISO datetime) string into the
 // "D Month YYYY" format (e.g. "17 August 2026") used for DISPLAY
 // everywhere in the UI. Storage, form inputs (type="date"/"month"),
@@ -774,9 +855,18 @@ function mergeStaffAndTeachers(teachers, staff) {
 // the current max and adds one. Recomputed reactively while the Test
 // Marks form is open (see TestMarksTab), same "computed live, finalized
 // on save" behavior as displayStudentId in StudentFormModal.
+// Strips a leading "Class" word (any casing, optional space) off a class
+// value before it goes into a generated Test ID — e.g. class "Class 12"
+// becomes "12" for ID purposes only. The actual `class` field stored on the
+// student/test record, and everywhere else it's displayed or filtered, is
+// completely untouched; this only changes what generateTestId() below
+// concatenates into the ID string.
+function classCodeForId(cls) {
+  return String(cls || "").trim().replace(/^class\s*/i, "");
+}
 function generateTestId(allTests, cls, subject, dateStr, excludeTestId) {
   const yy = (dateStr || todayStr()).slice(2, 4);
-  const prefix = `${cls || ""}${subject || ""}${yy}`;
+  const prefix = `${classCodeForId(cls)}${subject || ""}${yy}`;
   let max = 0;
   (allTests || []).forEach(t => {
     if (!t || !t.testId || t.testId === excludeTestId) return;
@@ -2024,14 +2114,46 @@ export default function CoachingLedger() {
 
   // ---- Attendance (batch-wise) — idempotent upsert keyed by
   // date_class_subject, so re-saving the same combination edits the same
-  // document instead of creating a duplicate.
-  async function saveAttendanceLog(dateStr, cls, subject, batchId, records) {
+  // document instead of creating a duplicate. `time` is captured once at
+  // first save (the moment attendance was actually taken) and kept as-is on
+  // every re-save from Mark Attendance itself; `remarks` is passed through
+  // as typed. Editing date/time/remarks afterward goes through
+  // editAttendanceLog below instead, which is the only path allowed to move
+  // the doc to a new key.
+  async function saveAttendanceLog(dateStr, cls, subject, batchId, records, time, remarks) {
     const key = `${dateStr}_${cls}_${subject}`.replace(/[^a-zA-Z0-9_-]/g, "-");
     const existing = attendanceLog.find(a => a.id === key);
     await setDoc(doc(db, "attendanceLog", key), {
       id: key, date: dateStr, class: cls, subject, batchId, records,
+      time: existing ? (existing.time || time || "") : (time || ""),
+      remarks: remarks || "",
       createdAt: existing ? existing.createdAt : nowStamp(),
     });
+  }
+  // ---- View Attendance → dedicated "Edit" action. Only date, time,
+  // remarks, and per-student statuses are editable (class/subject define
+  // which batch this session belongs to and aren't changed here). Since the
+  // doc id is derived from date_class_subject, changing the date means the
+  // key changes too — this deletes the old doc and writes the new one so no
+  // duplicate/orphan record is left behind.
+  async function editAttendanceLog(original, { date, time, remarks, records }) {
+    const newKey = `${date}_${original.class}_${original.subject}`.replace(/[^a-zA-Z0-9_-]/g, "-");
+    if (newKey !== original.id) {
+      await deleteDoc(doc(db, "attendanceLog", original.id));
+    }
+    await setDoc(doc(db, "attendanceLog", newKey), {
+      id: newKey, date, class: original.class, subject: original.subject, batchId: original.batchId || null,
+      records, time: time || "", remarks: remarks || "", createdAt: original.createdAt || nowStamp(),
+    });
+  }
+  // ---- View Attendance → dedicated "Delete" action, for accidentally
+  // created sessions. Hard delete (no Trash/restore for this collection —
+  // same as batchSchedule/tests below; flagged as an assumption in UPDATE
+  // NOTES, consistent with the existing attendanceLog/tests vs. old
+  // attendance/testScores Trash-support mismatch already called out there).
+  async function deleteAttendanceLog(id) {
+    if (!window.confirm("Delete this attendance record? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "attendanceLog", id));
   }
 
   // ---- Test Marks — upsert by testId (same reopen-and-reload behavior:
@@ -2043,6 +2165,27 @@ export default function CoachingLedger() {
     await setDoc(doc(db, "tests", id), {
       ...data, id, createdAt: existing ? existing.createdAt : nowStamp(),
     });
+  }
+  // ---- View & Search Scores → dedicated "Edit" action. Unlike saveTest
+  // (which looks up the doc by matching testId — fine when testId doesn't
+  // change), this edit path lets class/subject/date change, which changes
+  // what generateTestId computes. Writing to the same Firestore doc id
+  // (original.id, stable since creation — see saveTest's uid()) instead of
+  // looking up by testId means the record is renamed/moved in place rather
+  // than leaving the old testId behind as an orphan or creating a duplicate.
+  async function editTest(original, { cls, subject, date, maxMarks, description, scores }) {
+    const testId = generateTestId(tests, cls, subject, date, original.testId);
+    await setDoc(doc(db, "tests", original.id), {
+      id: original.id, testId, class: cls, subject, date,
+      maxMarks: Number(maxMarks) || 0, description, scores,
+      createdAt: original.createdAt || nowStamp(),
+    });
+  }
+  // ---- View & Search Scores → dedicated "Delete" action, for accidentally
+  // created tests. Hard delete, same rationale as deleteAttendanceLog above.
+  async function deleteTest(id) {
+    if (!window.confirm("Delete this test and all its scores? This cannot be undone.")) return;
+    await deleteDoc(doc(db, "tests", id));
   }
 
   async function softDeleteDeposit(id) {
@@ -2513,7 +2656,11 @@ export default function CoachingLedger() {
             subjectsList={subjectsList} batchSchedule={batchSchedule}
             attendanceLog={attendanceLog} batchesForMonth={batchesForMonth}
             onSaveAttendanceLog={saveAttendanceLog}
+            onEditAttendanceLog={editAttendanceLog}
+            onDeleteAttendanceLog={deleteAttendanceLog}
             tests={tests} onSaveTest={saveTest}
+            onEditTest={editTest}
+            onDeleteTest={deleteTest}
           />
         )}
         {tab === "teacher-management" && (
@@ -2762,7 +2909,7 @@ export default function CoachingLedger() {
 // ViewAttendanceTab below). Both read/write the same attendanceLog
 // collection via the same onSave (saveAttendanceLog), so anything edited in
 // View Attendance shows up immediately if reopened in Mark Attendance. ----
-function AttendanceSectionTab({ classes, subjectsList, batchSchedule, students, attendanceLog, batchesForMonth, onSave }) {
+function AttendanceSectionTab({ classes, subjectsList, batchSchedule, students, attendanceLog, batchesForMonth, onSave, onEdit, onDelete }) {
   const [inner, setInner] = useState("mark");
   return (
     <div>
@@ -2780,7 +2927,8 @@ function AttendanceSectionTab({ classes, subjectsList, batchSchedule, students, 
         <MarkAttendanceTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
           attendanceLog={attendanceLog} batchesForMonth={batchesForMonth} onSave={onSave} />
       ) : (
-        <ViewAttendanceTab attendanceLog={attendanceLog} students={students} classes={classes} subjectsList={subjectsList} onSave={onSave} />
+        <ViewAttendanceTab attendanceLog={attendanceLog} students={students} classes={classes} subjectsList={subjectsList}
+          onSave={onSave} onEdit={onEdit} onDelete={onDelete} />
       )}
     </div>
   );
@@ -2792,7 +2940,7 @@ function AttendanceSectionTab({ classes, subjectsList, batchSchedule, students, 
 // description, or student, sort by top scorers, and edit marks in place, see
 // ViewScoresTab below). Both read/write the same "tests" collection via the
 // same onSave (saveTest). ----
-function ScoresSectionTab({ classes, subjectsList, batchSchedule, students, tests, batchesForMonth, onSave }) {
+function ScoresSectionTab({ classes, subjectsList, batchSchedule, students, tests, batchesForMonth, onSave, onEdit, onDelete }) {
   const [inner, setInner] = useState("fill");
   return (
     <div>
@@ -2810,7 +2958,8 @@ function ScoresSectionTab({ classes, subjectsList, batchSchedule, students, test
         <TestMarksTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
           tests={tests} batchesForMonth={batchesForMonth} onSave={onSave} />
       ) : (
-        <ViewScoresTab tests={tests} students={students} classes={classes} subjectsList={subjectsList} onSave={onSave} />
+        <ViewScoresTab tests={tests} students={students} classes={classes} subjectsList={subjectsList}
+          onSave={onSave} onEdit={onEdit} onDelete={onDelete} />
       )}
     </div>
   );
@@ -3802,7 +3951,8 @@ function AcademicMonitoringTab({
   students, classes, attendance, testScores, behaviourNotes,
   onAddBehaviour, onEditBehaviour, onRemoveBehaviour,
   subjectsList, batchSchedule, attendanceLog, batchesForMonth, onSaveAttendanceLog,
-  tests, onSaveTest,
+  onEditAttendanceLog, onDeleteAttendanceLog,
+  tests, onSaveTest, onEditTest, onDeleteTest,
 }) {
   const [subTab, setSubTab] = useState("mark-attendance");
 
@@ -3828,18 +3978,29 @@ function AcademicMonitoringTab({
 
       {subTab === "mark-attendance" && (
         <AttendanceSectionTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
-          attendanceLog={attendanceLog} batchesForMonth={batchesForMonth} onSave={onSaveAttendanceLog} />
+          attendanceLog={attendanceLog} batchesForMonth={batchesForMonth} onSave={onSaveAttendanceLog}
+          onEdit={onEditAttendanceLog} onDelete={onDeleteAttendanceLog} />
       )}
       {subTab === "test-marks" && (
         <ScoresSectionTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
-          tests={tests} batchesForMonth={batchesForMonth} onSave={onSaveTest} />
+          tests={tests} batchesForMonth={batchesForMonth} onSave={onSaveTest}
+          onEdit={onEditTest} onDelete={onDeleteTest} />
       )}
       {subTab === "behaviour" && (
         <BehaviourTab students={students} classes={classes} behaviourNotes={behaviourNotes}
           onAdd={onAddBehaviour} onEdit={onEditBehaviour} onRemove={onRemoveBehaviour} />
       )}
       {subTab === "report" && (
-        <PerformanceReportTab students={students} attendance={attendance} testScores={testScores} behaviourNotes={behaviourNotes} />
+        // UPDATE — Performance Report used to read the old `attendance` /
+        // `testScores` props (per-student collections nothing writes to
+        // anymore, per the earlier flagged mismatch). It now reads
+        // `attendanceLog` / `tests` — the same batch-wise collections Mark
+        // Attendance / Fill Marks actually save to — so attendance % and
+        // test averages here now reflect real, current data. See
+        // PerformanceReportTab for the derivation. `attendance` / `testScores`
+        // props are left wired above (untouched, per convention) even though
+        // this tab no longer reads them.
+        <PerformanceReportTab students={students} attendanceLog={attendanceLog} tests={tests} behaviourNotes={behaviourNotes} />
       )}
     </div>
   );
@@ -4263,7 +4424,7 @@ function BehaviourTab({ students, classes, behaviourNotes, onAdd, onEdit, onRemo
 // clean A4 report. Reuses the Joining Form / Center Statement print-window
 // pattern: Tailwind CDN + Google Fonts loaded into the popup, A4 layout,
 // letterhead style. ----
-function PerformanceReportTab({ students, attendance, testScores, behaviourNotes }) {
+function PerformanceReportTab({ students, attendanceLog, tests, behaviourNotes }) {
   const [studentId, setStudentId] = useState(students[0]?.id || "");
   const [studentSearch, setStudentSearch] = useState("");
   const [classFilter, setClassFilter] = useState("all");
@@ -4281,18 +4442,43 @@ function PerformanceReportTab({ students, attendance, testScores, behaviourNotes
     });
   }, [students, studentSearch, classFilter]);
 
-  const studentAttendance = useMemo(() => (attendance || []).filter(a => a.studentId === studentId), [attendance, studentId]);
+  // BUGFIX — this used to read the old per-student `attendance` collection,
+  // which nothing writes to anymore (Mark Attendance saves to the batch-wise
+  // `attendanceLog` collection instead — see UPDATE NOTES). That made this
+  // report permanently show "No data" / stale numbers regardless of new
+  // attendance actually being marked. Now derived directly from
+  // attendanceLog: for every saved session, pull out this student's own
+  // record (if they were on that session's roster) into a flat list.
+  const studentAttendanceLog = useMemo(() => {
+    const rows = [];
+    (attendanceLog || []).forEach(a => {
+      const rec = (a.records || []).find(r => r.studentId === studentId);
+      if (rec) rows.push({ id: a.id, date: a.date, createdAt: a.createdAt, status: rec.status, subject: a.subject });
+    });
+    return rows.sort((a, b) => compareChrono(a, b, -1));
+  }, [attendanceLog, studentId]);
   const attendancePct = useMemo(() => {
-    const total = studentAttendance.length;
+    const total = studentAttendanceLog.length;
     if (!total) return null;
-    const present = studentAttendance.filter(a => a.status === "Present" || a.status === "Late").length;
+    const present = studentAttendanceLog.filter(a => a.status === "Present").length;
     return round2((present / total) * 100);
-  }, [studentAttendance]);
+  }, [studentAttendanceLog]);
 
-  const studentTestScores = useMemo(() =>
-    (testScores || []).filter(t => t.studentId === studentId).sort((a, b) => compareChrono(a, b, -1)).slice(0, 10),
-    [testScores, studentId]
-  );
+  // BUGFIX — same issue as attendance above: this used to read the old
+  // per-student `testScores` collection, which nothing writes to anymore
+  // (Fill Marks saves to the batch-wise `tests` collection instead). Now
+  // derived directly from `tests`: for every saved test, pull out this
+  // student's own score (if they were marked) into a flat list.
+  const studentTestScores = useMemo(() => {
+    const rows = [];
+    (tests || []).forEach(t => {
+      const sc = (t.scores || []).find(x => x.studentId === studentId);
+      if (sc && sc.marks !== "" && sc.marks != null) {
+        rows.push({ id: t.id, date: t.date, createdAt: t.createdAt, testId: t.testId, subject: t.subject, marksObtained: Number(sc.marks) || 0, maxMarks: Number(t.maxMarks) || 0, description: t.description });
+      }
+    });
+    return rows.sort((a, b) => compareChrono(a, b, -1)).slice(0, 10);
+  }, [tests, studentId]);
   const avgScorePct = useMemo(() => {
     if (!studentTestScores.length) return null;
     const totalObtained = studentTestScores.reduce((a, t) => a + (Number(t.marksObtained) || 0), 0);
@@ -4408,7 +4594,7 @@ function PerformanceReportTab({ students, attendance, testScores, behaviourNotes
               <div style={{ fontFamily: "'Zilla Slab', serif", color: attendancePct === null ? "#9C8F6E" : (attendancePct >= 75 ? "#3F6B52" : "#A63D2F") }} className="text-xl font-bold">
                 {attendancePct === null ? "No data" : `${attendancePct}%`}
               </div>
-              <div className="text-[11px] text-[#9C8F6E]">{studentAttendance.length} day(s) recorded</div>
+              <div className="text-[11px] text-[#9C8F6E]">{studentAttendanceLog.length} session(s) recorded</div>
             </div>
             <div className="p-3 rounded-sm border" style={{ borderColor: "#D8CFB8" }}>
               <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Average Test Score</div>
@@ -4437,11 +4623,11 @@ function PerformanceReportTab({ students, attendance, testScores, behaviourNotes
                   return (
                     <tr key={t.id} style={{ borderTop: "1px dotted #E4DCC5" }}>
                       <td className="py-1.5 whitespace-nowrap">{fmtDate(t.date)}</td>
-                      <td className="py-1.5">{t.testName}</td>
+                      <td className="py-1.5 font-mono">{t.testId}</td>
                       <td className="py-1.5">{t.subject}</td>
                       <td className="py-1.5 font-mono">{t.marksObtained}/{t.maxMarks}</td>
                       <td className="py-1.5 font-mono font-semibold" style={{ color: pct >= 40 ? "#3F6B52" : "#A63D2F" }}>{pct}%</td>
-                      <td className="py-1.5">{t.remarks || "—"}</td>
+                      <td className="py-1.5">{t.description || "—"}</td>
                     </tr>
                   );
                 })}
@@ -7096,6 +7282,7 @@ function MarkAttendanceTab({ classes, subjectsList, batchSchedule, students, att
   const [subject, setSubject] = useState("");
   const [userOverrode, setUserOverrode] = useState(false);
   const [statuses, setStatuses] = useState({}); // studentId -> "Present" | "Absent"
+  const [remarks, setRemarks] = useState("");
   const [saved, setSaved] = useState(false);
 
   // Autofill — only for today's date, only if exactly one Batch Schedule
@@ -7115,6 +7302,7 @@ function MarkAttendanceTab({ classes, subjectsList, batchSchedule, students, att
 
   useEffect(() => {
     setSaved(false);
+    setRemarks(existingDoc?.remarks || "");
     if (!roster.length) { setStatuses({}); return; }
     const map = {};
     roster.forEach(s => {
@@ -7131,7 +7319,11 @@ function MarkAttendanceTab({ classes, subjectsList, batchSchedule, students, att
 
   function handleSave() {
     const records = roster.map(s => ({ studentId: s.id, status: statuses[s.id] || "Absent" }));
-    onSave(date, cls, subject, matchedBatch?.id || null, records);
+    // Time is captured once, at the moment attendance is first saved for
+    // this session — re-saving (e.g. after fixing a status) keeps the
+    // originally recorded time (see saveAttendanceLog); it's only ever
+    // changed afterward through View Attendance's dedicated Edit.
+    onSave(date, cls, subject, matchedBatch?.id || null, records, existingDoc?.time || nowTimeStr(), remarks);
     setSaved(true);
   }
 
@@ -7157,6 +7349,12 @@ function MarkAttendanceTab({ classes, subjectsList, batchSchedule, students, att
               {subjectsList.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
+          {cls && subject && (
+            <div className="min-w-[200px] flex-1">
+              <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Remarks (optional)</div>
+              <input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="e.g. Half-day, exam prep session…" />
+            </div>
+          )}
         </div>
         {date === todayStr() && matchedBatch && !userOverrode && (
           <div className="text-[10px] text-[#3F6B52] mt-2 font-medium">Auto-filled from Batch Schedule: {matchedBatch.batchName}</div>
@@ -7198,7 +7396,10 @@ function MarkAttendanceTab({ classes, subjectsList, batchSchedule, students, att
                 </tbody>
               </table>
               <div className="p-3.5 flex items-center justify-between">
-                <div className="text-[11px] text-[#9C8F6E]">{saved ? "Saved." : existingDoc ? "Editing a previously saved record." : "Not yet saved."}</div>
+                <div className="text-[11px] text-[#9C8F6E]">
+                  {saved ? "Saved." : existingDoc ? "Editing a previously saved record." : "Not yet saved."}
+                  {existingDoc?.time && <span> · Recorded at {fmtTime(existingDoc.time)}</span>}
+                </div>
                 <button onClick={handleSave} className="px-4 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>Save Attendance</button>
               </div>
             </>
@@ -7344,16 +7545,22 @@ function TestMarksTab({ classes, subjectsList, batchSchedule, students, tests, b
 }
 
 // ---- View Attendance — browse/search previously saved attendanceLog
-// sessions (one doc per date+class+subject) and edit them in place. Reuses
-// the same upsert onSave (saveAttendanceLog) MarkAttendanceTab uses, keyed
-// off the same date_class_subject id, so editing here overwrites the exact
-// same document instead of creating a duplicate. ----
-function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onSave }) {
+// sessions (one doc per date+class+subject). Clicking a row only expands a
+// READ-ONLY view — nothing is editable there. A separate, dedicated "Edit"
+// button opens an editable panel (date, time, remarks, per-student status),
+// so a session can't be accidentally modified just by looking at it. Saves
+// through editAttendanceLog (handles the date→doc-key move); a dedicated
+// "Delete" button removes an accidentally created session outright. ----
+function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onSave, onEdit, onDelete }) {
   const [search, setSearch] = useState("");
   const [classFilter, setClassFilter] = useState("all");
   const [subjectFilter, setSubjectFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("");
   const [expandedId, setExpandedId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editDate, setEditDate] = useState("");
+  const [editTime, setEditTime] = useState("");
+  const [editRemarks, setEditRemarks] = useState("");
   const [editStatuses, setEditStatuses] = useState({});
   const [savedId, setSavedId] = useState(null);
 
@@ -7367,19 +7574,31 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
       .filter(a => !dateFilter || a.date === dateFilter)
       .filter(a => {
         if (!q) return true;
-        if (String(a.class).toLowerCase().includes(q) || String(a.subject).toLowerCase().includes(q)) return true;
+        if (String(a.class).toLowerCase().includes(q) || String(a.subject).toLowerCase().includes(q) || (a.remarks || "").toLowerCase().includes(q)) return true;
         return (a.records || []).some(r => { const s = studentById[r.studentId]; return s && (s.name.toLowerCase().includes(q) || (s.studentId || "").toLowerCase().includes(q)); });
       })
       .sort((a, b) => compareChrono(a, b, -1));
   }, [attendanceLog, classFilter, subjectFilter, dateFilter, search, studentById]);
 
+  function toggleView(a) {
+    setExpandedId(prev => (prev === a.id ? null : a.id));
+    if (editingId === a.id) setEditingId(null);
+  }
+
   function startEdit(a) {
-    setExpandedId(expandedId === a.id ? null : a.id);
+    setExpandedId(a.id);
+    setEditingId(a.id);
     setSavedId(null);
-    if (expandedId === a.id) return;
+    setEditDate(a.date);
+    setEditTime(a.time || nowTimeStr());
+    setEditRemarks(a.remarks || "");
     const map = {};
     (a.records || []).forEach(r => { map[r.studentId] = r.status; });
     setEditStatuses(map);
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
   }
 
   function toggleStatus(studentId) {
@@ -7388,7 +7607,9 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
 
   function saveEdit(a) {
     const records = (a.records || []).map(r => ({ studentId: r.studentId, status: editStatuses[r.studentId] || "Absent" }));
-    onSave(a.date, a.class, a.subject, a.batchId || null, records);
+    onEdit(a, { date: editDate, time: editTime, remarks: editRemarks, records });
+    setEditingId(null);
+    setExpandedId(editDate === a.date ? a.id : `${editDate}_${a.class}_${a.subject}`.replace(/[^a-zA-Z0-9_-]/g, "-"));
     setSavedId(a.id);
   }
 
@@ -7400,7 +7621,7 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
             <div className="text-[10px] uppercase tracking-wider text-[#9C8F6E] font-mono mb-1">Search</div>
             <div className="relative">
               <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#9C8F6E]" />
-              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Class, subject, or student..." />
+              <input className={inputCls + " pl-7"} style={inputStyle} value={search} onChange={e => setSearch(e.target.value)} placeholder="Class, subject, remarks, or student..." />
             </div>
           </div>
           <div>
@@ -7432,17 +7653,62 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
             const total = (a.records || []).length;
             const present = (a.records || []).filter(r => r.status === "Present").length;
             const expanded = expandedId === a.id;
+            const editing = editingId === a.id;
             return (
               <Card key={a.id} className="overflow-hidden">
-                <button onClick={() => startEdit(a)} className="w-full flex items-center justify-between px-4 py-3 text-left">
-                  <div>
+                <div className="w-full flex items-center justify-between px-4 py-3">
+                  <button onClick={() => toggleView(a)} className="flex-1 text-left">
                     <div className="text-sm font-semibold text-[#12312B]">{a.class} · {a.subject}</div>
-                    <div className="text-[11px] text-[#9C8F6E]">{fmtDate(a.date)} · {present}/{total} present</div>
+                    <div className="text-[11px] text-[#9C8F6E]">
+                      {fmtDate(a.date)}{a.time && ` · ${fmtTime(a.time)}`} · {present}/{total} present{a.remarks && ` · ${a.remarks}`}
+                    </div>
+                  </button>
+                  <div className="flex items-center gap-3 shrink-0 pl-3">
+                    {savedId === a.id && !editing && <span className="text-[11px] text-[#3F6B52] font-medium">Saved.</span>}
+                    <button onClick={() => startEdit(a)} className="text-xs text-[#12312B] underline font-medium">Edit</button>
+                    <button onClick={() => onDelete(a.id)} className="text-xs text-[#A63D2F] underline font-medium">Delete</button>
+                    <span className="text-xs text-[#9C8F6E]">{expanded ? "▾" : "▸"}</span>
                   </div>
-                  <span className="text-xs text-[#9C8F6E]">{expanded ? "▾" : "▸"}</span>
-                </button>
-                {expanded && (
+                </div>
+                {expanded && !editing && (
                   <div className="border-t" style={{ borderColor: "#D8CFB8" }}>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                          {["Student Name", "Student ID", "Status"].map(h => (
+                            <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(a.records || []).map(r => {
+                          const s = studentById[r.studentId];
+                          const isPresent = r.status === "Present";
+                          return (
+                            <tr key={r.studentId} className="ledger-row">
+                              <td className="px-4 py-2.5 font-medium">{s ? s.name : "Unknown Student"}</td>
+                              <td className="px-4 py-2.5 text-xs font-mono">{s ? s.studentId : "—"}</td>
+                              <td className="px-4 py-2.5">
+                                <span className="px-3 py-1 text-xs font-semibold rounded-sm inline-block"
+                                  style={{ background: isPresent ? "#3F6B52" : "#A63D2F", color: "#F4EFDE" }}>
+                                  {r.status}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <div className="px-4 py-2.5 text-[11px] text-[#9C8F6E]">Read-only — click Edit above to make changes.</div>
+                  </div>
+                )}
+                {editing && (
+                  <div className="border-t" style={{ borderColor: "#D8CFB8" }}>
+                    <div className="p-3.5 flex flex-wrap items-end gap-3" style={{ background: "#FAF6EC" }}>
+                      <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={editDate} onChange={e => setEditDate(e.target.value)} /></Field>
+                      <Field label="Time"><input type="time" className={inputCls} style={inputStyle} value={editTime} onChange={e => setEditTime(e.target.value)} /></Field>
+                      <div className="flex-1 min-w-[200px]"><Field label="Remarks"><input className={inputCls} style={inputStyle} value={editRemarks} onChange={e => setEditRemarks(e.target.value)} placeholder="Optional remarks…" /></Field></div>
+                    </div>
                     <table className="w-full text-sm">
                       <thead>
                         <tr style={{ borderBottom: "1.5px solid #26231D" }}>
@@ -7470,8 +7736,8 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
                         })}
                       </tbody>
                     </table>
-                    <div className="p-3.5 flex items-center justify-between">
-                      <div className="text-[11px] text-[#9C8F6E]">{savedId === a.id ? "Saved." : "Editing — toggle status, then save."}</div>
+                    <div className="p-3.5 flex items-center justify-end gap-2">
+                      <button onClick={cancelEdit} className="px-4 py-2 text-sm font-medium rounded-sm border" style={{ borderColor: "#12312B", color: "#12312B" }}>Cancel</button>
                       <button onClick={() => saveEdit(a)} className="px-4 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>Save Changes</button>
                     </div>
                   </div>
@@ -7487,17 +7753,23 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
 
 // ---- View & Search Scores — browse saved tests (the "tests" collection
 // TestMarksTab writes to) with search across test ID / description / class /
-// subject / student, plus class/subject/date filters, an optional "Top
-// Scorers" sort on the expanded test's marks, and inline editing that saves
-// through the same onSave (saveTest, upserts by testId) TestMarksTab uses.
-function ViewScoresTab({ tests, students, classes, subjectsList, onSave }) {
+// subject / student, plus class/subject/date filters, and a "Top Scorers"
+// sort. Clicking a row only expands a READ-ONLY view. A separate, dedicated
+// "Edit" button opens an editable panel (class, subject, date, max marks,
+// description, and every student's marks) so a test can't be accidentally
+// modified just by looking at it. Saves through editTest (renames the
+// generated testId in place if class/subject/date changed, without leaving
+// a duplicate); a dedicated "Delete" button removes an accidentally created
+// test outright.
+function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit, onDelete }) {
   const [search, setSearch] = useState("");
   const [classFilter, setClassFilter] = useState("all");
   const [subjectFilter, setSubjectFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("");
   const [expandedId, setExpandedId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
   const [editMarks, setEditMarks] = useState({});
-  const [editMeta, setEditMeta] = useState({ maxMarks: "", description: "" });
+  const [editMeta, setEditMeta] = useState({ cls: "", subject: "", date: "", maxMarks: "", description: "" });
   const [sortTop, setSortTop] = useState(false);
   const [savedId, setSavedId] = useState(null);
 
@@ -7518,26 +7790,38 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave }) {
       .sort((a, b) => compareChrono(a, b, -1));
   }, [tests, classFilter, subjectFilter, dateFilter, search, studentById]);
 
+  function toggleView(t) {
+    setExpandedId(prev => (prev === t.id ? null : t.id));
+    setSortTop(false);
+    if (editingId === t.id) setEditingId(null);
+  }
+
   function startEdit(t) {
-    setExpandedId(expandedId === t.id ? null : t.id);
+    setExpandedId(t.id);
+    setEditingId(t.id);
     setSavedId(null);
     setSortTop(false);
-    if (expandedId === t.id) return;
     const map = {};
     (t.scores || []).forEach(sc => { map[sc.studentId] = sc.marks === "" || sc.marks == null ? "" : sc.marks; });
     setEditMarks(map);
-    setEditMeta({ maxMarks: t.maxMarks ?? "", description: t.description || "" });
+    setEditMeta({ cls: t.class, subject: t.subject, date: t.date, maxMarks: t.maxMarks ?? "", description: t.description || "" });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
   }
 
   function orderedScores(t) {
     const list = [...(t.scores || [])];
     if (!sortTop) return list;
-    return list.sort((a, b) => (Number(editMarks[b.studentId]) || 0) - (Number(editMarks[a.studentId]) || 0));
+    const marksFor = editingId === t.id ? editMarks : Object.fromEntries((t.scores || []).map(sc => [sc.studentId, sc.marks]));
+    return list.sort((a, b) => (Number(marksFor[b.studentId]) || 0) - (Number(marksFor[a.studentId]) || 0));
   }
 
   function saveEdit(t) {
     const scores = (t.scores || []).map(sc => ({ studentId: sc.studentId, marks: editMarks[sc.studentId] === "" ? "" : Number(editMarks[sc.studentId]) }));
-    onSave({ testId: t.testId, class: t.class, subject: t.subject, date: t.date, maxMarks: Number(editMeta.maxMarks) || 0, description: editMeta.description, scores });
+    onEdit(t, { cls: editMeta.cls, subject: editMeta.subject, date: editMeta.date, maxMarks: editMeta.maxMarks, description: editMeta.description, scores });
+    setEditingId(null);
     setSavedId(t.id);
   }
 
@@ -7581,25 +7865,77 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave }) {
             const count = (t.scores || []).length;
             const avg = count ? round2((t.scores || []).reduce((sum, sc) => sum + (Number(sc.marks) || 0), 0) / count) : 0;
             const expanded = expandedId === t.id;
+            const editing = editingId === t.id;
             return (
               <Card key={t.id} className="overflow-hidden">
-                <button onClick={() => startEdit(t)} className="w-full flex items-center justify-between px-4 py-3 text-left">
-                  <div>
+                <div className="w-full flex items-center justify-between px-4 py-3">
+                  <button onClick={() => toggleView(t)} className="flex-1 text-left">
                     <div className="text-sm font-semibold text-[#12312B]">{t.testId} — {t.class} · {t.subject}</div>
                     <div className="text-[11px] text-[#9C8F6E]">{fmtDate(t.date)} · {t.description || "No description"} · Avg {avg}/{t.maxMarks || 0}</div>
+                  </button>
+                  <div className="flex items-center gap-3 shrink-0 pl-3">
+                    {savedId === t.id && !editing && <span className="text-[11px] text-[#3F6B52] font-medium">Saved.</span>}
+                    <button onClick={() => startEdit(t)} className="text-xs text-[#12312B] underline font-medium">Edit</button>
+                    <button onClick={() => onDelete(t.id)} className="text-xs text-[#A63D2F] underline font-medium">Delete</button>
+                    <span className="text-xs text-[#9C8F6E]">{expanded ? "▾" : "▸"}</span>
                   </div>
-                  <span className="text-xs text-[#9C8F6E]">{expanded ? "▾" : "▸"}</span>
-                </button>
-                {expanded && (
+                </div>
+                {expanded && !editing && (
                   <div className="border-t" style={{ borderColor: "#D8CFB8" }}>
-                    <div className="p-3.5 flex flex-wrap items-end gap-3" style={{ background: "#FAF6EC" }}>
-                      <Field label="Maximum Marks"><input type="number" className={inputCls + " w-28"} style={inputStyle} value={editMeta.maxMarks} onChange={e => setEditMeta(prev => ({ ...prev, maxMarks: e.target.value }))} /></Field>
-                      <Field label="Description"><input className={inputCls} style={inputStyle} value={editMeta.description} onChange={e => setEditMeta(prev => ({ ...prev, description: e.target.value }))} /></Field>
+                    <div className="p-3.5 flex justify-end" style={{ background: "#FAF6EC" }}>
                       <button onClick={() => setSortTop(v => !v)} className="px-3 py-2 text-xs font-semibold rounded-sm flex items-center gap-1.5"
                         style={{ background: sortTop ? "#B8862B" : "white", color: sortTop ? "#F4EFDE" : "#12312B", border: "1px solid #12312B" }}>
                         <Award size={13} /> {sortTop ? "Sorted: Top Scorers" : "Sort: Top Scorers"}
                       </button>
                     </div>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                          {["Student Name", "Student ID", "Marks"].map(h => (
+                            <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {orderedScores(t).map((sc, i) => {
+                          const s = studentById[sc.studentId];
+                          return (
+                            <tr key={sc.studentId} className="ledger-row">
+                              <td className="px-4 py-2.5 font-medium">{sortTop && <span className="text-[#9C8F6E] mr-1.5">#{i + 1}</span>}{s ? s.name : "Unknown Student"}</td>
+                              <td className="px-4 py-2.5 text-xs font-mono">{s ? s.studentId : "—"}</td>
+                              <td className="px-4 py-2.5 font-mono">{sc.marks === "" || sc.marks == null ? "—" : sc.marks}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <div className="px-4 py-2.5 text-[11px] text-[#9C8F6E]">Read-only — click Edit above to make changes.</div>
+                  </div>
+                )}
+                {editing && (
+                  <div className="border-t" style={{ borderColor: "#D8CFB8" }}>
+                    <div className="p-3.5 flex flex-wrap items-end gap-3" style={{ background: "#FAF6EC" }}>
+                      <Field label="Class">
+                        <select className={inputCls} style={inputStyle} value={editMeta.cls} onChange={e => setEditMeta(prev => ({ ...prev, cls: e.target.value }))}>
+                          {classes.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </Field>
+                      <Field label="Subject">
+                        <select className={inputCls} style={inputStyle} value={editMeta.subject} onChange={e => setEditMeta(prev => ({ ...prev, subject: e.target.value }))}>
+                          {subjectsList.map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </Field>
+                      <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={editMeta.date} onChange={e => setEditMeta(prev => ({ ...prev, date: e.target.value }))} /></Field>
+                      <Field label="Maximum Marks"><input type="number" className={inputCls + " w-28"} style={inputStyle} value={editMeta.maxMarks} onChange={e => setEditMeta(prev => ({ ...prev, maxMarks: e.target.value }))} /></Field>
+                      <div className="flex-1 min-w-[180px]"><Field label="Description"><input className={inputCls} style={inputStyle} value={editMeta.description} onChange={e => setEditMeta(prev => ({ ...prev, description: e.target.value }))} /></Field></div>
+                      <button onClick={() => setSortTop(v => !v)} className="px-3 py-2 text-xs font-semibold rounded-sm flex items-center gap-1.5"
+                        style={{ background: sortTop ? "#B8862B" : "white", color: sortTop ? "#F4EFDE" : "#12312B", border: "1px solid #12312B" }}>
+                        <Award size={13} /> {sortTop ? "Sorted: Top Scorers" : "Sort: Top Scorers"}
+                      </button>
+                    </div>
+                    {(editMeta.cls !== t.class || editMeta.subject !== t.subject || editMeta.date !== t.date) && (
+                      <div className="px-3.5 pb-2 text-[11px] text-[#B8862B]">Class/Subject/Date changed — Test ID will be regenerated for the new combination on save.</div>
+                    )}
                     <table className="w-full text-sm">
                       <thead>
                         <tr style={{ borderBottom: "1.5px solid #26231D" }}>
@@ -7624,8 +7960,8 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave }) {
                         })}
                       </tbody>
                     </table>
-                    <div className="p-3.5 flex items-center justify-between">
-                      <div className="text-[11px] text-[#9C8F6E]">{savedId === t.id ? "Saved." : "Editing — change marks/max/description, then save."}</div>
+                    <div className="p-3.5 flex items-center justify-end gap-2">
+                      <button onClick={cancelEdit} className="px-4 py-2 text-sm font-medium rounded-sm border" style={{ borderColor: "#12312B", color: "#12312B" }}>Cancel</button>
                       <button onClick={() => saveEdit(t)} className="px-4 py-2 text-sm font-medium rounded-sm" style={{ background: "#12312B", color: "#F4EFDE" }}>Save Changes</button>
                     </div>
                   </div>
