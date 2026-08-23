@@ -574,6 +574,41 @@ import {
 //      to match what's actually being counted (one per saved
 //      date+class+subject session the student appears in, not one per
 //      calendar day).
+//
+// Changes made in this sixth update pass:
+//  35. View & Search Scores — each test row now shows how many students
+//      appeared ("N student(s) appeared" in the summary line, and "N
+//      student(s) on this test" inside the Edit panel), and the marks
+//      table (both the read-only view and the Edit panel) always has a
+//      leading "#" row-number column now instead of only showing numbers
+//      when "Sort: Top Scorers" was on.
+//  36. Test IDs are now always fully UPPERCASE (generateTestId uppercases
+//      the whole generated string). The sequence-number lookup that
+//      finds "the next number for this prefix" now also compares
+//      existing testIds case-insensitively, so older mixed-case IDs
+//      already in Firestore still get recognized and numbered correctly
+//      going forward instead of restarting from 01.
+//  37. Attendance — AttendanceSectionTab's header now shows a running
+//      total ("N attendance session(s) recorded so far"), and View
+//      Attendance gives every session its own permanent sequence number
+//      ("Session #N", oldest = #1, ascending) plus a "Showing X of Y"
+//      line above the list — together these answer "how many classes'
+//      attendance has been filled so far" both as a total and per-row.
+//  38. Scores — same pattern as #37: ScoresSectionTab's header shows a
+//      running total ("N test(s) conducted so far"), and View & Search
+//      Scores gives every test its own permanent sequence number ("Test
+//      #N", oldest = #1) plus a "Showing X of Y" line.
+//  39. Add/Edit Batch modal (Teacher Management → Batch Schedule) — Batch
+//      Name now auto-fills from Class + Subject as either is picked
+//      (e.g. Class "12" + Subject "Physics" -> "12 Physics"; Class "JEE"
+//      + Subject "Mathematics" -> "JEE Mathematics", reusing the same
+//      classCodeForId() from #30 so a class stored as "Class 12" still
+//      auto-fills to "12 Physics" not "Class 12 Physics"). Auto-fill
+//      stops the moment the user types into Batch Name themselves (a
+//      small hint line explains this), and never overwrites an existing
+//      batch's saved name when opening it to edit — only applies to a
+//      genuinely untouched name, whether on a new batch or after
+//      clearing an existing one.
 // ============================================================================
 
 // Admin Access Password
@@ -866,12 +901,13 @@ function classCodeForId(cls) {
 }
 function generateTestId(allTests, cls, subject, dateStr, excludeTestId) {
   const yy = (dateStr || todayStr()).slice(2, 4);
-  const prefix = `${classCodeForId(cls)}${subject || ""}${yy}`;
+  const prefix = `${classCodeForId(cls)}${subject || ""}${yy}`.toUpperCase();
   let max = 0;
   (allTests || []).forEach(t => {
     if (!t || !t.testId || t.testId === excludeTestId) return;
-    if (t.testId.startsWith(prefix)) {
-      const seq = parseInt(t.testId.slice(prefix.length), 10);
+    const upperId = t.testId.toUpperCase();
+    if (upperId.startsWith(prefix)) {
+      const seq = parseInt(upperId.slice(prefix.length), 10);
       if (!isNaN(seq) && seq > max) max = seq;
     }
   });
@@ -2913,15 +2949,21 @@ function AttendanceSectionTab({ classes, subjectsList, batchSchedule, students, 
   const [inner, setInner] = useState("mark");
   return (
     <div>
-      <div className="flex border rounded-sm overflow-hidden mb-4 w-fit" style={{ borderColor: "#12312B" }}>
-        <button onClick={() => setInner("mark")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
-          style={{ background: inner === "mark" ? "#12312B" : "white", color: inner === "mark" ? "#F4EFDE" : "#12312B" }}>
-          <ClipboardCheck size={13} /> Mark Attendance
-        </button>
-        <button onClick={() => setInner("view")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
-          style={{ background: inner === "view" ? "#12312B" : "white", color: inner === "view" ? "#F4EFDE" : "#12312B", borderLeft: "1px solid #12312B" }}>
-          <Search size={13} /> View Attendance
-        </button>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div className="flex border rounded-sm overflow-hidden w-fit" style={{ borderColor: "#12312B" }}>
+          <button onClick={() => setInner("mark")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+            style={{ background: inner === "mark" ? "#12312B" : "white", color: inner === "mark" ? "#F4EFDE" : "#12312B" }}>
+            <ClipboardCheck size={13} /> Mark Attendance
+          </button>
+          <button onClick={() => setInner("view")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+            style={{ background: inner === "view" ? "#12312B" : "white", color: inner === "view" ? "#F4EFDE" : "#12312B", borderLeft: "1px solid #12312B" }}>
+            <Search size={13} /> View Attendance
+          </button>
+        </div>
+        {/* Running total — "how many classes' attendance has been filled so far". */}
+        <div className="text-xs text-[#6E6650] font-medium">
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: "#12312B" }}>{attendanceLog.length}</span> attendance session{attendanceLog.length === 1 ? "" : "s"} recorded so far
+        </div>
       </div>
       {inner === "mark" ? (
         <MarkAttendanceTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
@@ -2944,15 +2986,21 @@ function ScoresSectionTab({ classes, subjectsList, batchSchedule, students, test
   const [inner, setInner] = useState("fill");
   return (
     <div>
-      <div className="flex border rounded-sm overflow-hidden mb-4 w-fit" style={{ borderColor: "#12312B" }}>
-        <button onClick={() => setInner("fill")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
-          style={{ background: inner === "fill" ? "#12312B" : "white", color: inner === "fill" ? "#F4EFDE" : "#12312B" }}>
-          <Award size={13} /> Fill Marks
-        </button>
-        <button onClick={() => setInner("view")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
-          style={{ background: inner === "view" ? "#12312B" : "white", color: inner === "view" ? "#F4EFDE" : "#12312B", borderLeft: "1px solid #12312B" }}>
-          <Search size={13} /> View & Search Scores
-        </button>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div className="flex border rounded-sm overflow-hidden w-fit" style={{ borderColor: "#12312B" }}>
+          <button onClick={() => setInner("fill")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+            style={{ background: inner === "fill" ? "#12312B" : "white", color: inner === "fill" ? "#F4EFDE" : "#12312B" }}>
+            <Award size={13} /> Fill Marks
+          </button>
+          <button onClick={() => setInner("view")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+            style={{ background: inner === "view" ? "#12312B" : "white", color: inner === "view" ? "#F4EFDE" : "#12312B", borderLeft: "1px solid #12312B" }}>
+            <Search size={13} /> View & Search Scores
+          </button>
+        </div>
+        {/* Running total — "how many tests have been completed so far". */}
+        <div className="text-xs text-[#6E6650] font-medium">
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: "#12312B" }}>{tests.length}</span> test{tests.length === 1 ? "" : "s"} conducted so far
+        </div>
       </div>
       {inner === "fill" ? (
         <TestMarksTab classes={classes} subjectsList={subjectsList} batchSchedule={batchSchedule} students={students}
@@ -6480,6 +6528,18 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
   const [daysOfWeek, setDaysOfWeek] = useState(initial?.daysOfWeek || []);
   const [teacherId, setTeacherId] = useState(initial?.teacherId || "");
   const [substituteTeacherId, setSubstituteTeacherId] = useState(initial?.substituteTeacherId || "");
+  // Batch Name auto-fills from Class + Subject (e.g. Class "12" + Subject
+  // "Physics" -> "12 Physics"; Class "JEE" + Subject "Mathematics" -> "JEE
+  // Mathematics") for as long as the user hasn't typed into the field
+  // themselves. Editing an existing batch starts "already touched" so its
+  // saved name is never silently overwritten just by opening the modal.
+  const [nameTouched, setNameTouched] = useState(!!initial);
+
+  useEffect(() => {
+    if (nameTouched || !cls || !subject) return;
+    setBatchName(`${classCodeForId(cls)} ${subject}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cls, subject, nameTouched]);
 
   function toggleDay(d) { setDaysOfWeek(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]); }
 
@@ -6503,7 +6563,8 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
 
   return (
     <Modal title={initial ? "Edit Batch" : "Add Batch"} onClose={onClose}>
-      <Field label="Batch Name"><input className={inputCls} style={inputStyle} value={batchName} onChange={e => setBatchName(e.target.value)} placeholder="e.g. Morning Physics Batch" /></Field>
+      <Field label="Batch Name"><input className={inputCls} style={inputStyle} value={batchName} onChange={e => { setBatchName(e.target.value); setNameTouched(true); }} placeholder="e.g. Morning Physics Batch" /></Field>
+      {!nameTouched && <div className="text-[10px] text-[#9C8F6E] -mt-2.5 mb-3">Auto-filled from Class + Subject — type here to set a custom name.</div>}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Class">
           <select className={inputCls} style={inputStyle} value={cls} onChange={e => setCls(e.target.value)}>
@@ -7566,6 +7627,17 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
 
   const studentById = useMemo(() => { const m = {}; students.forEach(s => { m[s.id] = s; }); return m; }, [students]);
 
+  // Overall sequence number for each session — "Session #1" is the very
+  // first attendance ever recorded, ascending from there — so a row shows
+  // exactly how many classes' worth of attendance have been filled by that
+  // point, and the header count above shows the running total.
+  const sessionNumberById = useMemo(() => {
+    const ascending = [...attendanceLog].sort((a, b) => compareChrono(a, b, 1));
+    const map = {};
+    ascending.forEach((a, i) => { map[a.id] = i + 1; });
+    return map;
+  }, [attendanceLog]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return attendanceLog
@@ -7649,6 +7721,7 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
         <Card className="p-6 text-center text-sm text-[#9C8F6E]">No saved attendance sessions match.</Card>
       ) : (
         <div className="space-y-3">
+          <div className="text-xs text-[#6E6650]">Showing {filtered.length} of {attendanceLog.length} attendance session{attendanceLog.length === 1 ? "" : "s"}</div>
           {filtered.map(a => {
             const total = (a.records || []).length;
             const present = (a.records || []).filter(r => r.status === "Present").length;
@@ -7658,7 +7731,10 @@ function ViewAttendanceTab({ attendanceLog, students, classes, subjectsList, onS
               <Card key={a.id} className="overflow-hidden">
                 <div className="w-full flex items-center justify-between px-4 py-3">
                   <button onClick={() => toggleView(a)} className="flex-1 text-left">
-                    <div className="text-sm font-semibold text-[#12312B]">{a.class} · {a.subject}</div>
+                    <div className="text-sm font-semibold text-[#12312B]">
+                      <span className="text-[10px] font-mono text-[#9C8F6E] mr-2">Session #{sessionNumberById[a.id]}</span>
+                      {a.class} · {a.subject}
+                    </div>
                     <div className="text-[11px] text-[#9C8F6E]">
                       {fmtDate(a.date)}{a.time && ` · ${fmtTime(a.time)}`} · {present}/{total} present{a.remarks && ` · ${a.remarks}`}
                     </div>
@@ -7775,6 +7851,17 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
 
   const studentById = useMemo(() => { const m = {}; students.forEach(s => { m[s.id] = s; }); return m; }, [students]);
 
+  // Overall sequence number for each test — "Test #1" is the very first
+  // test ever conducted, ascending from there — so a row shows exactly how
+  // many tests had been completed by that point, and the header count
+  // above shows the running total.
+  const testNumberById = useMemo(() => {
+    const ascending = [...tests].sort((a, b) => compareChrono(a, b, 1));
+    const map = {};
+    ascending.forEach((t, i) => { map[t.id] = i + 1; });
+    return map;
+  }, [tests]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return tests
@@ -7861,6 +7948,7 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
         <Card className="p-6 text-center text-sm text-[#9C8F6E]">No saved tests match.</Card>
       ) : (
         <div className="space-y-3">
+          <div className="text-xs text-[#6E6650]">Showing {filtered.length} of {tests.length} test{tests.length === 1 ? "" : "s"}</div>
           {filtered.map(t => {
             const count = (t.scores || []).length;
             const avg = count ? round2((t.scores || []).reduce((sum, sc) => sum + (Number(sc.marks) || 0), 0) / count) : 0;
@@ -7870,8 +7958,11 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
               <Card key={t.id} className="overflow-hidden">
                 <div className="w-full flex items-center justify-between px-4 py-3">
                   <button onClick={() => toggleView(t)} className="flex-1 text-left">
-                    <div className="text-sm font-semibold text-[#12312B]">{t.testId} — {t.class} · {t.subject}</div>
-                    <div className="text-[11px] text-[#9C8F6E]">{fmtDate(t.date)} · {t.description || "No description"} · Avg {avg}/{t.maxMarks || 0}</div>
+                    <div className="text-sm font-semibold text-[#12312B]">
+                      <span className="text-[10px] font-mono text-[#9C8F6E] mr-2">Test #{testNumberById[t.id]}</span>
+                      {t.testId} — {t.class} · {t.subject}
+                    </div>
+                    <div className="text-[11px] text-[#9C8F6E]">{fmtDate(t.date)} · {t.description || "No description"} · {count} student{count === 1 ? "" : "s"} appeared · Avg {avg}/{t.maxMarks || 0}</div>
                   </button>
                   <div className="flex items-center gap-3 shrink-0 pl-3">
                     {savedId === t.id && !editing && <span className="text-[11px] text-[#3F6B52] font-medium">Saved.</span>}
@@ -7891,7 +7982,7 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
                     <table className="w-full text-sm">
                       <thead>
                         <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                          {["Student Name", "Student ID", "Marks"].map(h => (
+                          {["#", "Student Name", "Student ID", "Marks"].map(h => (
                             <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                           ))}
                         </tr>
@@ -7901,7 +7992,8 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
                           const s = studentById[sc.studentId];
                           return (
                             <tr key={sc.studentId} className="ledger-row">
-                              <td className="px-4 py-2.5 font-medium">{sortTop && <span className="text-[#9C8F6E] mr-1.5">#{i + 1}</span>}{s ? s.name : "Unknown Student"}</td>
+                              <td className="px-4 py-2.5 text-xs font-mono text-[#9C8F6E]">{i + 1}</td>
+                              <td className="px-4 py-2.5 font-medium">{s ? s.name : "Unknown Student"}</td>
                               <td className="px-4 py-2.5 text-xs font-mono">{s ? s.studentId : "—"}</td>
                               <td className="px-4 py-2.5 font-mono">{sc.marks === "" || sc.marks == null ? "—" : sc.marks}</td>
                             </tr>
@@ -7936,10 +8028,11 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
                     {(editMeta.cls !== t.class || editMeta.subject !== t.subject || editMeta.date !== t.date) && (
                       <div className="px-3.5 pb-2 text-[11px] text-[#B8862B]">Class/Subject/Date changed — Test ID will be regenerated for the new combination on save.</div>
                     )}
+                    <div className="px-3.5 pb-2 text-[11px] text-[#9C8F6E]">{(t.scores || []).length} student{(t.scores || []).length === 1 ? "" : "s"} on this test</div>
                     <table className="w-full text-sm">
                       <thead>
                         <tr style={{ borderBottom: "1.5px solid #26231D" }}>
-                          {["Student Name", "Student ID", "Marks"].map(h => (
+                          {["#", "Student Name", "Student ID", "Marks"].map(h => (
                             <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2.5 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
                           ))}
                         </tr>
@@ -7949,7 +8042,8 @@ function ViewScoresTab({ tests, students, classes, subjectsList, onSave, onEdit,
                           const s = studentById[sc.studentId];
                           return (
                             <tr key={sc.studentId} className="ledger-row">
-                              <td className="px-4 py-2.5 font-medium">{sortTop && <span className="text-[#9C8F6E] mr-1.5">#{i + 1}</span>}{s ? s.name : "Unknown Student"}</td>
+                              <td className="px-4 py-2.5 text-xs font-mono text-[#9C8F6E]">{i + 1}</td>
+                              <td className="px-4 py-2.5 font-medium">{s ? s.name : "Unknown Student"}</td>
                               <td className="px-4 py-2.5 text-xs font-mono">{s ? s.studentId : "—"}</td>
                               <td className="px-4 py-2.5">
                                 <input type="number" className={inputCls + " w-28"} style={inputStyle} value={editMarks[sc.studentId] ?? ""}
