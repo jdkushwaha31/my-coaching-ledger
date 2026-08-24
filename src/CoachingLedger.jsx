@@ -807,6 +807,29 @@ import {
 //      touching whatever file imports this component (App.js or
 //      similar), which isn't in view here — purely cosmetic/internal,
 //      doesn't affect what's shown on screen.
+//
+// Changes made in this fourteenth update pass:
+//  57. BUGFIX — Institute Performance's Month/Year toggle (and, found
+//      proactively while fixing it, the identical toggle on Dashboard's
+//      Institute Snapshot) used the single-bordered-strip-with-internal-
+//      divider pattern already found buggy twice before (Recycle Bin,
+//      Banking) — visually breaking when toggled, likely because the
+//      button label width swings a lot between the two states (e.g.
+//      "August 2026" vs "2026", or a full month name vs a bare year),
+//      which reflows the shared border oddly. Both replaced with
+//      individual chip buttons (own border + rounded corners each), the
+//      same fix already applied elsewhere.
+//  58. Settings is now a tabbed modal (new SETTINGS_SUB_TABS config, one
+//      entry today — "Institute Information" — with the same chip-button
+//      row pattern from #57, ready for more categories later without a
+//      redesign). Institute Information's single "Phone" field is split
+//      into separate "Mobile Number" and "Telephone Number" fields, as
+//      requested — DEFAULT_INSTITUTE_SETTINGS and InstituteHeader (the
+//      shared print-header component from #47) both updated to match;
+//      printed documents now show "M: ... · T: ..." instead of one
+//      generic phone line. Existing settings docs with the old `phone`
+//      field just show blank Mobile/Telephone until re-saved — nothing
+//      crashes, no data was deleted.
 // ============================================================================
 
 // Admin Access Password
@@ -1386,7 +1409,7 @@ function SectionHeader({ eyebrow, title, action }) {
 // branding ("InstituteOS" in the sidebar, which is unrelated and
 // untouched). Exposed via Context so every print template below can read
 // it without threading a prop through every intermediate component.
-const DEFAULT_INSTITUTE_SETTINGS = { instituteName: "COACHING CLASSES", tagline: "", address: "", phone: "", gstNumber: "" };
+const DEFAULT_INSTITUTE_SETTINGS = { instituteName: "COACHING CLASSES", tagline: "", address: "", mobileNumber: "", telephoneNumber: "", gstNumber: "" };
 const InstituteSettingsContext = React.createContext(DEFAULT_INSTITUTE_SETTINGS);
 
 // Shared header block for every printable document (receipts, slips,
@@ -1397,13 +1420,17 @@ const InstituteSettingsContext = React.createContext(DEFAULT_INSTITUTE_SETTINGS)
 // nothing's been set yet, so nothing looks broken pre-setup).
 function InstituteHeader({ subtitle, large }) {
   const settings = React.useContext(InstituteSettingsContext);
+  const phoneLine = [
+    settings.mobileNumber && `M: ${settings.mobileNumber}`,
+    settings.telephoneNumber && `T: ${settings.telephoneNumber}`,
+  ].filter(Boolean).join(" · ");
   return (
     <>
       <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className={`${large ? "text-2xl" : "text-xl"} font-bold text-[#12312B]`}>{settings.instituteName || "COACHING CLASSES"}</h2>
       {settings.tagline && <p className="text-[10px] text-[#6E6650]">{settings.tagline}</p>}
       <p className={`${large ? "text-[11px]" : "text-[10px]"} uppercase tracking-wider text-[#9C8F6E]`} style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{subtitle}</p>
-      {(settings.address || settings.phone) && (
-        <p className="text-[10px] text-[#9C8F6E] mt-0.5">{[settings.address, settings.phone].filter(Boolean).join(" · ")}</p>
+      {(settings.address || phoneLine) && (
+        <p className="text-[10px] text-[#9C8F6E] mt-0.5">{[settings.address, phoneLine].filter(Boolean).join(" · ")}</p>
       )}
     </>
   );
@@ -3515,11 +3542,11 @@ function DashboardTab({ students, thisMonthCollected, thisMonthWriteOffs, thisMo
       {/* ===== INSTITUTE SNAPSHOT ===== */}
       <div className="flex items-center justify-between mb-2">
         <DashSectionLabel>Institute Snapshot</DashSectionLabel>
-        <div className="flex border rounded-sm overflow-hidden mb-2" style={{ borderColor: "#12312B" }}>
-          {["month", "year"].map((p, i) => (
+        <div className="flex gap-1.5 mb-2">
+          {["month", "year"].map(p => (
             <button key={p} onClick={() => setSnapshotPeriod(p)}
-              className="px-3 py-1 text-[11px] font-semibold"
-              style={{ background: snapshotPeriod === p ? "#12312B" : "white", color: snapshotPeriod === p ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+              className="px-3 py-1 text-[11px] font-semibold rounded-sm border"
+              style={{ background: snapshotPeriod === p ? "#12312B" : "white", color: snapshotPeriod === p ? "#F4EFDE" : "#12312B", borderColor: "#12312B" }}>
               {p === "month" ? monthLabel(curMonth) : snapshotYear}
             </button>
           ))}
@@ -5208,11 +5235,11 @@ function InstitutePerformanceTab({ students, attendanceLog, tests, classes, subj
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div className="text-sm text-[#6E6650]">Institute-wide attendance and test performance, aggregated across every batch.</div>
         <div className="flex items-center gap-2">
-          <div className="flex border rounded-sm overflow-hidden" style={{ borderColor: "#12312B" }}>
-            {["month", "year"].map((p, i) => (
+          <div className="flex gap-1.5">
+            {["month", "year"].map(p => (
               <button key={p} onClick={() => setPeriodType(p)}
-                className="px-3 py-1.5 text-xs font-semibold"
-                style={{ background: periodType === p ? "#12312B" : "white", color: periodType === p ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+                className="px-3 py-1.5 text-xs font-semibold rounded-sm border"
+                style={{ background: periodType === p ? "#12312B" : "white", color: periodType === p ? "#F4EFDE" : "#12312B", borderColor: "#12312B" }}>
                 {p === "month" ? "Month" : "Year"}
               </button>
             ))}
@@ -7211,36 +7238,71 @@ function TeacherStatusModal({ teacher, newStatus, onClose, onSave }) {
   );
 }
 
-// ---- Settings — Institute Name/Tagline/Address/Phone/GST (text only, per
-// decision — logo is a later addition once Firebase Storage is set up).
-// This is the institute's own business identity shown on every printed
-// document via InstituteHeader (see DEFAULT_INSTITUTE_SETTINGS /
-// InstituteSettingsContext) — separate from "InstituteOS", the app's
-// own product branding in the sidebar, which this does not touch.
+// ---- Settings — now a tabbed modal (SETTINGS_SUB_TABS) so future setting
+// categories (Appearance, Users & Roles, Notifications, etc.) have a home
+// without redesigning this again. Only one sub-tab exists today: "Institute
+// Information" — Name/Tagline/Address/Mobile/Telephone/GST (text only per
+// decision — logo is a later addition once Firebase Storage is confirmed
+// set up). This is the institute's own business identity shown on every
+// printed document via InstituteHeader (see DEFAULT_INSTITUTE_SETTINGS /
+// InstituteSettingsContext) — separate from "InstituteOS", the app's own
+// product branding in the sidebar, which this does not touch.
+const SETTINGS_SUB_TABS = [
+  { id: "institute-info", label: "Institute Information", icon: Landmark },
+];
+
 function SettingsModal({ initial, onClose, onSave }) {
+  const [subTab, setSubTab] = useState("institute-info");
   const [instituteName, setInstituteName] = useState(initial?.instituteName || "");
   const [tagline, setTagline] = useState(initial?.tagline || "");
   const [address, setAddress] = useState(initial?.address || "");
-  const [phone, setPhone] = useState(initial?.phone || "");
+  const [mobileNumber, setMobileNumber] = useState(initial?.mobileNumber || "");
+  const [telephoneNumber, setTelephoneNumber] = useState(initial?.telephoneNumber || "");
   const [gstNumber, setGstNumber] = useState(initial?.gstNumber || "");
 
   function submit() {
     onSave({
       instituteName: instituteName.trim() || "COACHING CLASSES",
-      tagline: tagline.trim(), address: address.trim(), phone: phone.trim(), gstNumber: gstNumber.trim(),
+      tagline: tagline.trim(), address: address.trim(),
+      mobileNumber: mobileNumber.trim(), telephoneNumber: telephoneNumber.trim(),
+      gstNumber: gstNumber.trim(),
     });
   }
 
   return (
-    <Modal title="Settings — Institute Info" onClose={onClose}>
-      <div className="text-sm text-[#6E6650] mb-3">This appears on every printed receipt, slip, and statement in place of the default "COACHING CLASSES" placeholder.</div>
-      <Field label="Institute Name"><input className={inputCls} style={inputStyle} value={instituteName} onChange={e => setInstituteName(e.target.value)} placeholder="e.g. Horizon Coaching Classes" /></Field>
-      <Field label="Tagline (optional)"><input className={inputCls} style={inputStyle} value={tagline} onChange={e => setTagline(e.target.value)} placeholder="e.g. Excellence in JEE & NEET Coaching" /></Field>
-      <Field label="Address (optional)"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="Street / area / city" /></Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Phone (optional)"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} /></Field>
-        <Field label="GST / Registration No. (optional)"><input className={inputCls} style={inputStyle} value={gstNumber} onChange={e => setGstNumber(e.target.value)} /></Field>
+    <Modal title="Settings" onClose={onClose}>
+      {/* Individual chip buttons (own border + rounded corners each) —
+          same pattern used for Recycle Bin / Banking's sub-tab rows, so
+          this stays robust if more Settings categories are added later
+          and the row needs to wrap. */}
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {SETTINGS_SUB_TABS.map(st => {
+          const Icon = st.icon;
+          const active = subTab === st.id;
+          return (
+            <button key={st.id} onClick={() => setSubTab(st.id)}
+              className="px-3 py-1.5 text-xs font-semibold rounded-sm border flex items-center gap-1.5"
+              style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#12312B", borderColor: "#12312B" }}>
+              <Icon size={13} /> {st.label}
+            </button>
+          );
+        })}
       </div>
+
+      {subTab === "institute-info" && (
+        <>
+          <div className="text-sm text-[#6E6650] mb-3">This appears on every printed receipt, slip, and statement in place of the default "COACHING CLASSES" placeholder.</div>
+          <Field label="Institute Name"><input className={inputCls} style={inputStyle} value={instituteName} onChange={e => setInstituteName(e.target.value)} placeholder="e.g. Horizon Coaching Classes" /></Field>
+          <Field label="Tagline (optional)"><input className={inputCls} style={inputStyle} value={tagline} onChange={e => setTagline(e.target.value)} placeholder="e.g. Excellence in JEE & NEET Coaching" /></Field>
+          <Field label="Address (optional)"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="Street / area / city" /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Mobile Number (optional)"><input className={inputCls} style={inputStyle} value={mobileNumber} onChange={e => setMobileNumber(e.target.value)} /></Field>
+            <Field label="Telephone Number (optional)"><input className={inputCls} style={inputStyle} value={telephoneNumber} onChange={e => setTelephoneNumber(e.target.value)} /></Field>
+          </div>
+          <Field label="GST / Registration No. (optional)"><input className={inputCls} style={inputStyle} value={gstNumber} onChange={e => setGstNumber(e.target.value)} /></Field>
+        </>
+      )}
+
       <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
         Save Settings
       </button>
