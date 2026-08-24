@@ -303,206 +303,6 @@ import {
 //      (kind: "debit", bucket by mode) so it lands in the Banking
 //      Statement's running Cash/Bank balance exactly like an expense —
 //      see bankingSalaryLines, folded into bankingFeedAsc alongside
-//      banking//      date the moment the form opens (not just silently at save time as
-//      before) — office staff see it pre-filled and can change it to
-//      backdate a student if needed; if they don't touch it, today's date
-//      is what gets saved (see the joiningDate useState in
-//      StudentFormModal).
-//  14. Student Statement → Description column no longer shows the small
-//      "Unpaid" stamp next to an outstanding charge line. The Debit /
-//      Credit / running Balance columns already show exactly what's owed,
-//      so the stamp was redundant clutter (see StudentStatementModal).
-//  15. Every date shown anywhere in the app now displays as "D Month
-//      YYYY" (e.g. "17 August 2026") instead of "DD-MM-YYYY" — this is a
-//      one-line change to the shared fmtDate() helper, so it applies
-//      everywhere at once: Students Register, Student/Center/Banking
-//      Statements, all receipts & slips, the Joining Form, Trash tab,
-//      credit/interest logs, everywhere. Storage format (YYYY-MM-DD),
-//      <input type="date"/"month">, filtering, and sorting are completely
-//      untouched — only the last-mile display formatter changed.
-//  16. Printable Statement (Student Statement, Center Statement, Banking
-//      Statement) — the "Print / Export" button used to clone the on-
-//      screen preview's HTML into a bare popup window that never loaded
-//      the app's Tailwind styling or fonts, so everything printed as
-//      unstyled black text with no layout, colors, or letterhead — even
-//      though the on-screen preview looked correct. Each of these three
-//      print windows now loads the same Google Fonts import and the
-//      Tailwind CDN the live app effectively relies on, plus a proper A4
-//      @page rule, a bordered letterhead document wrapper matching the
-//      Joining Form's professional look, and print-safe table rules (no
-//      row splitting across pages, repeating header). The on-screen
-//      preview markup itself is unchanged — only what the popup window
-//      loads before printing it changed.
-//
-// Changes made in this fourth update pass:
-//  17. NEW FEATURE — Notes: a simple internal notepad tab (sidebar, right
-//      above Trash / Restore) completely separate from the financial
-//      ledger. Add / edit / pin / delete free-text notes (title + body),
-//      cloud-synced like everything else via a new "notes" Firestore
-//      collection. Pinned notes float to the top. Nothing here touches
-//      any student, deposit, charge, or balance (see NotesTab,
-//      NoteFormModal, saveNote / toggleNotePin / deleteNote).
-//  18. BUG FIX — Statement dates wrapping onto 3 lines (DD on one line,
-//      Month on the next, YYYY on the last): fmtDate() itself always
-//      produced a correct single-line "D Month YYYY" string — the actual
-//      bug was that the narrow table cells showing it had no
-//      `whitespace-nowrap`, so the browser wrapped the string wherever it
-//      ran out of column width. Added `whitespace-nowrap` to every date
-//      cell across every statement/log table (Deposits, Charges,
-//      Expenses, Center Statement, Banking Statement, Cash⇄Bank Transfer
-//      Logs, Credit & Loan Ledger, Interest Payments Log, Trash tab,
-//      Student Statement) — dates now always render on one line.
-//  19. Banking tab reorganized into four separate, professional pill-tab
-//      panels — Banking Statement, Cash ⇄ Bank Transfer Logs, Credit &
-//      Loan Ledger, Interest Payments Log — instead of one long stacked
-//      scroll, using the same sub-tab pattern already used by Fee &
-//      Class Structure (see StructureTab). Every feature that existed
-//      before (search & filters on the main statement, print/export,
-//      add/delete on each log, expand a credit entry's interest-payment
-//      history, Pay Interest) is fully intact — this only changes how
-//      the four sections are navigated, not what they do (see
-//      BankingTab, BANKING_SUB_TABS).
-//  20. BUG FIX — a student saved with ZERO subjects/batches selected was
-//      being silently charged the 1-subject Fee Matrix rate every month,
-//      because both computeStudentLedger() and the dashboard's
-//      forecastForMonth() did `batches.length || 1`, and expectedFeeFor()
-//      itself also forced any falsy batch count up to 1. A batch count of
-//      0 is falsy in JavaScript, so "no subjects chosen" was
-//      indistinguishable from "1 subject chosen" and got billed as if
-//      the student had taken a single subject they were never actually
-//      enrolled in. expectedFeeFor() now returns ₹0 immediately for a
-//      batch count of 0 (before ever consulting the fee matrix), and
-//      both call sites no longer force that fallback to 1 — a
-//      subject-less student now correctly accrues ₹0 tuition instead of
-//      the 1-subject rate. Students with 1+ subjects are billed exactly
-//      as before.
-//
-// Changes made in this fifth update pass:
-//  21. NAVIGATION — the six sidebar tabs Students Register, Pending Dues,
-//      Deposits Log, Charges, Center Statement, and Fee & Class Structure
-//      are now one sidebar entry, "Student Management" (id
-//      "students-management"), with an internal bordered pill row of six
-//      sub-tabs in that exact left-to-right order — same pattern already
-//      used by Fee & Class Structure's own 3-way pill row and Banking's
-//      4-way pill row. This is purely a navigation regroup: StudentsTab,
-//      DuesTab, DepositsTab, ChargesTab, CenterStatementTab, and
-//      StructureTab are all reused completely unchanged, wired with the
-//      exact same props (search boxes, filters, Add Student / Add Charge
-//      / Record Deposit / Print-Export buttons, receipts, modals,
-//      add/edit/delete/restore actions) they had as standalone tabs — none
-//      of that behavior changed. See StudentManagementTab and
-//      STUDENT_MANAGEMENT_SUB_TABS. Fee & Class Structure's own internal
-//      3-way pill row (Fee Matrix Pricing / Class & Subject List / Manage
-//      Streams) is untouched and still lives one level down, inside the
-//      new "Fee & Class Structure" sub-tab. Expenses Log and Banking are
-//      unaffected and remain separate sidebar tabs, exactly as before.
-//
-// Changes made in this sixth update pass:
-//  22. NEW FEATURE — Academic Monitoring: a new sidebar tab (id
-//      "academic-monitoring", right after Student Management) tracking
-//      student academic performance, for internal use and for
-//      parent-facing printouts. Uses the exact same bordered pill-tab
-//      pattern as Fee & Class Structure / Student Management (see
-//      AcademicMonitoringTab / ACADEMIC_MONITORING_SUB_TABS), with four
-//      sub-tabs in this order: Attendance (mark daily/class-wise
-//      Present/Absent/Late per student, date filter, per-student
-//      attendance % summary — see AttendanceTab), Test Scores (test name,
-//      subject, date, marks, remarks per student, with per-student score
-//      history and class-wise averages — see TestScoresTab), Behaviour &
-//      Conduct (dated notes tagged positive / neutral / needs-attention —
-//      see BehaviourTab), and Performance Report (a printable A4,
-//      parent-facing summary combining attendance %, recent test scores,
-//      and behaviour notes for one student, reusing the same Tailwind CDN
-//      + Google Fonts print-popup pattern as the Joining Form / Center
-//      Statement — see PerformanceReportTab). Each of Attendance, Test
-//      Scores, and Behaviour & Conduct has its own Firestore collection
-//      ("attendance", "testScores", "behaviourNotes" respectively), synced
-//      live via onSnapshot exactly like every other collection in this
-//      file, and each fully supports soft-delete + Trash/Restore +
-//      permanent delete, wired into the existing TrashTab and trashCount
-//      (see AttendanceFormModal / TestScoreFormModal / BehaviourFormModal
-//      and the saveAttendance / saveTestScore / saveBehaviourNote +
-//      soft/restore/permanent-delete functions below). Nothing about any
-//      existing tab, collection, or handler changed.
-//
-// Changes made in this seventh update pass:
-//  23. NEW FEATURE — Teacher Management, Batch Schedule, Staff, Teacher
-//      Performance, Attendance (batch-wise), and Test Marks. Five new
-//      Firestore collections, synced live via onSnapshot exactly like
-//      every other collection in this file: "teachers", "staff",
-//      "batchSchedule", "attendanceLog", "tests".
-//      NOTE on naming: the brief asked for a Firestore collection named
-//      "attendance" for the new batch-wise marking feature, but this file
-//      already has a per-student "attendance" collection powering the
-//      existing Academic Monitoring → Attendance sub-tab (see change #22
-//      above). That collection is untouched — this pass uses a
-//      differently-named collection, "attendanceLog", for the new
-//      roster/date/subject-based marking feature so the two never collide
-//      or get mixed up. Flagging this rename since it wasn't explicitly
-//      asked for.
-//    - Teacher Management (new sidebar tab, right after Student
-//      Management): sub-tabs Teachers (register/list/expand-row, mirrors
-//      StudentsTab + StudentFormModal — see TeachersTab /
-//      TeacherFormModal), Performance (see computeTeacherPerformance /
-//      TeacherPerformanceTab), Batch Schedule (see BatchScheduleTab /
-//      BatchScheduleFormModal), and Staff (reuses the Teacher form shell
-//      minus expertise/batch fields, plus a free-text Title — see
-//      StaffTab / StaffFormModal). Batch Schedule and Staff were placed
-//      here as sub-tabs rather than their own sidebar entries, to keep
-//      the sidebar from getting crowded — flagged as a judgment call per
-//      the brief, easy to promote to top-level nav later if preferred.
-//    - Attendance (new sidebar tab): sub-tabs "Mark Attendance" (date +
-//      class + subject, autofill from Batch Schedule only when the date
-//      is today and exactly one schedule window matches the current
-//      time, defaults everyone to Absent, idempotent upsert keyed by
-//      date+class+subject — see MarkAttendanceTab) and "Test Marks"
-//      (auto-generated Test ID {class}{subject}{YY}{seq}, roster pulled
-//      from the matching Batch Schedule record — see TestMarksTab). Test
-//      Marks was placed under Attendance rather than its own sidebar
-//      entry, same sidebar-crowding judgment call as above.
-//    - Teacher Performance is intentionally NOT hardcoded to one
-//      weighting formula — see computeTeacherPerformance(), an isolated,
-//      clearly-commented function with the attendance/test-score weights
-//      called out as the one thing to confirm/tune. The Performance
-//      sub-tab shows the computed summary AND the batch-level numbers it
-//      was built from, so it's auditable rather than a black box.
-//    - "Student active in a batch as of date X" (Test Marks roster) reuses
-//      the same batchHistory-by-month logic batchesForMonth() already
-//      uses for fee calculation (matched on the selected test date's
-//      month) — see studentsActiveInBatch(). Flagged: this checks the
-//      student's CURRENT class against the batch's class, since class
-//      itself isn't tracked with per-date history the way subjects/
-//      batches are (only the latest class change is snapshotted via
-//      Promote). Worth confirming if that's precise enough.
-//    - Trash/Restore: Teachers and Staff are fully wired into the
-//      existing Trash tab (soft delete / restore / permanent delete),
-//      same as students. Batch Schedule entries use a simple confirm +
-//      permanent delete (no trash bin) since they're setup/config
-//      records, not financial or attendance history. Attendance and Test
-//      Marks records save as one upserted document per key (date+class+
-//      subject, or the generated Test ID) exactly as specified, so
-//      re-opening the same combination edits in place rather than
-//      creating a duplicate to trash.
-//      Nothing about any existing tab, collection, component, or handler
-//      changed.
-//
-// Changes made in this fourth update pass:
-//  24. Teacher Management → renamed to "Institute Management" in the
-//      sidebar label and the tab's own SectionHeader/eyebrow text only —
-//      the internal id stays "teacher-management" so nothing that already
-//      referenced it (routing, trashCount, etc.) broke. Subtitle reworded
-//      to mention Salary and Advance now living here too.
-//      NEW FEATURE — Salary (see SalaryTab / SalaryFormModal /
-//      SalarySlipModal): a new sub-tab, right after "Staff", for paying
-//      teachers and other staff. The picker merges visibleTeachers and
-//      visibleStaff into one list (see mergeStaffAndTeachers()) with a
-//      personType flag ("teacher"|"staff") carried through everywhere.
-//      Pay Salary writes a `salaryPayments` record (own generateSalaryId()
-//      sequence, "SAL<year>####", same mechanism as generateStaffId) and,
-//      when the net amount paid is > 0, a matching banking feed line
-//      (kind: "debit", bucket by mode) so it lands in the Banking
-//      Statement's running Cash/Bank balance exactly like an expense —
-//      see bankingSalaryLines, folded into bankingFeedAsc alongside
 //      bankingExpenseLines. A printable salary slip (ChargeReceiptModal's
 //      print-window pattern) is shown after saving and can be reopened
 //      from the Salary history table.
@@ -907,7 +707,7 @@ import {
 //      institute name here now updates every printout at once. Falls
 //      back to the same "COACHING CLASSES" placeholder text until
 //      Settings is filled in, so nothing looks broken pre-setup. The
-//      app's own product branding ("Batch Ledger Pro" in the sidebar) is
+//      app's own product branding ("InstituteOS" in the sidebar) is
 //      untouched — this only governs the institute's own identity shown
 //      on documents.
 //  48. Add/Edit Batch modal gained a Room Number field (free text, per
@@ -932,6 +732,81 @@ import {
 //      were pulled out into local consts (computed once) so both
 //      locations render the exact same component with the exact same
 //      data/handlers. Nothing about how any of the four behave changed.
+//
+// Changes made in this eleventh update pass:
+//  51. Performance reorganization (per direct request): Institute
+//      Management's "Performance" sub-tab (TeacherPerformanceTab) is
+//      removed from there — Institute Management no longer has a
+//      Performance entry, its intro line updated to point at the new
+//      location. Academic Monitoring's "Performance Report" sub-tab is
+//      renamed "Performance" (id kept as "report") and now hosts its own
+//      inner pill row (new PerformanceSectionTab, same pattern as
+//      AttendanceSectionTab/ScoresSectionTab) with three panels in this
+//      order: "Performance Report" (the exact same PerformanceReportTab,
+//      individual student view, completely unchanged), "Teachers
+//      Performance" (the exact same TeacherPerformanceTab moved from
+//      Institute Management — same component, same props object, just
+//      relocated, nothing about its calculation changed), and "Institute
+//      Performance" (new — see #52). teacherPerformanceTabProps is
+//      passed into AcademicMonitoringTab now instead of
+//      TeacherManagementTab; same object shape as before.
+//  52. New Institute Performance tab (new InstitutePerformanceTab) —
+//      overall attendance % and average test score % across the whole
+//      institute, with its own Month/Year toggle (independent of the
+//      Dashboard's), plus a By Class and By Subject breakdown table
+//      (attendance %, avg score %, sessions held, tests conducted per
+//      group). Same attendanceLog/tests-derived calculation approach as
+//      the Dashboard's Institute Snapshot tiles (#46), just with its own
+//      period control and per-class/subject detail those tiles don't
+//      have room for.
+//
+// Changes made in this twelfth update pass:
+//  53. BUGFIX — Add Room / Area (Infrastructure Management): clicking "Add
+//      to Registry" repeatedly created duplicate entries with identical
+//      data. Cause: saveInfrastructure() never closed the modal after
+//      saving (every other Add-form's save function does this —
+//      saveBatchScheduleEntry, saveTeacher, etc. — this one was missed).
+//      With the modal left open, a repeated/double click called onSave
+//      again while `data.id` was still undefined, so a fresh uid() ran
+//      each time and wrote a second doc. Fixed by closing the modal on
+//      save, matching the established convention, plus a `submitting`
+//      guard directly in InfrastructureFormModal as defense-in-depth
+//      against a fast double-click landing before the modal visually
+//      closes.
+//  54. Add/Edit Batch → Room Number now autocompletes from Infrastructure
+//      Management's registry (via a <datalist>, so free text still works
+//      if nothing's registered yet — this doesn't block saving a batch)
+//      and shows a live indicator right under the field: a green match
+//      confirmation naming the matched room + category if what's typed
+//      matches a registered room exactly (case-insensitive), an amber
+//      "no matching room found" warning if it doesn't match any
+//      registered room, or a neutral hint to go register rooms if
+//      Infrastructure Management is still empty. BatchScheduleFormModal
+//      now receives the `infrastructure` list as a prop for this.
+//  55. Banking's sub-tab row (8 tabs: Statement, Expenses, Salary,
+//      Advance, Deposits Log, Transfer Logs, Credit & Loan Ledger,
+//      Interest Payments Log) used the single-bordered-strip-with-
+//      internal-dividers pattern, which breaks apart into a stray-
+//      bordered orphan box whenever it wraps to a new line — the exact
+//      same visual bug already found and fixed on Recycle Bin's category
+//      row. Replaced with the same fix: individual chip buttons, each
+//      with its own border and rounded corners, so wrapping at any width
+//      stays clean. Sub-tab order/behavior is unchanged.
+//
+// Changes made in this thirteenth update pass:
+//  56. Rebrand — app product name changed from "Batch Ledger Pro" to
+//      "InstituteOS" (login screen + sidebar header), tagline changed
+//      from "Coaching Register" to "Institute Operating System" (settled
+//      on after a couple of revisions — briefly "The Complete Institute,
+//      in One Place," which was too long for the sidebar strip). This is
+//      purely the app's own product branding — separate from Settings'
+//      Institute Name/Tagline (#47), which is the institute's own
+//      identity shown on printed documents and is untouched by this. The
+//      underlying component/function name (`CoachingLedger`) and this
+//      file's name are left as-is, since renaming those would require
+//      touching whatever file imports this component (App.js or
+//      similar), which isn't in view here — purely cosmetic/internal,
+//      doesn't affect what's shown on screen.
 // ============================================================================
 
 // Admin Access Password
@@ -1508,7 +1383,7 @@ function SectionHeader({ eyebrow, title, action }) {
 // ---- Institute Settings — a single Firestore doc (settings/institute)
 // holding the institute's own display identity (Name, Tagline, Address,
 // Phone, GST/Registration Number), separate from the app's own product
-// branding ("Batch Ledger Pro" in the sidebar, which is unrelated and
+// branding ("InstituteOS" in the sidebar, which is unrelated and
 // untouched). Exposed via Context so every print template below can read
 // it without threading a prop through every intermediate component.
 const DEFAULT_INSTITUTE_SETTINGS = { instituteName: "COACHING CLASSES", tagline: "", address: "", phone: "", gstNumber: "" };
@@ -1830,7 +1705,7 @@ export default function CoachingLedger() {
         <style>{FONT_IMPORT}</style>
         <div className="bg-[#FAF6EC] p-8 rounded-sm shadow-2xl max-w-md w-full border-2" style={{ borderColor: "#B8862B" }}>
           <div className="flex justify-center mb-3 text-[#12312B]"><Lock size={32} /></div>
-          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B] text-center">Batch Ledger Pro</div>
+          <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-2xl font-bold text-[#12312B] text-center">InstituteOS</div>
           <p className="text-xs text-[#9C8F6E] text-center uppercase tracking-wider mb-6" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>Admin Authentication</p>
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
@@ -2627,6 +2502,8 @@ export default function CoachingLedger() {
   async function saveInfrastructure(data) {
     const id = data.id || uid();
     await setDoc(doc(db, "infrastructure", id), { ...data, id });
+    setShowInfrastructureForm(false);
+    setEditingInfrastructure(null);
   }
   async function deleteInfrastructure(id) {
     if (!window.confirm("Delete this room/area entry? This cannot be undone.")) return;
@@ -3039,8 +2916,8 @@ export default function CoachingLedger() {
       <aside className="w-60 shrink-0 flex flex-col justify-between sticky top-0 h-screen overflow-y-auto" style={{ background: "#12312B" }}>
         <div>
           <div className="px-5 pt-6 pb-5" style={{ borderBottom: "1px solid #24473F" }}>
-            <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#F4EFDE] leading-tight">Batch<br/>Ledger Pro</div>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", color: "#8FAE9F" }} className="mt-1 uppercase tracking-wider">Coaching Register</div>
+            <div style={{ fontFamily: "'Zilla Slab', serif" }} className="text-xl font-bold text-[#F4EFDE] leading-tight">InstituteOS</div>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", color: "#8FAE9F" }} className="mt-1 uppercase tracking-wider">Institute Operating System</div>
           </div>
           <nav className="px-3 py-4 space-y-1">
             {navItems.map(item => {
@@ -3150,6 +3027,9 @@ export default function CoachingLedger() {
             tests={tests} onSaveTest={saveTest}
             onEditTest={editTest}
             onDeleteTest={deleteTest}
+            teacherPerformanceTabProps={{
+              teachers: visibleTeachers, batches: batchSchedule, attendanceRecords: attendanceLog, tests,
+            }}
           />
         )}
         {tab === "teacher-management" && (
@@ -3161,9 +3041,6 @@ export default function CoachingLedger() {
               onRemove: softDeleteTeacher,
               onStatement: (t) => setShowPersonStatement({ personId: t.id, personType: "teacher" }),
               onChangeStatus: (t, newStatus) => setShowTeacherStatusModal({ teacher: t, newStatus }),
-            }}
-            performanceTabProps={{
-              teachers: visibleTeachers, batches: batchSchedule, attendanceRecords: attendanceLog, tests,
             }}
             batchScheduleTabProps={{
               batchSchedule, teachers: visibleTeachers, classes, subjectsList,
@@ -3327,7 +3204,7 @@ export default function CoachingLedger() {
           onClose={() => { setShowStaffForm(false); setEditingStaffMember(null); }} onSave={saveStaffMember} />
       )}
       {showBatchScheduleForm && (
-        <BatchScheduleFormModal classes={classes} subjectsList={subjectsList} teachers={visibleTeachers} initial={editingBatchSchedule}
+        <BatchScheduleFormModal classes={classes} subjectsList={subjectsList} teachers={visibleTeachers} infrastructure={infrastructure} initial={editingBatchSchedule}
           onClose={() => { setShowBatchScheduleForm(false); setEditingBatchSchedule(null); }} onSave={saveBatchScheduleEntry} />
       )}
       {showInfrastructureForm && (
@@ -4502,7 +4379,7 @@ const ACADEMIC_MONITORING_SUB_TABS = [
   { id: "mark-attendance", label: "Attendance", icon: ClipboardCheck },
   { id: "test-marks", label: "Scores", icon: Award },
   { id: "behaviour", label: "Behaviour & Conduct", icon: MessageSquare },
-  { id: "report", label: "Performance Report", icon: FileBarChart2 },
+  { id: "report", label: "Performance", icon: FileBarChart2 },
 ];
 
 function AcademicMonitoringTab({
@@ -4511,6 +4388,7 @@ function AcademicMonitoringTab({
   subjectsList, batchSchedule, attendanceLog, batchesForMonth, onSaveAttendanceLog,
   onEditAttendanceLog, onDeleteAttendanceLog,
   tests, onSaveTest, onEditTest, onDeleteTest,
+  teacherPerformanceTabProps,
 }) {
   const [subTab, setSubTab] = useState("mark-attendance");
 
@@ -4549,16 +4427,15 @@ function AcademicMonitoringTab({
           onAdd={onAddBehaviour} onEdit={onEditBehaviour} onRemove={onRemoveBehaviour} />
       )}
       {subTab === "report" && (
-        // UPDATE — Performance Report used to read the old `attendance` /
-        // `testScores` props (per-student collections nothing writes to
-        // anymore, per the earlier flagged mismatch). It now reads
-        // `attendanceLog` / `tests` — the same batch-wise collections Mark
-        // Attendance / Fill Marks actually save to — so attendance % and
-        // test averages here now reflect real, current data. See
-        // PerformanceReportTab for the derivation. `attendance` / `testScores`
-        // props are left wired above (untouched, per convention) even though
-        // this tab no longer reads them.
-        <PerformanceReportTab students={students} attendanceLog={attendanceLog} tests={tests} behaviourNotes={behaviourNotes} />
+        // UPDATE — this used to render PerformanceReportTab directly. It now
+        // renders PerformanceSectionTab, which adds its own inner pill row
+        // with three panels: "Performance Report" (this exact
+        // PerformanceReportTab, unchanged — individual student view),
+        // "Teachers Performance" (TeacherPerformanceTab, moved here from
+        // Institute Management), and "Institute Performance" (new —
+        // overall/aggregate view). See PerformanceSectionTab below.
+        <PerformanceSectionTab students={students} attendanceLog={attendanceLog} tests={tests} behaviourNotes={behaviourNotes}
+          classes={classes} subjectsList={subjectsList} teacherPerformanceTabProps={teacherPerformanceTabProps} />
       )}
     </div>
   );
@@ -4977,6 +4854,38 @@ function BehaviourTab({ students, classes, behaviourNotes, onAdd, onEdit, onRemo
   );
 }
 
+// ---- "Performance" sub-tab wrapper — same inner-pill-row pattern as
+// AttendanceSectionTab / ScoresSectionTab: three panels — "Performance
+// Report" (PerformanceReportTab, unchanged, individual student view),
+// "Teachers Performance" (TeacherPerformanceTab, moved here from Institute
+// Management — same component/props, just relocated), and "Institute
+// Performance" (new — aggregate/overall view, see InstitutePerformanceTab
+// below). ----
+function PerformanceSectionTab({ students, attendanceLog, tests, behaviourNotes, classes, subjectsList, teacherPerformanceTabProps }) {
+  const [inner, setInner] = useState("report");
+  return (
+    <div>
+      <div className="flex border rounded-sm overflow-hidden mb-4 w-fit" style={{ borderColor: "#12312B" }}>
+        <button onClick={() => setInner("report")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+          style={{ background: inner === "report" ? "#12312B" : "white", color: inner === "report" ? "#F4EFDE" : "#12312B" }}>
+          <FileBarChart2 size={13} /> Performance Report
+        </button>
+        <button onClick={() => setInner("teachers")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+          style={{ background: inner === "teachers" ? "#12312B" : "white", color: inner === "teachers" ? "#F4EFDE" : "#12312B", borderLeft: "1px solid #12312B" }}>
+          <UserCog size={13} /> Teachers Performance
+        </button>
+        <button onClick={() => setInner("institute")} className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+          style={{ background: inner === "institute" ? "#12312B" : "white", color: inner === "institute" ? "#F4EFDE" : "#12312B", borderLeft: "1px solid #12312B" }}>
+          <GraduationCap size={13} /> Institute Performance
+        </button>
+      </div>
+      {inner === "report" && <PerformanceReportTab students={students} attendanceLog={attendanceLog} tests={tests} behaviourNotes={behaviourNotes} />}
+      {inner === "teachers" && <TeacherPerformanceTab {...teacherPerformanceTabProps} />}
+      {inner === "institute" && <InstitutePerformanceTab students={students} attendanceLog={attendanceLog} tests={tests} classes={classes} subjectsList={subjectsList} />}
+    </div>
+  );
+}
+
 // ---- Performance Report — a printable, parent-facing summary per student
 // combining attendance %, recent test scores, and behaviour notes into one
 // clean A4 report. Reuses the Joining Form / Center Statement print-window
@@ -5219,6 +5128,170 @@ function PerformanceReportTab({ students, attendanceLog, tests, behaviourNotes }
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- Institute Performance — new aggregate view: overall attendance % and
+// average test score % across the whole institute for a selected
+// month/year, plus a By Class and By Subject breakdown. Derived directly
+// from attendanceLog/tests (the same batch-wise collections everything
+// else in Academic Monitoring already uses), same calculation approach as
+// the Dashboard's "Institute Snapshot" tiles but with its own period
+// control (not tied to the Dashboard's curMonth) and per-class/per-subject
+// detail those tiles don't have room for. ----
+function InstitutePerformanceTab({ students, attendanceLog, tests, classes, subjectsList }) {
+  const [periodType, setPeriodType] = useState("month");
+  const [selectedMonth, setSelectedMonth] = useState(todayStr().slice(0, 7));
+  const selectedYear = selectedMonth.slice(0, 4);
+
+  const inPeriod = (dateStr) => {
+    if (!dateStr) return false;
+    return periodType === "month" ? dateStr.slice(0, 7) === selectedMonth : dateStr.slice(0, 4) === selectedYear;
+  };
+
+  const periodAttendance = useMemo(() => (attendanceLog || []).filter(a => inPeriod(a.date)), [attendanceLog, periodType, selectedMonth]);
+  const periodTests = useMemo(() => (tests || []).filter(t => inPeriod(t.date)), [tests, periodType, selectedMonth]);
+
+  const totalRecords = periodAttendance.reduce((n, a) => n + (a.records || []).length, 0);
+  const presentRecords = periodAttendance.reduce((n, a) => n + (a.records || []).filter(r => r.status === "Present").length, 0);
+  const overallAttendancePct = totalRecords > 0 ? round2((presentRecords / totalRecords) * 100) : null;
+
+  const scoreTotals = periodTests.reduce((acc, t) => {
+    (t.scores || []).forEach(sc => {
+      if (sc.marks === "" || sc.marks == null) return;
+      acc.obtained += Number(sc.marks) || 0;
+      acc.max += Number(t.maxMarks) || 0;
+    });
+    return acc;
+  }, { obtained: 0, max: 0 });
+  const overallScorePct = scoreTotals.max > 0 ? round2((scoreTotals.obtained / scoreTotals.max) * 100) : null;
+
+  // By Class / By Subject breakdowns — same attendance%/score% math, just
+  // grouped. Only classes/subjects that actually appear in this period's
+  // data are shown, so the tables don't pad out with empty rows.
+  function breakdownBy(key) {
+    const groups = {};
+    periodAttendance.forEach(a => {
+      const k = a[key];
+      if (!k) return;
+      if (!groups[k]) groups[k] = { total: 0, present: 0, scoreObtained: 0, scoreMax: 0, testCount: 0, sessionCount: 0 };
+      groups[k].sessionCount += 1;
+      groups[k].total += (a.records || []).length;
+      groups[k].present += (a.records || []).filter(r => r.status === "Present").length;
+    });
+    periodTests.forEach(t => {
+      const k = t[key];
+      if (!k) return;
+      if (!groups[k]) groups[k] = { total: 0, present: 0, scoreObtained: 0, scoreMax: 0, testCount: 0, sessionCount: 0 };
+      groups[k].testCount += 1;
+      (t.scores || []).forEach(sc => {
+        if (sc.marks === "" || sc.marks == null) return;
+        groups[k].scoreObtained += Number(sc.marks) || 0;
+        groups[k].scoreMax += Number(t.maxMarks) || 0;
+      });
+    });
+    return Object.entries(groups)
+      .map(([k, g]) => ({
+        key: k,
+        attendancePct: g.total > 0 ? round2((g.present / g.total) * 100) : null,
+        scorePct: g.scoreMax > 0 ? round2((g.scoreObtained / g.scoreMax) * 100) : null,
+        sessionCount: g.sessionCount, testCount: g.testCount,
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }));
+  }
+  const byClass = useMemo(() => breakdownBy("class"), [periodAttendance, periodTests]);
+  const bySubject = useMemo(() => breakdownBy("subject"), [periodAttendance, periodTests]);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div className="text-sm text-[#6E6650]">Institute-wide attendance and test performance, aggregated across every batch.</div>
+        <div className="flex items-center gap-2">
+          <div className="flex border rounded-sm overflow-hidden" style={{ borderColor: "#12312B" }}>
+            {["month", "year"].map((p, i) => (
+              <button key={p} onClick={() => setPeriodType(p)}
+                className="px-3 py-1.5 text-xs font-semibold"
+                style={{ background: periodType === p ? "#12312B" : "white", color: periodType === p ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+                {p === "month" ? "Month" : "Year"}
+              </button>
+            ))}
+          </div>
+          {periodType === "month" ? (
+            <input type="month" className={inputCls} style={inputStyle} value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} />
+          ) : (
+            <div className="px-3 py-2 text-sm font-mono border rounded-sm" style={{ borderColor: "#D8CFB8" }}>{selectedYear}</div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 gap-4 mb-5">
+        <StatCard label="Institute Attendance" value={overallAttendancePct == null ? "—" : `${overallAttendancePct}%`}
+          sub={totalRecords > 0 ? `${presentRecords}/${totalRecords} present` : "No attendance marked"}
+          tone={overallAttendancePct == null ? undefined : overallAttendancePct >= 80 ? "good" : overallAttendancePct >= 60 ? "warn" : "bad"} />
+        <StatCard label="Institute Avg Score" value={overallScorePct == null ? "—" : `${overallScorePct}%`}
+          sub={periodTests.length > 0 ? `${periodTests.length} test${periodTests.length === 1 ? "" : "s"}` : "No tests conducted"}
+          tone={overallScorePct == null ? undefined : overallScorePct >= 60 ? "good" : overallScorePct >= 40 ? "warn" : "bad"} />
+        <StatCard label="Sessions Held" value={periodAttendance.length} sub="Attendance sessions this period" />
+        <StatCard label="Tests Conducted" value={periodTests.length} sub="Tests this period" />
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <Card>
+          <div className="px-4 py-2.5 text-sm font-semibold border-b" style={{ borderColor: "#E4DCC5" }}>By Class</div>
+          {byClass.length === 0 ? (
+            <div className="p-6 text-center text-sm text-[#9C8F6E]">No data for this period.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                  {["Class", "Attendance", "Avg Score", "Sessions", "Tests"].map(h => (
+                    <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {byClass.map(row => (
+                  <tr key={row.key} className="ledger-row">
+                    <td className="px-4 py-2 font-medium">{row.key}</td>
+                    <td className="px-4 py-2 font-mono">{row.attendancePct == null ? "—" : `${row.attendancePct}%`}</td>
+                    <td className="px-4 py-2 font-mono">{row.scorePct == null ? "—" : `${row.scorePct}%`}</td>
+                    <td className="px-4 py-2 font-mono text-xs text-[#9C8F6E]">{row.sessionCount}</td>
+                    <td className="px-4 py-2 font-mono text-xs text-[#9C8F6E]">{row.testCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Card>
+        <Card>
+          <div className="px-4 py-2.5 text-sm font-semibold border-b" style={{ borderColor: "#E4DCC5" }}>By Subject</div>
+          {bySubject.length === 0 ? (
+            <div className="p-6 text-center text-sm text-[#9C8F6E]">No data for this period.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: "1.5px solid #26231D" }}>
+                  {["Subject", "Attendance", "Avg Score", "Sessions", "Tests"].map(h => (
+                    <th key={h} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px" }} className="text-left px-4 py-2 uppercase tracking-wider text-[#9C8F6E]">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {bySubject.map(row => (
+                  <tr key={row.key} className="ledger-row">
+                    <td className="px-4 py-2 font-medium">{row.key}</td>
+                    <td className="px-4 py-2 font-mono">{row.attendancePct == null ? "—" : `${row.attendancePct}%`}</td>
+                    <td className="px-4 py-2 font-mono">{row.scorePct == null ? "—" : `${row.scorePct}%`}</td>
+                    <td className="px-4 py-2 font-mono text-xs text-[#9C8F6E]">{row.sessionCount}</td>
+                    <td className="px-4 py-2 font-mono text-xs text-[#9C8F6E]">{row.testCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Card>
+      </div>
     </div>
   );
 }
@@ -5884,17 +5957,19 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
       } />
       <div className="text-sm text-[#6E6650] mb-4">Every student deposit, every center expense, every internal Cash ⇄ Bank transfer, and every Credit / Loan entry, in one auditable feed — with a running Cash Balance and Bank Balance shown on every line. Nothing here appears on the Center Statement.</div>
 
-      {/* Four separate, professionally organized sub-tabs — same pill-row
-          pattern as Fee & Class Structure. Only one panel renders at a
-          time; nothing below was removed, just regrouped. */}
-      <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
-        {BANKING_SUB_TABS.map((st, i) => {
+      {/* Individual chip buttons (not one bordered strip with internal
+          dividers) — each has its own border and rounded corners, so
+          wrapping to a new line at 8 sub-tabs never leaves an orphan box
+          with a stray border. Same fix already applied to Recycle Bin's
+          category row for the identical reason. */}
+      <div className="flex flex-wrap gap-2 mb-5">
+        {BANKING_SUB_TABS.map(st => {
           const Icon = st.icon;
           const active = subTab === st.id;
           return (
             <button key={st.id} onClick={() => setSubTab(st.id)}
-              className="px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
-              style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#12312B", borderLeft: i === 0 ? "none" : "1px solid #12312B" }}>
+              className="px-3.5 py-2 text-xs font-semibold flex items-center gap-1.5 rounded-sm border"
+              style={{ background: active ? "#12312B" : "white", color: active ? "#F4EFDE" : "#12312B", borderColor: "#12312B" }}>
               <Icon size={13} /> {st.label}
             </button>
           );
@@ -6803,7 +6878,6 @@ function TrashTab({ trashedStudents, trashedDeposits, trashedCharges, trashedExp
 // ============================================================================
 const TEACHER_MANAGEMENT_SUB_TABS = [
   { id: "teachers", label: "Teachers", icon: UserCog },
-  { id: "performance", label: "Performance", icon: FileBarChart2 },
   { id: "batch-schedule", label: "Batch Schedule", icon: CalendarCheck },
   { id: "staff", label: "Staff", icon: Users },
   { id: "salary", label: "Salary", icon: Wallet },
@@ -6811,12 +6885,12 @@ const TEACHER_MANAGEMENT_SUB_TABS = [
   { id: "infrastructure", label: "Infrastructure Management", icon: Landmark },
 ];
 
-function TeacherManagementTab({ teachersTabProps, performanceTabProps, batchScheduleTabProps, staffTabProps, salaryTabProps, advanceTabProps, infrastructureTabProps }) {
+function TeacherManagementTab({ teachersTabProps, batchScheduleTabProps, staffTabProps, salaryTabProps, advanceTabProps, infrastructureTabProps }) {
   const [subTab, setSubTab] = useState("teachers");
   return (
     <div>
       <SectionHeader eyebrow="Staffing" title="Institute Management" />
-      <div className="text-sm text-[#6E6650] mb-4">Teacher register, performance, batch allotment, other staff, Salary & Advance payments, and campus infrastructure — in one place.</div>
+      <div className="text-sm text-[#6E6650] mb-4">Teacher register, batch allotment, other staff, Salary & Advance payments, and campus infrastructure — in one place. Teacher performance now lives under Academic Monitoring → Performance → Teachers Performance.</div>
 
       <div className="flex border rounded-sm overflow-hidden mb-5 w-fit flex-wrap" style={{ borderColor: "#12312B" }}>
         {TEACHER_MANAGEMENT_SUB_TABS.map((st, i) => {
@@ -6833,7 +6907,6 @@ function TeacherManagementTab({ teachersTabProps, performanceTabProps, batchSche
       </div>
 
       {subTab === "teachers" && <TeachersTab {...teachersTabProps} />}
-      {subTab === "performance" && <TeacherPerformanceTab {...performanceTabProps} />}
       {subTab === "batch-schedule" && <BatchScheduleTab {...batchScheduleTabProps} />}
       {subTab === "staff" && <StaffTab {...staffTabProps} />}
       {subTab === "salary" && <SalaryTab {...salaryTabProps} />}
@@ -7142,7 +7215,7 @@ function TeacherStatusModal({ teacher, newStatus, onClose, onSave }) {
 // decision — logo is a later addition once Firebase Storage is set up).
 // This is the institute's own business identity shown on every printed
 // document via InstituteHeader (see DEFAULT_INSTITUTE_SETTINGS /
-// InstituteSettingsContext) — separate from "Batch Ledger Pro", the app's
+// InstituteSettingsContext) — separate from "InstituteOS", the app's
 // own product branding in the sidebar, which this does not touch.
 function SettingsModal({ initial, onClose, onSave }) {
   const [instituteName, setInstituteName] = useState(initial?.instituteName || "");
@@ -7343,7 +7416,7 @@ function BatchScheduleTab({ batchSchedule, teachers, classes, subjectsList, onAd
 
 const DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onClose, onSave }) {
+function BatchScheduleFormModal({ classes, subjectsList, teachers, infrastructure, initial, onClose, onSave }) {
   const [batchName, setBatchName] = useState(initial?.batchName || "");
   const [cls, setCls] = useState(initial?.class || classes[0] || "");
   const [subject, setSubject] = useState(initial?.subject || subjectsList[0] || "");
@@ -7353,6 +7426,17 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
   const [teacherId, setTeacherId] = useState(initial?.teacherId || "");
   const [substituteTeacherId, setSubstituteTeacherId] = useState(initial?.substituteTeacherId || "");
   const [roomNumber, setRoomNumber] = useState(initial?.roomNumber || "");
+  // Room Number ↔ Infrastructure Management matching — free text still
+  // works (so this never blocks a batch being saved before rooms are
+  // registered), but now autocompletes from Infrastructure Management's
+  // registry (via the datalist below) and shows a live match/no-match
+  // indicator, so a typo like "Room 10" vs the registered "Room-10" is
+  // caught immediately instead of silently creating an unlinked name.
+  const roomMatch = useMemo(() => {
+    const q = roomNumber.trim().toLowerCase();
+    if (!q) return null;
+    return (infrastructure || []).find(r => (r.name || "").trim().toLowerCase() === q) || null;
+  }, [roomNumber, infrastructure]);
   // Batch Name auto-fills from Class + Subject (e.g. Class "12" + Subject
   // "Physics" -> "12 Physics"; Class "JEE" + Subject "Mathematics" -> "JEE
   // Mathematics") for as long as the user hasn't typed into the field
@@ -7402,7 +7486,23 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, initial, onCl
       </div>
       <Field label="Batch Name"><input className={inputCls} style={inputStyle} value={batchName} onChange={e => { setBatchName(e.target.value); setNameTouched(true); }} placeholder="e.g. Morning Physics Batch" /></Field>
       {!nameTouched && <div className="text-[10px] text-[#9C8F6E] -mt-2.5 mb-3">Auto-filled from Class + Subject — type here to set a custom name.</div>}
-      <Field label="Room Number"><input className={inputCls} style={inputStyle} value={roomNumber} onChange={e => setRoomNumber(e.target.value)} placeholder="e.g. Room 204, Lab 2 — matches Infrastructure Management" /></Field>
+      <Field label="Room Number">
+        <input className={inputCls} style={inputStyle} value={roomNumber} onChange={e => setRoomNumber(e.target.value)}
+          list="infra-room-options" placeholder="e.g. Room 204, Lab 2 — matches Infrastructure Management" />
+        <datalist id="infra-room-options">
+          {(infrastructure || []).map(r => <option key={r.id} value={r.name} />)}
+        </datalist>
+      </Field>
+      {roomNumber.trim() && (infrastructure || []).length > 0 && (
+        roomMatch ? (
+          <div className="text-[10px] text-[#3F6B52] -mt-2.5 mb-3 flex items-center gap-1"><Check size={11} /> Matches "{roomMatch.name}" ({roomMatch.category}) in Infrastructure Management</div>
+        ) : (
+          <div className="text-[10px] text-[#B8862B] -mt-2.5 mb-3 flex items-center gap-1"><AlertCircle size={11} /> No matching room found in Infrastructure Management — check spelling, or add it there</div>
+        )
+      )}
+      {roomNumber.trim() && (infrastructure || []).length === 0 && (
+        <div className="text-[10px] text-[#9C8F6E] -mt-2.5 mb-3">Add rooms in Institute Management → Infrastructure Management to enable matching here.</div>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Start Time"><input type="time" className={inputCls} style={inputStyle} value={startTime} onChange={e => setStartTime(e.target.value)} /></Field>
         <Field label="End Time"><input type="time" className={inputCls} style={inputStyle} value={endTime} onChange={e => setEndTime(e.target.value)} /></Field>
@@ -8164,9 +8264,14 @@ function InfrastructureFormModal({ initial, onClose, onSave }) {
   const [capacity, setCapacity] = useState(initial?.capacity || "");
   const [location, setLocation] = useState(initial?.location || "");
   const [remarks, setRemarks] = useState(initial?.remarks || "");
+  // Extra guard against double-submission (e.g. a fast double-click before
+  // the modal visually closes) on top of saveInfrastructure now correctly
+  // closing the modal after saving — belt and suspenders.
+  const [submitting, setSubmitting] = useState(false);
 
   function submit() {
-    if (!name.trim()) return;
+    if (!name.trim() || submitting) return;
+    setSubmitting(true);
     onSave({ ...initial, id: initial?.id, name: name.trim(), category, capacity: capacity.trim(), location: location.trim(), remarks: remarks.trim() });
   }
 
@@ -8183,8 +8288,8 @@ function InfrastructureFormModal({ initial, onClose, onSave }) {
         <Field label="Floor / Location (optional)"><input className={inputCls} style={inputStyle} value={location} onChange={e => setLocation(e.target.value)} placeholder="e.g. 2nd Floor, East Wing" /></Field>
       </div>
       <Field label="Remarks (optional)"><input className={inputCls} style={inputStyle} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Any additional notes" /></Field>
-      <button onClick={submit} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE" }}>
-        {initial ? "Save Changes" : "Add to Registry"}
+      <button onClick={submit} disabled={submitting} className="w-full mt-2 py-2.5 rounded-sm text-sm font-medium" style={{ background: "#12312B", color: "#F4EFDE", opacity: submitting ? 0.6 : 1 }}>
+        {submitting ? "Saving…" : (initial ? "Save Changes" : "Add to Registry")}
       </button>
     </Modal>
   );
