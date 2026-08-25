@@ -830,6 +830,48 @@ import {
 //      generic phone line. Existing settings docs with the old `phone`
 //      field just show blank Mobile/Telephone until re-saved — nothing
 //      crashes, no data was deleted.
+//
+// Changes made in this fifteenth update pass:
+//  59. Institute Performance's period control reordered: the date/value
+//      box (Month picker or Year number input) now comes first, then the
+//      Month button, then the Year button — so the two buttons (fixed-
+//      width, always "Month"/"Year") never shift position when their
+//      sibling's width changes a lot between modes, instead of the
+//      buttons leading. Also made the Year box directly editable (a
+//      number input) instead of a read-only badge — previously the only
+//      way to change year was to switch to Month mode and pick a
+//      different month.
+//  60. BUGFIX — found the real, systemic cause of "documents don't look
+//      professional": 8 of the 12 printable documents (Salary Slip, Fee
+//      Receipt, Bank Transaction Slip, Credit Slip, Interest Payment
+//      Slip, Expense Receipt, Charge Receipt — the "receipt-style" ones)
+//      use Tailwind utility classes in their JSX, but their print popup
+//      never loaded the Tailwind CDN script — only 4 of the 12
+//      (Performance Report, Center Statement, Banking Statement, Student
+//      Statement) did. That means on those 8, essentially all layout/
+//      spacing/border/color styling was silently doing nothing in print;
+//      only inline `style` attributes survived, everything else fell
+//      back to unstyled browser defaults. All 8 now load the same
+//      Tailwind CDN + Google Fonts (FONT_IMPORT) the other 4 already
+//      used, so what prints now actually matches what's shown on screen.
+//  61. All 12 printable documents now explicitly set `@page { size: A4;
+//      margin: ...; }` with NO landscape orientation anywhere — per
+//      request, everything prints portrait. Center Statement and Banking
+//      Statement were the two previously set to A4 landscape (their
+//      tables have 8-11 columns); converted to portrait with print-only
+//      compaction (smaller font, tighter cell padding, forced text
+//      wrapping instead of nowrap) added specifically inside the print
+//      popup's stylesheet so the wide tables still fit and stay legible
+//      — the on-screen Card preview in the app itself is completely
+//      untouched by this, only the separate print popup document changed.
+//  62. Joining Form and Performance Report gained the same Google Fonts
+//      import (FONT_IMPORT) the other documents already had — previously
+//      requesting 'Zilla Slab'/'Inter' via inline styles but never
+//      loading them, so they silently fell back to generic system fonts
+//      in print. Also replaced hardcoded "Coaching Classes" text in both
+//      documents' footers with the real institute name from Settings
+//      (#47/#58) via InstituteSettingsContext, matching every other
+//      document's letterhead, which already used it.
 // ============================================================================
 
 // Admin Access Password
@@ -4919,6 +4961,7 @@ function PerformanceSectionTab({ students, attendanceLog, tests, behaviourNotes,
 // pattern: Tailwind CDN + Google Fonts loaded into the popup, A4 layout,
 // letterhead style. ----
 function PerformanceReportTab({ students, attendanceLog, tests, behaviourNotes }) {
+  const instituteSettings = React.useContext(InstituteSettingsContext);
   const [studentId, setStudentId] = useState(students[0]?.id || "");
   const [studentSearch, setStudentSearch] = useState("");
   const [classFilter, setClassFilter] = useState("all");
@@ -5151,7 +5194,7 @@ function PerformanceReportTab({ students, attendanceLog, tests, behaviourNotes }
           </div>
 
           <div className="text-center text-[10px] text-[#9C8F6E] mt-6 pt-3" style={{ borderTop: "1.5px solid #12312B" }}>
-            Computer Generated Report · Coaching Classes Academic Monitoring
+            Computer Generated Report · {instituteSettings.instituteName || "COACHING CLASSES"} Academic Monitoring
           </div>
         </div>
       )}
@@ -5235,6 +5278,12 @@ function InstitutePerformanceTab({ students, attendanceLog, tests, classes, subj
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div className="text-sm text-[#6E6650]">Institute-wide attendance and test performance, aggregated across every batch.</div>
         <div className="flex items-center gap-2">
+          {periodType === "month" ? (
+            <input type="month" className={inputCls} style={inputStyle} value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} />
+          ) : (
+            <input type="number" className={inputCls + " w-24"} style={inputStyle} value={selectedYear}
+              onChange={e => setSelectedMonth(`${e.target.value.padStart(4, "0")}-${selectedMonth.slice(5, 7)}`)} />
+          )}
           <div className="flex gap-1.5">
             {["month", "year"].map(p => (
               <button key={p} onClick={() => setPeriodType(p)}
@@ -5244,11 +5293,6 @@ function InstitutePerformanceTab({ students, attendanceLog, tests, classes, subj
               </button>
             ))}
           </div>
-          {periodType === "month" ? (
-            <input type="month" className={inputCls} style={inputStyle} value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} />
-          ) : (
-            <div className="px-3 py-2 text-sm font-mono border rounded-sm" style={{ borderColor: "#D8CFB8" }}>{selectedYear}</div>
-          )}
         </div>
       </div>
 
@@ -5718,27 +5762,37 @@ function CenterStatementTab({ transactions, totals, students, classes, onViewRec
 
   const handlePrint = () => {
     const printContent = statementRef.current.innerHTML;
-    const win = window.open("", "", "width=1100,height=900");
+    const win = window.open("", "", "width=900,height=1100");
     // Loads the same Tailwind utility classes + Google Fonts the live app
     // uses, so the printed page renders exactly like the on-screen preview
     // instead of the plain unstyled text a bare popup window would produce.
-    // Landscape A4, since this statement's table has many columns.
+    // Portrait A4 (per request — every printed document is portrait now,
+    // no exceptions). This table has 11 columns, which is a lot for
+    // portrait width, so the print-only overrides below shrink the font
+    // and tighten padding specifically for print — the on-screen Card
+    // above (statementRef) keeps its normal, comfortable size; none of
+    // this touches that.
     win.document.write(`
       <html>
         <head>
-          <title>Center Statement - Coaching Classes</title>
+          <title>Center Statement - InstituteOS</title>
           <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
             ${FONT_IMPORT}
-            @page { size: A4 landscape; margin: 12mm; }
+            @page { size: A4; margin: 10mm; }
             * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
             body { font-family: 'Inter', sans-serif; color: #12312B; background: #fff; margin: 0; }
-            .stmt-doc { border: 1.5px solid #B8862B; border-radius: 4px; padding: 18px; }
-            .stmt-doc::before { content: ""; display: block; height: 3px; background: #12312B; margin: -18px -18px 14px -18px; }
-            table { page-break-inside: auto; }
+            .stmt-doc { border: 1.5px solid #B8862B; border-radius: 4px; padding: 12px; }
+            .stmt-doc::before { content: ""; display: block; height: 3px; background: #12312B; margin: -12px -12px 10px -12px; }
+            table { page-break-inside: auto; width: 100%; border-collapse: collapse; }
             tr { page-break-inside: avoid; page-break-after: auto; }
             thead { display: table-header-group; }
             tfoot { display: table-footer-group; }
+            /* Print-only compaction — 11 columns in portrait needs a much
+               smaller footprint than the on-screen table. */
+            .stmt-doc table { font-size: 8px !important; }
+            .stmt-doc th { font-size: 6.5px !important; padding: 3px 4px !important; }
+            .stmt-doc td { padding: 3px 4px !important; white-space: normal !important; word-break: break-word; }
           </style>
         </head>
         <body>
@@ -5942,27 +5996,33 @@ function BankingTab({ feed, totals, bankTxns, creditTxns, interestPayments, inte
 
   const handlePrint = () => {
     const printContent = statementRef.current.innerHTML;
-    const win = window.open("", "", "width=1100,height=900");
+    const win = window.open("", "", "width=900,height=1100");
     // Loads the same Tailwind utility classes + Google Fonts the live app
     // uses, so the printed page renders exactly like the on-screen preview
     // instead of the plain unstyled text a bare popup window would produce.
-    // Landscape A4, since this statement's table has many columns.
+    // Portrait A4 (per request — every printed document is portrait now,
+    // no exceptions). Same print-only compaction as Center Statement:
+    // smaller font + tighter padding specifically for print, the
+    // on-screen Card above (statementRef) is untouched.
     win.document.write(`
       <html>
         <head>
-          <title>Banking Statement - Coaching Classes</title>
+          <title>Banking Statement - InstituteOS</title>
           <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
             ${FONT_IMPORT}
-            @page { size: A4 landscape; margin: 12mm; }
+            @page { size: A4; margin: 10mm; }
             * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
             body { font-family: 'Inter', sans-serif; color: #12312B; background: #fff; margin: 0; }
-            .stmt-doc { border: 1.5px solid #B8862B; border-radius: 4px; padding: 18px; }
-            .stmt-doc::before { content: ""; display: block; height: 3px; background: #12312B; margin: -18px -18px 14px -18px; }
-            table { page-break-inside: auto; }
+            .stmt-doc { border: 1.5px solid #B8862B; border-radius: 4px; padding: 12px; }
+            .stmt-doc::before { content: ""; display: block; height: 3px; background: #12312B; margin: -12px -12px 10px -12px; }
+            table { page-break-inside: auto; width: 100%; border-collapse: collapse; }
             tr { page-break-inside: avoid; page-break-after: auto; }
             thead { display: table-header-group; }
             tfoot { display: table-footer-group; }
+            .stmt-doc table { font-size: 8px !important; }
+            .stmt-doc th { font-size: 6.5px !important; padding: 3px 4px !important; }
+            .stmt-doc td { padding: 3px 4px !important; white-space: normal !important; word-break: break-word; }
           </style>
         </head>
         <body>
@@ -7944,23 +8004,19 @@ function SalarySlipModal({ payment, onClose }) {
 
   const handlePrint = () => {
     const printContent = slipRef.current.innerHTML;
-    const win = window.open("", "", "width=600,height=750");
+    const win = window.open("", "", "width=850,height=1000");
     win.document.write(`
       <html>
         <head>
           <title>Salary Slip - ${payment.slipId || ""}</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
-            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 420px; margin: auto; }
-            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
-            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
-            .bold { font-weight: bold; }
-            .sign-row { display: flex; justify-content: space-between; margin-top: 40px; }
-            .sign-line { border-top: 1px solid #12312B; width: 45%; text-align: center; padding-top: 4px; font-size: 11px; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+            ${FONT_IMPORT}
+            @page { size: A4; margin: 16mm; }
+            body { font-family: 'Inter', sans-serif; color: #26231D; }
           </style>
         </head>
-        <body><div class="receipt-box">${printContent}</div></body>
+        <body>${printContent}</body>
       </html>
     `);
     win.document.close(); win.focus(); win.print(); win.close();
@@ -10187,21 +10243,19 @@ function ReceiptModal({ deposit, student, totalRemainingDue, onClose }) {
 
   const handlePrint = () => {
     const printContent = receiptRef.current.innerHTML;
-    const win = window.open("", "", "width=600,height=700");
+    const win = window.open("", "", "width=850,height=1000");
     win.document.write(`
       <html>
         <head>
-          <title>Fee Receipt - Coaching Ledger</title>
+          <title>Fee Receipt - InstituteOS</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
-            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
-            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
-            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
-            .bold { font-weight: bold; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+            ${FONT_IMPORT}
+            @page { size: A4; margin: 16mm; }
+            body { font-family: 'Inter', sans-serif; color: #26231D; }
           </style>
         </head>
-        <body><div class="receipt-box">${printContent}</div></body>
+        <body>${printContent}</body>
       </html>
     `);
     win.document.close(); win.focus(); win.print(); win.close();
@@ -10362,21 +10416,19 @@ function BankTxnReceiptModal({ txn, onClose }) {
 
   const handlePrint = () => {
     const printContent = receiptRef.current.innerHTML;
-    const win = window.open("", "", "width=600,height=700");
+    const win = window.open("", "", "width=850,height=1000");
     win.document.write(`
       <html>
         <head>
           <title>Bank Transaction Slip - ${txnId}</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
-            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
-            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
-            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
-            .bold { font-weight: bold; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+            ${FONT_IMPORT}
+            @page { size: A4; margin: 16mm; }
+            body { font-family: 'Inter', sans-serif; color: #26231D; }
           </style>
         </head>
-        <body><div class="receipt-box">${printContent}</div></body>
+        <body>${printContent}</body>
       </html>
     `);
     win.document.close(); win.focus(); win.print(); win.close();
@@ -10540,21 +10592,19 @@ function CreditReceiptModal({ txn, onClose }) {
 
   const handlePrint = () => {
     const printContent = receiptRef.current.innerHTML;
-    const win = window.open("", "", "width=600,height=750");
+    const win = window.open("", "", "width=850,height=1000");
     win.document.write(`
       <html>
         <head>
           <title>Credit Slip - ${txn.creditId}</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
-            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
-            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
-            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
-            .bold { font-weight: bold; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+            ${FONT_IMPORT}
+            @page { size: A4; margin: 16mm; }
+            body { font-family: 'Inter', sans-serif; color: #26231D; }
           </style>
         </head>
-        <body><div class="receipt-box">${printContent}</div></body>
+        <body>${printContent}</body>
       </html>
     `);
     win.document.close(); win.focus(); win.print(); win.close();
@@ -10679,21 +10729,19 @@ function InterestReceiptModal({ payment, creditTxn, onClose }) {
 
   const handlePrint = () => {
     const printContent = receiptRef.current.innerHTML;
-    const win = window.open("", "", "width=600,height=700");
+    const win = window.open("", "", "width=850,height=1000");
     win.document.write(`
       <html>
         <head>
           <title>Interest Payment Slip - ${payment.paymentId}</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
-            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
-            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
-            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
-            .bold { font-weight: bold; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+            ${FONT_IMPORT}
+            @page { size: A4; margin: 16mm; }
+            body { font-family: 'Inter', sans-serif; color: #26231D; }
           </style>
         </head>
-        <body><div class="receipt-box">${printContent}</div></body>
+        <body>${printContent}</body>
       </html>
     `);
     win.document.close(); win.focus(); win.print(); win.close();
@@ -10740,21 +10788,19 @@ function ExpenseReceiptModal({ expense, onClose }) {
 
   const handlePrint = () => {
     const printContent = receiptRef.current.innerHTML;
-    const win = window.open("", "", "width=600,height=700");
+    const win = window.open("", "", "width=850,height=1000");
     win.document.write(`
       <html>
         <head>
           <title>Expense Receipt - ${expenseId}</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
-            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
-            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
-            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
-            .bold { font-weight: bold; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+            ${FONT_IMPORT}
+            @page { size: A4; margin: 16mm; }
+            body { font-family: 'Inter', sans-serif; color: #26231D; }
           </style>
         </head>
-        <body><div class="receipt-box">${printContent}</div></body>
+        <body>${printContent}</body>
       </html>
     `);
     win.document.close(); win.focus(); win.print(); win.close();
@@ -10808,6 +10854,7 @@ function ExpenseReceiptModal({ expense, onClose }) {
 // ============================================================================
 function JoiningFormModal({ student, deposits, onClose }) {
   const formRef = useRef();
+  const instituteSettings = React.useContext(InstituteSettingsContext);
   if (!student) return null;
 
   // The one-time Advance Payment captured on the Student form (if any) is
@@ -10825,6 +10872,7 @@ function JoiningFormModal({ student, deposits, onClose }) {
         <head>
           <title>Joining Form - ${student.name}</title>
           <style>
+            ${FONT_IMPORT}
             @page { size: A4; margin: 16mm; }
             body { font-family: 'Inter', sans-serif; padding: 0; color: #12312B; }
             .form-box { max-width: 100%; margin: auto; border: 1.5px solid #B8862B; padding: 22px; border-radius: 4px; }
@@ -10909,7 +10957,7 @@ function JoiningFormModal({ student, deposits, onClose }) {
         </div>
 
         <div className="footer">
-          Computer Generated Joining Form · Coaching Classes Admission Record · {admissionNo}
+          Computer Generated Joining Form · {instituteSettings.instituteName || "COACHING CLASSES"} Admission Record · {admissionNo}
         </div>
       </div>
       <button onClick={handlePrint} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-sm text-sm font-semibold text-white bg-[#12312B]"><Printer size={15} /> Print Joining Form (A4)</button>
@@ -10925,21 +10973,19 @@ function ChargeReceiptModal({ line, student, onClose }) {
 
   const handlePrint = () => {
     const printContent = receiptRef.current.innerHTML;
-    const win = window.open("", "", "width=600,height=700");
+    const win = window.open("", "", "width=850,height=1000");
     win.document.write(`
       <html>
         <head>
           <title>Charge Receipt - ${line.chargeId || ""}</title>
+          <script src="https://cdn.tailwindcss.com"><\/script>
           <style>
-            body { font-family: 'Inter', sans-serif; padding: 20px; color: #12312B; }
-            .receipt-box { border: 2px solid #12312B; padding: 20px; border-radius: 4px; max-w: 400px; margin: auto; }
-            .header { text-align: center; border-bottom: 2px dashed #12312B; padding-bottom: 10px; margin-bottom: 15px; }
-            .row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; }
-            .bold { font-weight: bold; }
-            .footer { border-top: 1.5px solid #12312B; padding-top: 10px; margin-top: 15px; text-align: center; font-size: 11px; }
+            ${FONT_IMPORT}
+            @page { size: A4; margin: 16mm; }
+            body { font-family: 'Inter', sans-serif; color: #26231D; }
           </style>
         </head>
-        <body><div class="receipt-box">${printContent}</div></body>
+        <body>${printContent}</body>
       </html>
     `);
     win.document.close(); win.focus(); win.print(); win.close();
