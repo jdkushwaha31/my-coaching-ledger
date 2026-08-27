@@ -7562,9 +7562,21 @@ function BatchScheduleFormModal({ classes, subjectsList, teachers, infrastructur
   // Batch Name auto-fills from Class + Subject (e.g. Class "12" + Subject
   // "Physics" -> "12 Physics"; Class "JEE" + Subject "Mathematics" -> "JEE
   // Mathematics") for as long as the user hasn't typed into the field
-  // themselves. Editing an existing batch starts "already touched" so its
-  // saved name is never silently overwritten just by opening the modal.
-  const [nameTouched, setNameTouched] = useState(!!initial);
+  // themselves.
+  // BUG FIX: editing an existing batch used to always start "already
+  // touched" (nameTouched = !!initial), which permanently switched off
+  // auto-sync the moment the modal opened — even when the saved name was
+  // never hand-typed and had simply been auto-generated from a WRONG
+  // Class/Subject. So correcting the Subject on edit no longer updated
+  // the name, leaving the old wrong name/id in place. Now, on edit, we
+  // only start "touched" (auto-sync off) if the saved name doesn't match
+  // what auto-generation would have produced for its original Class +
+  // Subject — i.e. only when it looks like a real custom name. A purely
+  // auto-generated name stays in sync, so fixing the Subject also fixes
+  // the name.
+  const [nameTouched, setNameTouched] = useState(
+    !!initial && initial.batchName !== `${classCodeForId(initial.class)} ${initial.subject}`
+  );
 
   useEffect(() => {
     if (nameTouched || !cls || !subject) return;
