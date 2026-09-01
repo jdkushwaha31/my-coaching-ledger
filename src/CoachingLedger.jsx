@@ -1451,7 +1451,7 @@ function SectionHeader({ eyebrow, title, action }) {
 // branding ("InstituteOS" in the sidebar, which is unrelated and
 // untouched). Exposed via Context so every print template below can read
 // it without threading a prop through every intermediate component.
-const DEFAULT_INSTITUTE_SETTINGS = { instituteName: "COACHING CLASSES", tagline: "", address: "", mobileNumber: "", telephoneNumber: "", gstNumber: "" };
+const DEFAULT_INSTITUTE_SETTINGS = { instituteName: "COACHING CLASSES", tagline: "", address: "", mobileNumber: "", telephoneNumber: "", gstNumber: "", email: "" };
 const InstituteSettingsContext = React.createContext(DEFAULT_INSTITUTE_SETTINGS);
 
 // Shared header block for every printable document (receipts, slips,
@@ -1471,8 +1471,8 @@ function InstituteHeader({ subtitle, large }) {
       <h2 style={{ fontFamily: "'Zilla Slab', serif" }} className={`${large ? "text-2xl" : "text-xl"} font-bold text-[#12312B]`}>{settings.instituteName || "COACHING CLASSES"}</h2>
       {settings.tagline && <p className="text-[10px] text-[#6E6650]">{settings.tagline}</p>}
       <p className={`${large ? "text-[11px]" : "text-[10px]"} uppercase tracking-wider text-[#9C8F6E]`} style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{subtitle}</p>
-      {(settings.address || phoneLine) && (
-        <p className="text-[10px] text-[#9C8F6E] mt-0.5">{[settings.address, phoneLine].filter(Boolean).join(" · ")}</p>
+      {(settings.address || phoneLine || settings.email) && (
+        <p className="text-[10px] text-[#9C8F6E] mt-0.5">{[settings.address, phoneLine, settings.email && `E: ${settings.email}`].filter(Boolean).join(" · ")}</p>
       )}
     </>
   );
@@ -7138,6 +7138,7 @@ function TeacherFormModal({ subjectsList, initial, teachers, onClose, onSave }) 
   const [dob, setDob] = useState(initial?.dob || "");
   const [gender, setGender] = useState(initial?.gender || "");
   const [phone, setPhone] = useState(initial?.phone || "");
+  const [email, setEmail] = useState(initial?.email || "");
   const [guardianPhone, setGuardianPhone] = useState(initial?.guardianPhone || "");
   const [address, setAddress] = useState(initial?.address || "");
   const [aadharNumber, setAadharNumber] = useState(initial?.aadharNumber || "");
@@ -7170,7 +7171,7 @@ function TeacherFormModal({ subjectsList, initial, teachers, onClose, onSave }) 
     }
     onSave({
       ...initial, id: initial?.id, teacherId: initial?.teacherId || displayTeacherId,
-      name: name.trim(), dob, gender, phone: phone.trim(), guardianPhone: guardianPhone.trim(),
+      name: name.trim(), dob, gender, phone: phone.trim(), email: email.trim(), guardianPhone: guardianPhone.trim(),
       address: address.trim(), aadharNumber: aadharNumber.trim(), joiningDate: joiningDate || todayStr(),
       qualifications, parallelProfessions, expertiseSubjects,
       salaryAmount: newAmt, paymentMode, salaryHistory, status: initial?.status || "active",
@@ -7199,8 +7200,11 @@ function TeacherFormModal({ subjectsList, initial, teachers, onClose, onSave }) 
         <Field label="Phone"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} placeholder="10-digit phone number" /></Field>
         <Field label="Emergency Contact"><input className={inputCls} style={inputStyle} value={guardianPhone} onChange={e => setGuardianPhone(e.target.value)} placeholder="Alternate contact" /></Field>
       </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Email Address (optional)"><input type="email" className={inputCls} style={inputStyle} value={email} onChange={e => setEmail(e.target.value)} placeholder="e.g. teacher@example.com" /></Field>
+        <Field label="Aadhar Number"><input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} placeholder="12-digit Aadhar number" maxLength={14} /></Field>
+      </div>
       <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="House / street / area / city" /></Field>
-      <Field label="Aadhar Number"><input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} placeholder="12-digit Aadhar number" maxLength={14} /></Field>
 
       <Field label={`Expertise Subjects (${expertiseSubjects.length} selected)`}>
         <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 border bg-white rounded-sm">
@@ -7319,13 +7323,14 @@ function SettingsModal({ initial, onClose, onSave }) {
   const [mobileNumber, setMobileNumber] = useState(initial?.mobileNumber || "");
   const [telephoneNumber, setTelephoneNumber] = useState(initial?.telephoneNumber || "");
   const [gstNumber, setGstNumber] = useState(initial?.gstNumber || "");
+  const [email, setEmail] = useState(initial?.email || "");
 
   function submit() {
     onSave({
       instituteName: instituteName.trim() || "COACHING CLASSES",
       tagline: tagline.trim(), address: address.trim(),
       mobileNumber: mobileNumber.trim(), telephoneNumber: telephoneNumber.trim(),
-      gstNumber: gstNumber.trim(),
+      gstNumber: gstNumber.trim(), email: email.trim(),
     });
   }
 
@@ -7359,7 +7364,10 @@ function SettingsModal({ initial, onClose, onSave }) {
             <Field label="Mobile Number (optional)"><input className={inputCls} style={inputStyle} value={mobileNumber} onChange={e => setMobileNumber(e.target.value)} /></Field>
             <Field label="Telephone Number (optional)"><input className={inputCls} style={inputStyle} value={telephoneNumber} onChange={e => setTelephoneNumber(e.target.value)} /></Field>
           </div>
-          <Field label="GST / Registration No. (optional)"><input className={inputCls} style={inputStyle} value={gstNumber} onChange={e => setGstNumber(e.target.value)} /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="GST / Registration No. (optional)"><input className={inputCls} style={inputStyle} value={gstNumber} onChange={e => setGstNumber(e.target.value)} /></Field>
+            <Field label="Email Address (optional)"><input type="email" className={inputCls} style={inputStyle} value={email} onChange={e => setEmail(e.target.value)} placeholder="e.g. office@institute.com" /></Field>
+          </div>
         </>
       )}
 
@@ -7720,6 +7728,7 @@ function StaffFormModal({ initial, staff, onClose, onSave }) {
   const [dob, setDob] = useState(initial?.dob || "");
   const [gender, setGender] = useState(initial?.gender || "");
   const [phone, setPhone] = useState(initial?.phone || "");
+  const [email, setEmail] = useState(initial?.email || "");
   const [guardianPhone, setGuardianPhone] = useState(initial?.guardianPhone || "");
   const [address, setAddress] = useState(initial?.address || "");
   const [aadharNumber, setAadharNumber] = useState(initial?.aadharNumber || "");
@@ -7740,7 +7749,7 @@ function StaffFormModal({ initial, staff, onClose, onSave }) {
     }
     onSave({
       ...initial, id: initial?.id, staffId: initial?.staffId || displayStaffId,
-      name: name.trim(), title: title.trim(), dob, gender, phone: phone.trim(),
+      name: name.trim(), title: title.trim(), dob, gender, phone: phone.trim(), email: email.trim(),
       guardianPhone: guardianPhone.trim(), address: address.trim(), aadharNumber: aadharNumber.trim(),
       joiningDate: joiningDate || todayStr(), salaryAmount: newAmt, paymentMode, salaryHistory, status,
     });
@@ -7766,8 +7775,11 @@ function StaffFormModal({ initial, staff, onClose, onSave }) {
         <Field label="Phone"><input className={inputCls} style={inputStyle} value={phone} onChange={e => setPhone(e.target.value)} /></Field>
         <Field label="Emergency Contact"><input className={inputCls} style={inputStyle} value={guardianPhone} onChange={e => setGuardianPhone(e.target.value)} /></Field>
       </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Email Address (optional)"><input type="email" className={inputCls} style={inputStyle} value={email} onChange={e => setEmail(e.target.value)} placeholder="e.g. staff@example.com" /></Field>
+        <Field label="Aadhar Number"><input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} maxLength={14} /></Field>
+      </div>
       <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} /></Field>
-      <Field label="Aadhar Number"><input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} maxLength={14} /></Field>
       <Field label="Joining Date"><input type="date" className={inputCls} style={inputStyle} value={joiningDate} onChange={e => setJoiningDate(e.target.value)} /></Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Current Salary (₹)"><input type="number" className={inputCls} style={inputStyle} value={salaryAmount} onChange={e => setSalaryAmount(e.target.value)} placeholder="0" /></Field>
@@ -9292,6 +9304,7 @@ function StudentFormModal({ classes, subjectsList, streams, initial, onClose, on
   const [stream, setStream] = useState(initial?.stream || "");
   const [batches, setBatches] = useState(initial?.batches || []);
   const [phone, setPhone] = useState(initial?.phone || "");
+  const [email, setEmail] = useState(initial?.email || "");
   const [fatherName, setFatherName] = useState(initial?.fatherName || "");
   const [guardianPhone, setGuardianPhone] = useState(initial?.guardianPhone || "");
   const [address, setAddress] = useState(initial?.address || "");
@@ -9349,7 +9362,7 @@ function StudentFormModal({ classes, subjectsList, streams, initial, onClose, on
     onSave({
       ...initial, id: initial?.id, studentId: initial?.studentId || displayStudentId,
       name: name.trim(), class: cls, gender, stream, batches, batchHistory: baseHistory,
-      phone: phone.trim(), fatherName: fatherName.trim(), guardianPhone: guardianPhone.trim(), address: address.trim(),
+      phone: phone.trim(), email: email.trim(), fatherName: fatherName.trim(), guardianPhone: guardianPhone.trim(), address: address.trim(),
       dob: dob || "", currentSchool: currentSchool.trim(), aadharNumber: aadharNumber.trim(),
       admissionMonth, monthlyDiscount: Number(monthlyDiscount) || 0,
       // Joining Date — whatever was manually entered; if left blank, auto-
@@ -9405,8 +9418,9 @@ function StudentFormModal({ classes, subjectsList, streams, initial, onClose, on
       </div>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Date of Birth"><input type="date" className={inputCls} style={inputStyle} value={dob} onChange={e => setDob(e.target.value)} /></Field>
-        <Field label="Current School / Institution"><input className={inputCls} style={inputStyle} value={currentSchool} onChange={e => setCurrentSchool(e.target.value)} placeholder="e.g. Delhi Public School" /></Field>
+        <Field label="Email Address (optional)"><input type="email" className={inputCls} style={inputStyle} value={email} onChange={e => setEmail(e.target.value)} placeholder="e.g. student@example.com" /></Field>
       </div>
+      <Field label="Current School / Institution"><input className={inputCls} style={inputStyle} value={currentSchool} onChange={e => setCurrentSchool(e.target.value)} placeholder="e.g. Delhi Public School" /></Field>
       <Field label="Aadhar Number">
         <input className={inputCls} style={inputStyle} value={aadharNumber} onChange={e => setAadharNumber(e.target.value)} placeholder="12-digit Aadhar number" maxLength={14} />
         {dupStudent && (
@@ -10492,6 +10506,7 @@ function CreditFormModal({ onClose, onSave }) {
   const [partyType, setPartyType] = useState("Person");
   const [address, setAddress] = useState("");
   const [mobile, setMobile] = useState("");
+  const [email, setEmail] = useState("");
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayStr());
   const [mode, setMode] = useState("Cash");
@@ -10505,7 +10520,7 @@ function CreditFormModal({ onClose, onSave }) {
   function submit() {
     if (!partyName.trim() || !amount || Number(amount) <= 0) return;
     onSave({
-      direction, partyName: partyName.trim(), partyType, address: address.trim(), mobile: mobile.trim(),
+      direction, partyName: partyName.trim(), partyType, address: address.trim(), mobile: mobile.trim(), email: email.trim(),
       amount: Number(amount) || 0, date, mode,
       bankName: mode === "Online" ? bankName.trim() : "", accountNumber: mode === "Online" ? accountNumber.trim() : "",
       refType: mode === "Online" && refType !== "None" ? refType : "", refNumber: mode === "Online" && refType !== "None" ? refNumber.trim() : "",
@@ -10542,7 +10557,10 @@ function CreditFormModal({ onClose, onSave }) {
         <Field label="Mobile Number"><input className={inputCls} style={inputStyle} value={mobile} onChange={e => setMobile(e.target.value)} placeholder="10-digit mobile number" /></Field>
         <Field label="Amount (₹)"><input type="number" className={inputCls} style={inputStyle} value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" /></Field>
       </div>
-      <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="Address of the other party" /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Email Address (optional)"><input type="email" className={inputCls} style={inputStyle} value={email} onChange={e => setEmail(e.target.value)} placeholder="e.g. partner@example.com" /></Field>
+        <Field label="Address"><input className={inputCls} style={inputStyle} value={address} onChange={e => setAddress(e.target.value)} placeholder="Address of the other party" /></Field>
+      </div>
 
       <div className="grid grid-cols-2 gap-3">
         <Field label="Date"><input type="date" className={inputCls} style={inputStyle} value={date} onChange={e => setDate(e.target.value)} /></Field>
